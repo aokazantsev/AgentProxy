@@ -27,7 +27,10 @@ namespace AgentProxy.Tests
             Run("silent setup overrides", SilentOverrides);
             Run("silent setup rejects unknown", SilentRejectsUnknown);
             Run("dash arguments become slash arguments", DashArguments);
-            Run("engine starts with tray start info", EngineStartsWithTrayStartInfo);
+            Run("readme silent commands parse with real options", ReadmeSilentCommands);
+            Run("json writer round trip", JsonWriterRoundTrip);
+            Run("cleaner removes only our entries", CleanerRemovesOnlyOurs);
+            Run("engine starts with tray start info and stops by token", EngineStartsWithTrayStartInfo);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }
@@ -132,7 +135,6 @@ namespace AgentProxy.Tests
         private static void EngineStatusParse()
         {
             EngineStatus status = EngineStatus.Parse("{\"version\":\"0.1\",\"flows\":12,\"proxy\":{\"host\":\"127.0.0.1\",\"port\":8890,\"running\":true}}");
-            Equal("0.1", status.Version, "version");
             Equal(12, status.Flows, "flows");
             Equal(true, status.ProxyRunning, "running");
             Equal<EngineStatus>(null, EngineStatus.Parse("nope"), "garbage");
@@ -255,7 +257,11 @@ namespace AgentProxy.Tests
                         status = EngineStatus.Fetch(apiPort);
                     }
                     True(status != null && status.ProxyRunning, "engine reported running proxy");
-                    Equal(AppIdentity.Version, status.Version, "engine version");
+                    string runtimeFile = Path.Combine(data, "engine-runtime.json");
+                    True(EngineRuntimeInfo.RequestShutdown(apiPort, runtimeFile), "shutdown accepted");
+                    True(engine.WaitForExit(20000), "engine exited after shutdown");
+                    Equal(0, engine.ExitCode, "exit code");
+                    True(!File.Exists(runtimeFile), "runtime file removed");
                 }
                 finally
                 {
@@ -269,6 +275,57 @@ namespace AgentProxy.Tests
             }
             catch (IOException)
             {
+            }
+        }
+
+        private static void ReadmeSilentCommands()
+        {
+            List<SetupOption> options = SetupProfile.Options();
+            InstallRequest plain = SilentSetup.Parse(CommandLine.Normalize(new[] { "--silent" }), options, @"C:\T", true);
+            True(plain.TargetDirectory == @"C:\T", "default dir");
+            InstallRequest custom = SilentSetup.Parse(CommandLine.Normalize(new[] { "--silent", "--noautostart", @"--dir=D:\AP",
+                "--option:claude=0", "--option:crashReports=1", "/notify" }), options, @"C:\T", true);
+            Equal(false, custom.Has(SetupProfile.ClaudeKey), "claude off");
+            Equal(true, custom.Has(CrashReportConsent.OptionKey), "crash reports on");
+            Equal(false, custom.EnablesAutostart, "autostart off");
+            Equal(@"D:\AP", custom.TargetDirectory, "dir");
+        }
+
+        private static void JsonWriterRoundTrip()
+        {
+            const string source = "{\"a\": [1, 2.5, true, null, \"т\\\"x\\\\\"], \"b\": {}, \"c\": []}";
+            var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
+            object parsed = serializer.DeserializeObject(source);
+            string written = JsonWriter.Write(parsed);
+            Equal(serializer.Serialize(parsed), serializer.Serialize(serializer.DeserializeObject(written)), "round trip");
+            True(written.Contains("\"т\\\"x\\\\\""), "non-ascii kept, escapes kept: " + written);
+        }
+
+        private static void CleanerRemovesOnlyOurs()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "AgentProxyCleaner-" + Guid.NewGuid().ToString("N"));
+            string claudeDir = Path.Combine(root, ".claude");
+            Directory.CreateDirectory(Path.Combine(claudeDir, "skills", "agentproxy"));
+            File.WriteAllText(Path.Combine(claudeDir, "skills", "agentproxy", "SKILL.md"), "x");
+            File.WriteAllText(Path.Combine(claudeDir, "settings.json"),
+                "{\"model\": \"opus\", \"hooks\": {\"SessionStart\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"mine.py\"}]},"
+                + " {\"hooks\": [{\"type\": \"command\", \"command\": \"C:/x/python.exe -I -m agentproxy.cli hook session-start\"}]}],"
+                + " \"UserPromptSubmit\": [{\"hooks\": [{\"type\": \"http\", \"url\": \"http://127.0.0.1:8891/claude/hooks/user-prompt-submit\"}]}]}}");
+            string claudeJson = Path.Combine(root, ".claude.json");
+            File.WriteAllText(claudeJson, "{\"numStartups\": 3, \"mcpServers\": {\"agentproxy\": {\"type\": \"http\"}, \"other\": {\"type\": \"stdio\"}}}");
+            try
+            {
+                Equal<string>(null, new ClaudeConfigCleaner(claudeDir, claudeJson).Clean(), "no problems");
+                True(!Directory.Exists(Path.Combine(claudeDir, "skills", "agentproxy")), "skill removed");
+                var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
+                string settings = serializer.Serialize(serializer.DeserializeObject(File.ReadAllText(Path.Combine(claudeDir, "settings.json"))));
+                Equal("{\"model\":\"opus\",\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"mine.py\"}]}]}}", settings, "settings");
+                string json = serializer.Serialize(serializer.DeserializeObject(File.ReadAllText(claudeJson)));
+                Equal("{\"numStartups\":3,\"mcpServers\":{\"other\":{\"type\":\"stdio\"}}}", json, "claude.json");
+            }
+            finally
+            {
+                Directory.Delete(root, true);
             }
         }
 

@@ -32,9 +32,9 @@
    Ключи пишутся и через `/` (`/silent`), но из Git Bash — только через `--`: Git Bash превращает `/silent` в путь.
 4. Проверить:
    ```bash
-   "$LOCALAPPDATA/Programs/AgentProxy/agentproxy.cmd" status
+   "$LOCALAPPDATA/Programs/AgentProxy/agentproxy.cmd" status --wait 30
    ```
-   `"running": true` — движок работает, `claude.mcp`, `claude.skill`, `claude.hooks` — интеграция на месте.
+   Команда ждёт до 30 секунд, пока движок поднимется после установки. `"running": true` и код 0 — движок работает, `claude.mcp`, `claude.skill`, `claude.hooks` — интеграция на месте.
 5. Сказать пользователю: MCP-сервер появится в новых сессиях Claude Code; скилл `agentproxy` подхватывается сразу и
    описывает подключение устройства.
 

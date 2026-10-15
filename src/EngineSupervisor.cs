@@ -24,6 +24,7 @@ namespace AgentProxy
         private readonly StringBuilder stderrTail = new StringBuilder();
         private Process process;
         private DateTime startedAt;
+        private long logOffset;
         private bool stopping;
         private bool disposed;
         private int healthInFlight;
@@ -52,6 +53,7 @@ namespace AgentProxy
         public void Start()
         {
             stopping = false;
+            restartTimer.Stop();
             policy.Reset();
             Launch();
             healthTimer.Start();
@@ -75,7 +77,7 @@ namespace AgentProxy
 
         private void Launch()
         {
-            if (disposed || stopping) return;
+            if (disposed || stopping || process != null) return;
             Settings = EngineSettings.Load();
             string python = EngineCli.PythonPath(installDirectory);
             if (!File.Exists(python))
@@ -86,6 +88,7 @@ namespace AgentProxy
             }
             ProcessStartInfo info = EngineStartInfo(installDirectory, Process.GetCurrentProcess().Id);
             lock (stderrTail) stderrTail.Length = 0;
+            logOffset = EngineLogTail.Length();
             try
             {
                 process = new Process { StartInfo = info, EnableRaisingEvents = true };
@@ -97,6 +100,8 @@ namespace AgentProxy
             catch (Win32Exception error)
             {
                 AppLog.Append("engine start failed: " + error.Message);
+                process = null;
+                startedAt = DateTime.UtcNow;
                 SetState(EngineState.Crashed, error.Message);
                 ScheduleRestart(-1);
                 return;
@@ -156,8 +161,8 @@ namespace AgentProxy
             }
             else
             {
-                string crash = EngineLogTail.LastCrash();
-                SetState(next, "движок упал (код " + code + ")");
+                string crash = EngineLogTail.LastCrashSince(logOffset);
+                SetState(next, code == RestartPolicy.ExitDataDir ? "движок не может писать в " + UserDataPaths.Directory : "движок упал (код " + code + ")");
                 ReportCrash(crash ?? ("exit code " + code + (stderr.Length > 0 ? Environment.NewLine + stderr : "")));
             }
             ScheduleRestart(code);
@@ -216,7 +221,7 @@ namespace AgentProxy
             {
                 if (!current.HasExited)
                 {
-                    EngineRuntimeInfo.RequestShutdown(Settings.ApiPort);
+                    EngineRuntimeInfo.RequestShutdown(Settings.ApiPort, EngineRuntimeInfo.FilePath);
                     if (!current.WaitForExit(StopWaitMs))
                     {
                         AppLog.Append("engine did not stop in time, killing");

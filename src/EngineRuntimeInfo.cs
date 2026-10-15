@@ -14,11 +14,11 @@ namespace AgentProxy
 
         public static readonly string FilePath = UserDataPaths.File("engine-runtime.json");
 
-        public static string Token()
+        public static string Token(string runtimeFile)
         {
             try
             {
-                var data = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(FilePath, Encoding.UTF8));
+                var data = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(runtimeFile, Encoding.UTF8));
                 object token;
                 return data != null && data.TryGetValue("token", out token) ? token as string : null;
             }
@@ -40,9 +40,9 @@ namespace AgentProxy
             }
         }
 
-        public static bool RequestShutdown(int apiPort)
+        public static bool RequestShutdown(int apiPort, string runtimeFile)
         {
-            string token = Token();
+            string token = Token(runtimeFile);
             if (token == null) return false;
             try
             {

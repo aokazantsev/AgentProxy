@@ -5,6 +5,7 @@ namespace AgentProxy
     internal sealed class RestartPolicy
     {
         public const int ExitPortBusy = 3;
+        public const int ExitDataDir = 4;
         private static readonly int[] DelaysSeconds = { 2, 5, 10, 30, 60 };
         private const int PortBusyDelaySeconds = 30;
         private static readonly TimeSpan StableRun = TimeSpan.FromMinutes(2);

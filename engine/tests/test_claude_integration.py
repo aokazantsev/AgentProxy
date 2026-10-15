@@ -207,5 +207,77 @@ def test_seen_versions_prunes_old(env):
 def test_is_ours_detection(env):
     assert integration.is_ours(integration.session_start_hook(env))
     assert integration.is_ours(integration.prompt_hook(env))
+    assert integration.is_ours({"type": "command", "command": "x.exe", "args": ["-m", "agentproxy.cli"]})
     assert not integration.is_ours({"type": "command", "command": "python other.py"})
     assert not integration.is_ours("garbage")
+
+
+def test_session_start_hook_is_plain_command_string(env):
+    hook = integration.session_start_hook(env)
+    assert set(hook) == {"type", "command", "timeout"}
+    assert "\\" not in hook["command"]
+    assert hook["command"].endswith(" -I -m agentproxy.cli hook session-start")
+    spaced = integration.session_start_command(r"C:\Users\John Doe\AppData\python.exe")
+    assert spaced == '"C:/Users/John Doe/AppData/python.exe" -I -m agentproxy.cli hook session-start'
+
+
+def test_refresh_replaces_outdated_exec_form_hook(env):
+    integration.install(env, now=1)
+    settings = read_json(env.settings_json)
+    settings["hooks"]["SessionStart"] = [{"hooks": [{"type": "command", "command": env.python_exe,
+                                                      "args": ["-I", "-m", "agentproxy.cli", "hook", "session-start"]}]}]
+    write_json(env.settings_json, settings)
+    assert integration.status(env)["hooks"] is False
+    assert integration.refresh(env) == "refreshed"
+    session_hooks = read_json(env.settings_json)["hooks"]["SessionStart"]
+    assert session_hooks == [{"hooks": [integration.session_start_hook(env)]}]
+
+
+def test_hooks_with_other_port_are_not_current(env):
+    integration.install(env)
+    moved = integration.Environment(**dict(env.__dict__, api_port=9999))
+    assert integration.status(moved)["hooks"] is False
+    assert integration.status(moved)["mcp"] is False
+
+
+def fake_claude(tmp_path, exit_code, sleep_seconds=0):
+    log = tmp_path / "claude-calls.txt"
+    script = tmp_path / "fake-claude.cmd"
+    lines = ["@echo off", 'echo %*>>"{0}"'.format(log)]
+    if sleep_seconds:
+        lines.append("ping -n {0} 127.0.0.1 >nul".format(sleep_seconds + 1))
+    lines.append("exit /b {0}".format(exit_code))
+    script.write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
+    return str(script), log
+
+
+def with_cli(env, cli):
+    return integration.Environment(**dict(env.__dict__, claude_cli=cli))
+
+
+def test_mcp_via_cli_success(env, tmp_path):
+    cli, log = fake_claude(tmp_path, 0)
+    assert integration.install_mcp(with_cli(env, cli)) == "cli"
+    calls = log.read_text().splitlines()
+    assert calls[0].startswith("mcp remove --scope user agentproxy")
+    assert calls[1] == "mcp add --scope user --transport http agentproxy http://127.0.0.1:8891/mcp"
+    assert not os.path.exists(env.claude_json)
+
+
+def test_mcp_via_cli_failure_falls_back_to_file(env, tmp_path):
+    cli, _ = fake_claude(tmp_path, 1)
+    assert integration.install_mcp(with_cli(env, cli)) == "file"
+    assert read_json(env.claude_json)["mcpServers"]["agentproxy"]["url"] == env.mcp_url
+
+
+def test_mcp_via_hanging_cli_falls_back_to_file(env, tmp_path, monkeypatch):
+    monkeypatch.setattr(integration, "CLI_TIMEOUT_SECONDS", 1)
+    cli, _ = fake_claude(tmp_path, 0, sleep_seconds=20)
+    assert integration.install_mcp(with_cli(env, cli)) == "file"
+
+
+def test_claude_cli_in_current_directory_is_ignored(tmp_path, monkeypatch):
+    (tmp_path / "claude.cmd").write_text("@echo off\r\n", encoding="ascii")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+    assert integration.find_claude_cli() is None

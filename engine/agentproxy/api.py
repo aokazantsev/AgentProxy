@@ -94,14 +94,6 @@ class WaitHandler(BaseHandler):
     async def get(self):
         await self.run_tool("wait_for_flow", self.query_arguments())
 
-    async def post(self):
-        try:
-            arguments = self.json_body()
-        except ToolError as error:
-            self.write_json({"error": str(error)}, 400)
-            return
-        await self.run_tool("wait_for_flow", arguments)
-
 
 class FlowHandler(BaseHandler):
     async def get(self, flow_id):

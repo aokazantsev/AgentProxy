@@ -12,8 +12,9 @@ STATUS_TIMEOUT_SECONDS = 1.5
 
 def fetch_status(env):
     url = "http://127.0.0.1:{0}/api/status".format(env.api_port)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(url, timeout=STATUS_TIMEOUT_SECONDS) as response:
+        with opener.open(url, timeout=STATUS_TIMEOUT_SECONDS) as response:
             return json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
         return None

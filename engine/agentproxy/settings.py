@@ -1,16 +1,12 @@
 import json
-import logging
 import os
 from dataclasses import dataclass, fields, replace
-
-log = logging.getLogger("agentproxy.settings")
 
 FILE_NAME = "settings.json"
 
 
 @dataclass(frozen=True)
 class Settings:
-    listen_host: str = "127.0.0.1"
     proxy_port: int = 8890
     api_port: int = 8891
     max_flows: int = 5000
@@ -38,9 +34,7 @@ def _coerce(name, value, default):
         if not low <= value <= high:
             raise ValueError("{0} must be between {1} and {2}".format(name, low, high))
         return value
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("{0} must be a non-empty string".format(name))
-    return value.strip()
+    raise ValueError("{0} has unsupported type".format(name))
 
 
 def parse(raw):

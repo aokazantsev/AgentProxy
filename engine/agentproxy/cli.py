@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 
 from . import VERSION, logs, paths
 from .claude import hooks, integration
@@ -9,6 +10,7 @@ from .claude.jsonfile import JsonFileError
 
 EXIT_OK = 0
 EXIT_FAILED = 1
+WAIT_POLL_SECONDS = 0.5
 
 
 def emit(data):
@@ -27,12 +29,20 @@ def read_hook_input():
     return data if isinstance(data, dict) else {}
 
 
+def is_running(status):
+    return isinstance(status, dict) and bool((status.get("proxy") or {}).get("running"))
+
+
 def command_status(args):
     env = integration.detect(use_cli=False)
+    deadline = time.monotonic() + args.wait
     status = hooks.fetch_status(env)
-    emit({"version": VERSION, "engine": status, "running": status is not None,
+    while not is_running(status) and time.monotonic() < deadline:
+        time.sleep(WAIT_POLL_SECONDS)
+        status = hooks.fetch_status(env)
+    emit({"version": VERSION, "engine": status, "running": is_running(status),
           "claude": integration.status(env)})
-    return EXIT_OK if status is not None else EXIT_FAILED
+    return EXIT_OK if is_running(status) else EXIT_FAILED
 
 
 def command_claude(args):
@@ -47,7 +57,7 @@ def command_claude(args):
             result = {"result": integration.refresh(env)}
         else:
             result = integration.status(env)
-    except (JsonFileError, OSError) as error:
+    except (JsonFileError, OSError, ValueError) as error:
         log.error("claude %s failed: %s", args.action, error)
         emit({"error": str(error)})
         return EXIT_FAILED
@@ -74,17 +84,15 @@ def main(argv=None):
         sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="agentproxy", description="AgentProxy {0}".format(VERSION))
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("status", help="engine and Claude integration state as JSON")
+    status = sub.add_parser("status", help="engine and Claude integration state as JSON")
+    status.add_argument("--wait", type=int, default=0, metavar="SECONDS",
+                        help="wait up to SECONDS for the proxy to start listening")
     claude = sub.add_parser("claude", help="Claude Code integration: MCP server, skill, hooks")
     claude.add_argument("action", choices=["install", "uninstall", "refresh", "status"])
     claude.add_argument("--no-cli", action="store_true", help="edit ~/.claude.json directly instead of `claude mcp`")
     hook = sub.add_parser("hook", help="entry point for Claude Code hooks")
     hook.add_argument("event", choices=["session-start"])
-    sub.add_parser("version")
     args = parser.parse_args(argv)
-    if args.command == "version":
-        sys.stdout.write(VERSION + "\n")
-        return EXIT_OK
     logs.setup(paths.ensure(paths.data_dir()), file_name="cli.log")
     handlers = {"status": command_status, "claude": command_claude, "hook": command_hook}
     return handlers[args.command](args)

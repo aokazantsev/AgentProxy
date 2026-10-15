@@ -24,10 +24,6 @@ def python_executable():
     return os.path.join(install_dir(), "runtime", "python", "python.exe")
 
 
-def changelog_path():
-    return os.path.join(install_dir(), "CHANGELOG.md")
-
-
 def ensure(directory):
     os.makedirs(directory, exist_ok=True)
     return directory

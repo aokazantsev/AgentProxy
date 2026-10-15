@@ -17,6 +17,10 @@ def clean():
                     dirs.remove(name)
                     removed += 1
     print("removed {0} __pycache__ folders".format(removed))
+    launchers = os.path.join(ROOT, "runtime", "python", "Lib", "site-packages", "bin")
+    if os.path.isdir(launchers):
+        shutil.rmtree(launchers)
+        print("removed pip launchers")
 
 
 def checksum(path):

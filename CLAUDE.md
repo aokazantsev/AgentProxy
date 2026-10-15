@@ -10,6 +10,9 @@
   SQLite, HTTP API и MCP на tornado, интеграция с Claude Code, командная строка.
 - Движок запускается как `runtime\python\python.exe -I -m agentproxy --parent-pid <pid трея>` и сам выходит, когда
   трей умер. Коды выхода: 0 — штатно, 1 — падение, 3 — порт занят, 4 — нет папки данных.
+- `Recorder` пишет завершённые запросы, сбои `CONNECT` и отказ клиента от сертификата прокси; SSE и ответы больше
+  `max_body_bytes` пропускает потоком и сохраняет только начало тела. `OwnPortsGuard` не пускает через прокси запросы к
+  его же портам: иначе любой клиент прокси читал бы историю через API.
 - MCP-инструменты и HTTP API — один набор (`service.TOOLS`): новый инструмент — запись в `TOOLS`, метод в
   `ProxyService`, строка в `SKILL.md` и README (тест сверяет `SKILL.md` с `TOOLS`).
 - API слушает только `127.0.0.1` и отклоняет чужие `Host` и `Origin` (защита от DNS rebinding и запросов из браузера).
@@ -55,8 +58,7 @@
 
 ## Общее с другими pet-проектами
 
-Проект — один из четырёх pet-проектов (AgentVpnGuard, DevMonitor, AgentGlow, AgentProxy). Общие правила —
-`C:\Users\aokaz\ai-memory\dev-tools\pet-projects.md`.
+Проект — один из четырёх pet-проектов (AgentVpnGuard, DevMonitor, AgentGlow, AgentProxy), они устроены одинаково.
 
 - **Общие файлы** взяты у AgentGlow с заменой `namespace`: `installer\setup\{SetupForm, Installation, InstallTarget,
   Payload, SetupOption, SetupField, InstallRequest, SetupLog}.cs`, `installer\common\RunningApp.cs`,

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Windows.Forms;
 
 namespace AgentProxy
 {
@@ -10,17 +11,46 @@ namespace AgentProxy
         private const string DirectoryPrefix = "/dir=";
         private const string NoAutostartFlag = "/noautostart";
         private const string OptionPrefix = "/option:";
+        public const string NotifyFlag = "/notify";
         public const int ExitOk = 0;
         public const int ExitFailed = 1;
         public const int ExitBadArguments = 2;
 
         public static bool IsRequested(string[] args)
         {
+            return HasFlag(args, SilentFlag);
+        }
+
+        private static bool HasFlag(string[] args, string flag)
+        {
             foreach (string arg in args)
             {
-                if (string.Equals(arg, SilentFlag, StringComparison.OrdinalIgnoreCase)) return true;
+                if (string.Equals(arg, flag, StringComparison.OrdinalIgnoreCase)) return true;
             }
             return false;
+        }
+
+        private static void ReportFailure(string targetDirectory, Exception error)
+        {
+            string executable = Path.Combine(targetDirectory, AppIdentity.ExecutableName);
+            bool relaunched = false;
+            if (File.Exists(executable))
+            {
+                try
+                {
+                    SetupProfile.Launch(executable);
+                    relaunched = true;
+                }
+                catch (System.ComponentModel.Win32Exception launchError)
+                {
+                    SetupLog.Append("relaunch failed: " + launchError.Message);
+                }
+            }
+            MessageBox.Show(
+                "Обновление " + AppIdentity.Name + " не установилось: " + error.Message + Environment.NewLine + Environment.NewLine
+                + (relaunched ? "Прежняя версия запущена снова. " : "")
+                + "Подробности — в " + SetupLog.FilePath + ". Скачанный установщик можно запустить ещё раз двойным щелчком.",
+                AppIdentity.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         public static InstallRequest Parse(string[] args, List<SetupOption> options, string defaultDirectory, bool defaultAutostart)
@@ -31,6 +61,7 @@ namespace AgentProxy
             foreach (string arg in args)
             {
                 if (string.Equals(arg, SilentFlag, StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(arg, NotifyFlag, StringComparison.OrdinalIgnoreCase)) continue;
                 if (string.Equals(arg, NoAutostartFlag, StringComparison.OrdinalIgnoreCase))
                 {
                     request.EnablesAutostart = false;
@@ -90,6 +121,7 @@ namespace AgentProxy
             catch (Exception error)
             {
                 SetupLog.Append("silent install failed: " + error);
+                if (HasFlag(args, NotifyFlag)) ReportFailure(request.TargetDirectory, error);
                 return ExitFailed;
             }
             foreach (string note in installation.Notes) SetupLog.Append("note: " + note);

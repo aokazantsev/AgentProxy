@@ -4,7 +4,7 @@ import json
 import pytest
 
 from agentproxy import VERSION, mcp
-from agentproxy.service import ProxyService, ToolError, call_tool, public_tools
+from agentproxy.service import UNTRUSTED_NOTE, ProxyService, ToolError, call_tool, public_tools
 
 from conftest import make_record
 
@@ -149,3 +149,43 @@ def test_mcp_batch(service):
     response = rpc(service, [{"jsonrpc": "2.0", "id": 1, "method": "ping"},
                              {"jsonrpc": "2.0", "method": "notifications/initialized"}])
     assert response == [{"jsonrpc": "2.0", "id": 1, "result": {}}]
+
+
+@pytest.mark.parametrize("raw,expected", [(True, True), (False, False), ("true", True), ("1", True), ("yes", True),
+                                          ("false", False), ("0", False), ("no", False), ("", False)])
+def test_failed_only_parses_query_strings(service, store, raw, expected):
+    store.insert(make_record(1, status=500))
+    store.insert(make_record(2, status=200))
+    flows = service.list_flows({"failed_only": raw})["flows"]
+    assert [flow["id"] for flow in flows] == (["flow-1"] if expected else ["flow-2", "flow-1"])
+
+
+def test_failed_only_rejects_garbage(service):
+    with pytest.raises(ToolError):
+        service.list_flows({"failed_only": "maybe"})
+
+
+def test_mcp_params_must_be_object(service):
+    response = rpc(service, {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": [1]})
+    assert response["error"]["code"] == mcp.INVALID_PARAMS
+
+
+def test_mcp_empty_batch_is_invalid(service):
+    assert rpc(service, [])["error"]["code"] == mcp.INVALID_REQUEST
+
+
+def test_mcp_unexpected_failure_is_internal_error(service, monkeypatch):
+    def broken(*args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mcp, "negotiate", broken)
+    response = rpc(service, {"jsonrpc": "2.0", "id": 9, "method": "initialize", "params": {}})
+    assert response["error"]["code"] == mcp.INTERNAL_ERROR
+    assert response["id"] == 9
+
+
+def test_instructions_and_flow_tools_warn_about_untrusted_content():
+    assert UNTRUSTED_NOTE in mcp.INSTRUCTIONS
+    descriptions = {tool["name"]: tool["description"] for tool in public_tools()}
+    for name in ("list_flows", "get_flow", "wait_for_flow"):
+        assert UNTRUSTED_NOTE in descriptions[name]

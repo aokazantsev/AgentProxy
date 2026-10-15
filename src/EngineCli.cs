@@ -41,19 +41,21 @@ namespace AgentProxy
             {
                 using (Process process = Process.Start(StartInfo(installDirectory, "-m agentproxy.cli " + cliArguments)))
                 {
+                    var output = new StringBuilder();
                     var error = new StringBuilder();
+                    process.OutputDataReceived += (sender, e) => { if (e.Data != null) lock (output) output.AppendLine(e.Data); };
                     process.ErrorDataReceived += (sender, e) => { if (e.Data != null) lock (error) error.AppendLine(e.Data); };
+                    process.BeginOutputReadLine();
                     process.BeginErrorReadLine();
-                    string output = process.StandardOutput.ReadToEnd();
                     if (!process.WaitForExit(TimeoutMs))
                     {
-                        process.Kill();
+                        Kill(process);
                         result.Problem = "agentproxy " + cliArguments + " не завершился за " + TimeoutMs / 1000 + " с";
                         return result;
                     }
                     process.WaitForExit();
                     result.ExitCode = process.ExitCode;
-                    result.Output = output;
+                    lock (output) result.Output = output.ToString();
                     lock (error) result.Errors = error.ToString();
                 }
             }
@@ -66,6 +68,20 @@ namespace AgentProxy
                 result.Problem = failure.Message;
             }
             return result;
+        }
+
+        private static void Kill(Process process)
+        {
+            try
+            {
+                process.Kill();
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            catch (Win32Exception)
+            {
+            }
         }
     }
 }

@@ -14,6 +14,7 @@ from . import VERSION, logs, paths
 from . import settings as settings_module
 from .api import make_app
 from .claude import integration
+from .guard import OwnPortsGuard
 from .recorder import Recorder
 from .service import ProxyService
 from .store import FlowStore
@@ -25,6 +26,7 @@ EXIT_CRASH = 1
 EXIT_PORT_BUSY = 3
 EXIT_DATA_DIR = 4
 RUNTIME_FILE = "engine-runtime.json"
+LOCAL_HOST = "127.0.0.1"
 PROBE_INTERVAL_SECONDS = 5
 STARTUP_PROBE_SECONDS = 0.25
 
@@ -80,7 +82,7 @@ def write_runtime(data_dir, payload):
 async def probe_proxy(service):
     seen_listening = False
     while True:
-        running = await asyncio.to_thread(proxy_listening, service.settings.listen_host, service.settings.proxy_port)
+        running = await asyncio.to_thread(proxy_listening, LOCAL_HOST, service.settings.proxy_port)
         if running != service.proxy_running:
             log.info("proxy %s", "listening" if running else "not listening")
         service.proxy_running = running
@@ -95,9 +97,10 @@ async def serve(current, data_dir, parent_pid):
     cert_dir = paths.ensure(os.path.join(data_dir, "certs"))
     store = FlowStore(os.path.join(data_dir, "flows.db"), current.max_flows)
     service = ProxyService(store, current, data_dir, cert_dir)
-    opts = options.Options(listen_host=current.listen_host, listen_port=current.proxy_port, confdir=cert_dir,
+    opts = options.Options(listen_host=LOCAL_HOST, listen_port=current.proxy_port, confdir=cert_dir,
                            ssl_insecure=not current.verify_upstream)
     master = DumpMaster(opts, with_termlog=False, with_dumper=False)
+    master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
     master.addons.add(Recorder(store, current.max_body_bytes))
     loop = asyncio.get_running_loop()
 
@@ -107,13 +110,12 @@ async def serve(current, data_dir, parent_pid):
     token = secrets.token_hex(16)
     context = {"service": service, "token": token, "shutdown": shutdown,
                "claude_env": integration.detect(use_cli=False)}
-    server = make_app(context).listen(current.api_port, address="127.0.0.1", xheaders=False)
-    runtime_path = write_runtime(data_dir, {"pid": os.getpid(), "version": VERSION, "api_port": current.api_port,
-                                            "proxy_port": current.proxy_port, "token": token})
+    server = make_app(context).listen(current.api_port, address=LOCAL_HOST, xheaders=False)
+    runtime_path = write_runtime(data_dir, {"token": token})
     if parent_pid:
         watch_parent(parent_pid, shutdown)
     prober = asyncio.ensure_future(probe_proxy(service))
-    log.info("api on 127.0.0.1:%s, proxy on %s:%s", current.api_port, current.listen_host, current.proxy_port)
+    log.info("api on %s:%s, proxy on %s:%s", LOCAL_HOST, current.api_port, LOCAL_HOST, current.proxy_port)
     try:
         await master.run()
     finally:
@@ -129,7 +131,6 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="agentproxy-engine")
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--parent-pid", type=int, default=0)
-    parser.add_argument("--console", action="store_true")
     args = parser.parse_args(argv)
     data_dir = args.data_dir or paths.data_dir()
     if args.data_dir:
@@ -139,7 +140,7 @@ def main(argv=None):
     except OSError as error:
         sys.stderr.write("data dir unavailable: {0}\n".format(error))
         return EXIT_DATA_DIR
-    logs.setup(data_dir, console=args.console)
+    logs.setup(data_dir)
     import mitmproxy.version
     log.info("AgentProxy engine %s starting: python %s, mitmproxy %s, %s, user %s, data %s", VERSION,
              platform.python_version(), mitmproxy.version.VERSION, platform.platform(),
@@ -148,12 +149,11 @@ def main(argv=None):
     for problem in problems:
         log.warning("settings: %s", problem)
     log.info("settings: %s", current)
-    for name, host, port in (("proxy", current.listen_host, current.proxy_port),
-                             ("api", "127.0.0.1", current.api_port)):
-        problem = port_problem(host, port)
+    for name, port in (("proxy", current.proxy_port), ("api", current.api_port)):
+        problem = port_problem(LOCAL_HOST, port)
         if problem:
             log.error("PORT BUSY: %s port %s:%s is in use (%s); change it in settings.json or close the program "
-                      "holding it", name, host, port, problem)
+                      "holding it", name, LOCAL_HOST, port, problem)
             return EXIT_PORT_BUSY
     try:
         asyncio.run(serve(current, data_dir, args.parent_pid))

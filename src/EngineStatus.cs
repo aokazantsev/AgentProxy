@@ -11,7 +11,6 @@ namespace AgentProxy
     {
         private const int TimeoutMs = 2000;
 
-        public string Version;
         public bool ProxyRunning;
         public int Flows;
 
@@ -33,7 +32,6 @@ namespace AgentProxy
             if (data == null) return null;
             var status = new EngineStatus();
             object value;
-            if (data.TryGetValue("version", out value)) status.Version = value as string;
             if (data.TryGetValue("flows", out value) && value is int) status.Flows = (int)value;
             if (data.TryGetValue("proxy", out value))
             {

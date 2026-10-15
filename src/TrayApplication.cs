@@ -8,6 +8,7 @@ namespace AgentProxy
     internal sealed class TrayApplication : ApplicationContext
     {
         private const int TooltipLimit = 63;
+        private const int ProblemTextLimit = 90;
 
         private readonly string installDirectory = Application.StartupPath;
         private readonly NotifyIcon tray = new NotifyIcon();
@@ -71,7 +72,7 @@ namespace AgentProxy
             string line = StateText(state, settings);
             stateItem.Text = AppIdentity.Name + " " + AppIdentity.Version + " — " + line;
             claudeStateItem.Text = ClaudeText();
-            claudeItem.Text = claude.Installed == true ? "Отключить от Claude Code" : "Подключить к Claude Code";
+            claudeItem.Text = ClaudeActionText();
             claudeItem.Enabled = !claude.IsBusy;
             monitorItem.Enabled = state == EngineState.Running || state == EngineState.ProxyNotListening;
             tray.Icon = TrayIcons.For(state);
@@ -95,13 +96,26 @@ namespace AgentProxy
             return detail ?? state.ToString();
         }
 
+        private string ClaudeActionText()
+        {
+            if (claude.Installed != true) return "Подключить к Claude Code";
+            return claude.Complete ? "Отключить от Claude Code" : "Переподключить к Claude Code";
+        }
+
         private string ClaudeText()
         {
             if (claude.IsBusy) return "Claude Code: обновляю интеграцию…";
+            if (claude.LastProblem != null) return "Claude Code: ошибка — " + Shorten(claude.LastProblem, ProblemTextLimit);
             if (claude.Installed == null) return "Claude Code: проверяю…";
             if (claude.Installed == false) return "Claude Code: не подключён";
             if (!claude.Complete) return "Claude Code: подключён не полностью — переподключи";
             return "Claude Code: подключён";
+        }
+
+        private static string Shorten(string text, int limit)
+        {
+            string line = text.Replace("\r", " ").Replace("\n", " ").Trim();
+            return line.Length > limit ? line.Substring(0, limit) + "…" : line;
         }
 
         private void NotifyProblem(EngineState state)

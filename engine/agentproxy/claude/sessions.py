@@ -6,6 +6,8 @@ from . import jsonfile
 FILE_NAME = "claude-sessions.json"
 MAX_SESSIONS = 300
 MAX_AGE_SECONDS = 30 * 24 * 3600
+SAVE_ATTEMPTS = 5
+SAVE_RETRY_SECONDS = 0.05
 
 
 class SeenVersions:
@@ -32,4 +34,10 @@ class SeenVersions:
         if len(fresh) > MAX_SESSIONS:
             newest = sorted(fresh.items(), key=lambda item: item[1].get("seen", 0), reverse=True)[:MAX_SESSIONS]
             fresh = dict(newest)
-        jsonfile.save(self.path, fresh)
+        for _ in range(SAVE_ATTEMPTS):
+            try:
+                jsonfile.save(self.path, fresh)
+                return True
+            except OSError:
+                time.sleep(SAVE_RETRY_SECONDS)
+        return False

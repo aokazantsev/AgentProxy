@@ -9,13 +9,14 @@ namespace AgentProxy
     internal sealed class UpdateForm : Form
     {
         private const int ContentWidth = 420;
-        private const string SilentSetupFlag = "/silent";
+        private const string SetupArguments = "/silent /notify";
 
         private static UpdateForm openForm;
 
         private readonly Label status = new Label();
         private readonly TextBox pathBox = new TextBox();
         private readonly FlowLayoutPanel fileButtons = new FlowLayoutPanel();
+        private readonly Button installNow = new Button();
         private string downloadedPath;
 
         public static void ShowSingle()
@@ -61,7 +62,8 @@ namespace AgentProxy
             fileButtons.AutoSize = true;
             fileButtons.Visible = false;
             fileButtons.Margin = new Padding(0, 6, 0, 0);
-            var installNow = new Button { Text = "Установить сейчас", AutoSize = true };
+            installNow.Text = "Установить сейчас";
+            installNow.AutoSize = true;
             installNow.Click += (sender, e) => InstallNow();
             fileButtons.Controls.Add(installNow);
             var openFolder = new Button { Text = "Открыть папку", AutoSize = true };
@@ -99,7 +101,8 @@ namespace AgentProxy
                 Report("Есть версия " + release.VersionText + ", скачиваю установщик (" + (release.Size / 1024 / 1024.0).ToString("0.0") + " МБ)…", null);
                 string path = UpdateChecker.Download(release);
                 AppLog.Append("update downloaded: " + path);
-                Report("Скачана версия " + release.VersionText + ", контрольная сумма сверена с GitHub. «Установить сейчас» поставит её "
+                Report("Скачана версия " + release.VersionText + (release.Sha256 != null ? ", контрольная сумма сверена с GitHub" : ", в релизе нет контрольной суммы — файл не сверен")
+                    + ". «Установить сейчас» поставит её "
                     + "поверх текущей: программа перезапустится, настройки, история запросов и сертификат сохранятся.", path);
             }
             catch (Exception error)
@@ -133,16 +136,18 @@ namespace AgentProxy
 
         private void InstallNow()
         {
+            installNow.Enabled = false;
             try
             {
                 AppLog.Append("update install started: " + downloadedPath);
-                Process.Start(new ProcessStartInfo(downloadedPath, SilentSetupFlag) { UseShellExecute = false });
+                Process.Start(new ProcessStartInfo(downloadedPath, SetupArguments) { UseShellExecute = false });
                 status.Text = "Устанавливаю… Программа закроется и запустится заново.";
             }
             catch (System.ComponentModel.Win32Exception error)
             {
                 AppLog.Append("update install failed: " + error.Message);
                 status.Text = "Не удалось запустить установщик: " + error.Message;
+                installNow.Enabled = true;
             }
         }
 

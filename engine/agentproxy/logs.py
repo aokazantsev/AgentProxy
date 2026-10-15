@@ -11,7 +11,7 @@ BACKUPS = 3
 QUIET_LOGGERS = ("mitmproxy", "tornado.access", "asyncio", "hpack", "urllib3")
 
 
-def setup(directory, file_name="engine.log", console=False):
+def setup(directory, file_name="engine.log"):
     os.makedirs(directory, exist_ok=True)
     root = logging.getLogger()
     for handler in list(root.handlers):
@@ -20,15 +20,10 @@ def setup(directory, file_name="engine.log", console=False):
         os.path.join(directory, file_name), maxBytes=MAX_BYTES, backupCount=BACKUPS, encoding="utf-8")
     handler.setFormatter(logging.Formatter(FORMAT, DATE_FORMAT))
     root.addHandler(handler)
-    if console:
-        stream = logging.StreamHandler(sys.stderr)
-        stream.setFormatter(logging.Formatter(FORMAT, DATE_FORMAT))
-        root.addHandler(stream)
     root.setLevel(logging.INFO)
     for name in QUIET_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
     sys.excepthook = _log_uncaught
-    return os.path.join(directory, file_name)
 
 
 def _log_uncaught(kind, value, trace):

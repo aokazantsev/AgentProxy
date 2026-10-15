@@ -14,6 +14,7 @@ STATE_FILE = "claude-integration.json"
 CLI_MODULE = "agentproxy.cli"
 HOOK_PATH = "/claude/hooks/user-prompt-submit"
 WHATS_NEW_DAYS = 3
+CLI_TIMEOUT_SECONDS = 60
 SKILL_TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SKILL.md")
 
 
@@ -63,12 +64,26 @@ def detect(use_cli=True):
     return Environment(
         claude_dir=claude_dir, claude_json=claude_json, data_dir=data_dir, install_dir=paths.install_dir(),
         python_exe=paths.python_executable(), proxy_port=current.proxy_port, api_port=current.api_port,
-        claude_cli=shutil.which("claude") if use_cli else None)
+        claude_cli=find_claude_cli() if use_cli else None)
+
+
+def find_claude_cli():
+    os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+    found = shutil.which("claude")
+    if found and os.path.dirname(os.path.abspath(found)).lower() == os.getcwd().lower():
+        return None
+    return found
+
+
+def session_start_command(python_exe):
+    path = python_exe.replace("\\", "/")
+    if " " in path:
+        path = '"' + path + '"'
+    return path + " -I -m " + CLI_MODULE + " hook session-start"
 
 
 def session_start_hook(env):
-    return {"type": "command", "command": env.python_exe,
-            "args": ["-I", "-m", CLI_MODULE, "hook", "session-start"], "timeout": 10}
+    return {"type": "command", "command": session_start_command(env.python_exe), "timeout": 10}
 
 
 def prompt_hook(env):
@@ -139,19 +154,31 @@ def hooks_installed(env):
         settings = jsonfile.load(env.settings_json, {})
     except jsonfile.JsonFileError:
         return False
+    expected = {"SessionStart": session_start_hook(env), "UserPromptSubmit": prompt_hook(env)}
     found = set()
-    for event, groups in (settings.get("hooks") or {}).items():
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    for event, groups in (hooks if isinstance(hooks, dict) else {}).items():
         for group in groups if isinstance(groups, list) else []:
             for hook in (group.get("hooks") or []) if isinstance(group, dict) else []:
-                if is_ours(hook):
+                if hook == expected.get(event):
                     found.add(event)
-    return {"SessionStart", "UserPromptSubmit"} <= found
+    return set(expected) <= found
 
 
 def _run_cli(env, args):
-    completed = subprocess.run([env.claude_cli] + args, capture_output=True, text=True, timeout=60,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return completed.returncode, (completed.stdout + completed.stderr).strip()
+    try:
+        process = subprocess.Popen([env.claude_cli] + args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError as error:
+        return -1, str(error)
+    try:
+        output, _ = process.communicate(timeout=CLI_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        process.kill()
+        return -1, "claude {0} timed out after {1} s".format(" ".join(args), CLI_TIMEOUT_SECONDS)
+    return process.returncode, output.decode("utf-8", errors="replace").strip()
 
 
 def install_mcp(env):
@@ -250,13 +277,11 @@ def install(env, now=None):
         "version": VERSION,
         "previous_version": old_version if old_version and old_version != VERSION else (previous or {}).get("previous_version"),
         "updated_at": now if now is not None else time.time(),
-        "claude_dir": env.claude_dir,
-        "mcp_method": method,
     }
     if previous and old_version == VERSION:
         state["updated_at"] = previous.get("updated_at", state["updated_at"])
     jsonfile.save(env.state_file, state)
-    return state
+    return dict(state, mcp_registered_by=method)
 
 
 def uninstall(env):

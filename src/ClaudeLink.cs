@@ -8,7 +8,8 @@ namespace AgentProxy
     {
         private readonly string installDirectory;
         private readonly SynchronizationContext ui;
-        private int busy;
+        private bool busy;
+        private string pending;
 
         public bool? Installed { get; private set; }
         public bool Complete { get; private set; }
@@ -24,48 +25,65 @@ namespace AgentProxy
 
         public bool IsBusy
         {
-            get { return busy != 0; }
+            get { return busy; }
         }
 
         public void Refresh()
         {
-            Run("claude refresh", true);
+            Run("claude refresh");
         }
 
         public void Install()
         {
-            Run("claude install", true);
+            Run("claude install");
         }
 
         public void Uninstall()
         {
-            Run("claude uninstall", true);
+            Run("claude uninstall");
         }
 
-        private void Run(string arguments, bool thenReadStatus)
+        private void Run(string arguments)
         {
-            if (Interlocked.Exchange(ref busy, 1) != 0) return;
+            if (busy)
+            {
+                pending = arguments;
+                return;
+            }
+            busy = true;
             Notify();
             ThreadPool.QueueUserWorkItem(state =>
             {
                 EngineCliResult result = EngineCli.Run(installDirectory, arguments);
                 AppLog.Append("agentproxy " + arguments + ": " + result.Describe());
-                EngineCliResult status = thenReadStatus ? EngineCli.Run(installDirectory, "claude status") : null;
+                EngineCliResult status = EngineCli.Run(installDirectory, "claude status");
                 ui.Post(ignored => Apply(result, status), null);
             });
         }
 
         private void Apply(EngineCliResult action, EngineCliResult status)
         {
-            Interlocked.Exchange(ref busy, 0);
-            LastProblem = action.Succeeded ? null : action.Describe();
-            Dictionary<string, object> data = status != null && status.Succeeded ? status.Json() : null;
+            busy = false;
+            LastProblem = action.Succeeded ? null : ProblemText(action);
+            Dictionary<string, object> data = status.Succeeded ? status.Json() : null;
             if (data != null)
             {
                 Installed = Flag(data, "installed");
                 Complete = Flag(data, "mcp") && Flag(data, "skill") && Flag(data, "hooks");
             }
             Notify();
+            if (pending == null) return;
+            string next = pending;
+            pending = null;
+            Run(next);
+        }
+
+        private static string ProblemText(EngineCliResult action)
+        {
+            Dictionary<string, object> data = action.Json();
+            object error;
+            if (data != null && data.TryGetValue("error", out error) && error is string) return (string)error;
+            return action.Describe();
         }
 
         private static bool Flag(Dictionary<string, object> data, string key)

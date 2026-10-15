@@ -42,9 +42,17 @@ namespace AgentProxy
             return text.Substring(lineStart).Trim();
         }
 
-        public static string LastCrash()
+        public static long Length()
         {
-            return LastCrash(Read(FilePath, TailBytes));
+            var info = new FileInfo(FilePath);
+            return info.Exists ? info.Length : 0;
+        }
+
+        public static string LastCrashSince(long offset)
+        {
+            long length = Length();
+            long fresh = length >= offset ? length - offset : length;
+            return LastCrash(Read(FilePath, (int)Math.Min(fresh, TailBytes)));
         }
     }
 }

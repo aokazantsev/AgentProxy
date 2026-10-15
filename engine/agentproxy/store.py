@@ -31,8 +31,6 @@ CREATE TABLE IF NOT EXISTS flows (
     response_content_type TEXT,
     client TEXT
 );
-CREATE INDEX IF NOT EXISTS flows_host ON flows(host);
-CREATE INDEX IF NOT EXISTS flows_started ON flows(started);
 """
 
 SUMMARY_COLUMNS = ("seq", "id", "started", "duration_ms", "method", "scheme", "host", "port", "path", "url",

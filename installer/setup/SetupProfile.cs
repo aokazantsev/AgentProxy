@@ -60,8 +60,9 @@ namespace AgentProxy
                         + "без повторных попыток:\n"
                         + "• версия программы, Windows и .NET;\n"
                         + "• текст ошибки;\n"
-                        + "• последние 100 КБ журнала %LOCALAPPDATA%\\AgentProxy\\log.txt и хвост engine.log: шаги запуска, порты, "
-                        + "ошибки движка, адреса хостов из ошибок;\n"
+                        + "• последние 100 КБ журнала: при падении программы — %LOCALAPPDATA%\\AgentProxy\\log.txt, при падении "
+                        + "движка — engine.log. В них шаги запуска, порты, ошибки и имена хостов, с которыми не удалось "
+                        + "соединиться или которые не приняли сертификат прокси;\n"
                         + "• IP-адрес, с которого пришёл отчёт.\n"
                         + "Тела и заголовки запросов, токены и история запросов в отчёт не попадают. Отчёты видит только автор, "
                         + "хранятся последние 50 МБ. Изменить выбор — переустановить программу.",
@@ -91,13 +92,26 @@ namespace AgentProxy
             CrashReportConsent.Set(request.Has(CrashReportConsent.OptionKey));
             SetupLog.Append("crash reports: " + request.Has(CrashReportConsent.OptionKey));
             report(5, "Останавливаю движок…");
-            if (!EngineProcesses.StopAll(request.TargetDirectory)) throw new InvalidOperationException("Движок " + AppIdentity.Name + " не закрывается. Перезагрузи Windows и повтори установку.");
+            string target = request.TargetDirectory;
             foreach (string folder in new[] { "engine", "runtime" })
             {
-                string path = Path.Combine(request.TargetDirectory, folder);
-                if (Directory.Exists(path)) Directory.Delete(path, true);
+                string problem = FolderRemoval.Delete(Path.Combine(target, folder), () => EngineProcesses.StopAll(target));
+                if (problem != null) throw new InvalidOperationException("Не удалось заменить файлы движка (" + problem + "). Закрой программы, которые их держат, и повтори установку.");
             }
             SetupLog.Append("old engine and runtime removed");
+            RemovePreviousLocation(target, notes);
+        }
+
+        private static void RemovePreviousLocation(string target, List<string> notes)
+        {
+            string previous = UninstallRegistration.InstalledLocation();
+            if (previous == null || string.Equals(Path.GetFullPath(previous).TrimEnd('\\'), target.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return;
+            if (!File.Exists(Path.Combine(previous, AppIdentity.ExecutableName))) return;
+            string problem = FolderRemoval.Delete(previous, () => EngineProcesses.StopAll(previous));
+            SetupLog.Append("previous location " + previous + ": " + (problem ?? "removed"));
+            notes.Add(problem == null
+                ? "Прежняя установка в " + previous + " удалена: программа переехала в новую папку."
+                : "Прежнюю установку в " + previous + " удалить не удалось (" + problem + "). Удали папку вручную.");
         }
 
         public static void AfterExtract(InstallRequest request, Action<int, string> report, List<string> notes)

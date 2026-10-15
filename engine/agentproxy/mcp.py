@@ -2,7 +2,7 @@ import json
 import logging
 
 from . import APP_NAME, VERSION
-from .service import ToolError, call_tool, public_tools
+from .service import UNTRUSTED_NOTE, ToolError, call_tool, public_tools
 
 log = logging.getLogger("agentproxy.mcp")
 
@@ -20,7 +20,7 @@ INSTRUCTIONS = (
     "Devices and browsers send traffic through it; every finished request is recorded. "
     "Start with proxy_status. Use list_flows/get_flow to inspect traffic and wait_for_flow to wait for a "
     "request the user is about to trigger. The agentproxy skill explains device setup (adb reverse, "
-    "device proxy, CA certificate) and troubleshooting."
+    "device proxy, CA certificate) and troubleshooting. " + UNTRUSTED_NOTE
 )
 
 
@@ -39,14 +39,24 @@ def negotiate(requested):
 
 
 async def handle_message(service, message):
+    try:
+        return await _dispatch(service, message)
+    except Exception:
+        log.exception("MCP message failed")
+        request_id = message.get("id") if isinstance(message, dict) else None
+        return _error(request_id, INTERNAL_ERROR, "internal error")
+
+
+async def _dispatch(service, message):
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or "method" not in message:
         return _error(message.get("id") if isinstance(message, dict) else None, INVALID_REQUEST, "invalid request")
     method = message["method"]
     request_id = message.get("id")
     params = message.get("params") or {}
-    is_notification = "id" not in message
-    if is_notification:
+    if "id" not in message:
         return None
+    if not isinstance(params, dict):
+        return _error(request_id, INVALID_PARAMS, "params must be an object")
     if method == "initialize":
         return _result(request_id, {
             "protocolVersion": negotiate(params.get("protocolVersion")),
@@ -83,6 +93,8 @@ async def handle_body(service, body):
     except (ValueError, UnicodeDecodeError):
         return _error(None, PARSE_ERROR, "parse error")
     if isinstance(payload, list):
+        if not payload:
+            return _error(None, INVALID_REQUEST, "empty batch")
         responses = [await handle_message(service, item) for item in payload]
         responses = [item for item in responses if item is not None]
         return responses or None
