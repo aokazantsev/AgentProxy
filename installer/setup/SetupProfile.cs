@@ -111,10 +111,23 @@ namespace AgentProxy
             return Path.GetFullPath(path.Replace('/', '\\')).TrimEnd('\\');
         }
 
+        public static bool IsNested(string first, string second)
+        {
+            string a = Normalize(first) + "\\";
+            string b = Normalize(second) + "\\";
+            return a.StartsWith(b, StringComparison.OrdinalIgnoreCase) || b.StartsWith(a, StringComparison.OrdinalIgnoreCase);
+        }
+
         private static void RemovePreviousLocation(string target, List<string> notes)
         {
             string previous = UninstallRegistration.InstalledLocation();
             if (previous == null || !IsDifferentLocation(previous, target)) return;
+            if (IsNested(previous, target))
+            {
+                SetupLog.Append("previous location " + previous + " kept: nested with " + target);
+                notes.Add("Прежняя установка в " + previous + " не удалена: новая папка лежит рядом с ней или внутри. Удали лишнее вручную.");
+                return;
+            }
             if (!File.Exists(Path.Combine(previous, AppIdentity.ExecutableName))) return;
             string problem = FolderRemoval.Delete(previous, () => EngineProcesses.StopAll(previous));
             SetupLog.Append("previous location " + previous + ": " + (problem ?? "removed"));
@@ -143,7 +156,7 @@ namespace AgentProxy
 
         public static void Launch(string executable)
         {
-            Process.Start(new ProcessStartInfo(executable) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(executable) });
+            Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(executable) });
         }
     }
 }

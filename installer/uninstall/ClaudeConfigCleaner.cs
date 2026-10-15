@@ -138,7 +138,15 @@ namespace AgentProxy
             }
             string temporary = path + ".agentproxy-tmp";
             File.WriteAllText(temporary, text, new UTF8Encoding(false));
-            File.Replace(temporary, path, null);
+            try
+            {
+                File.Replace(temporary, path, null);
+            }
+            catch (Exception)
+            {
+                File.Delete(temporary);
+                throw;
+            }
         }
     }
 }

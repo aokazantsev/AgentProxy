@@ -12,6 +12,7 @@ namespace AgentProxy
         private const int ContentWidth = 520;
 
         private readonly TextBox folderBox = new TextBox();
+        private bool installing;
         private readonly Button browseButton = new Button();
         private readonly CheckBox autostartBox = new CheckBox();
         private readonly List<KeyValuePair<SetupOption, CheckBox>> optionBoxes = new List<KeyValuePair<SetupOption, CheckBox>>();
@@ -167,6 +168,7 @@ namespace AgentProxy
                 if (pair.Value.Enabled && pair.Value.Checked) request.CheckedOptions.Add(pair.Key.Key);
             }
             foreach (KeyValuePair<SetupField, ComboBox> pair in fieldBoxes) request.Values[pair.Key.Key] = pair.Value.Text.Trim();
+            installing = true;
             SetEditable(false);
             var installation = new Installation(request, Report);
             var worker = new Thread(() =>
@@ -205,8 +207,20 @@ namespace AgentProxy
             }));
         }
 
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (installing && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                status.Text = "Дождись окончания установки…";
+                return;
+            }
+            base.OnFormClosing(e);
+        }
+
         private void Finish(Installation installation, Exception failure)
         {
+            installing = false;
             if (failure != null)
             {
                 status.Text = "Ошибка: " + failure.Message;

@@ -20,7 +20,7 @@ if not exist "%~dp0installer\obj" mkdir "%~dp0installer\obj"
 if exist "%SRCLIST%" del /f /q "%SRCLIST%"
 for /r "%~dp0src" %%F in (*.cs) do if /i not "%%~nxF"=="AssemblyInfo.cs" echo "%%F">>"%SRCLIST%"
 
-%CSC% /nologo /codepage:65001 /target:winexe /platform:x64 /optimize+ /nowarn:0649 /main:AgentProxy.UninstallProgram /out:Uninstall.exe /win32manifest:installer\uninstall.manifest /win32icon:src\app.ico %REFS% installer\common\*.cs installer\uninstall\*.cs @"%SRCLIST%"
+%CSC% /nologo /codepage:65001 /target:winexe /platform:x64 /optimize+ /main:AgentProxy.UninstallProgram /out:Uninstall.exe /win32manifest:installer\uninstall.manifest /win32icon:src\app.ico %REFS% installer\common\*.cs installer\uninstall\*.cs @"%SRCLIST%"
 if errorlevel 1 exit /b 1
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer\make-payload.ps1 -Root "%~dp0." -Output "%~dp0%PAYLOAD%"

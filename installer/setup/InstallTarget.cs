@@ -28,6 +28,15 @@ namespace AgentProxy
             {
                 return "Нельзя ставить в корень диска — выбери папку, например " + AppIdentity.DefaultInstallDirectory + ".";
             }
+            string installed = UninstallRegistration.InstalledLocation();
+            if (installed != null && SetupProfile.IsDifferentLocation(installed, fullPath) && SetupProfile.IsNested(installed, fullPath))
+            {
+                return "Папка пересекается с прежней установкой в " + installed + ". Выбери эту же папку или папку вне её.";
+            }
+            if (SetupProfile.IsNested(AppIdentity.DataDirectory, fullPath))
+            {
+                return "Папка пересекается с папкой данных " + AppIdentity.DataDirectory + ". Выбери другую папку.";
+            }
             if (!Directory.Exists(fullPath)) return null;
             if (File.Exists(Path.Combine(fullPath, AppIdentity.ExecutableName))) return null;
             if (Directory.GetFileSystemEntries(fullPath).Length == 0) return null;

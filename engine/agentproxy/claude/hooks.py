@@ -26,12 +26,13 @@ def describe(env, status):
         return ("AgentProxy {0} установлен, но движок не отвечает на 127.0.0.1:{1}: MCP-инструменты agentproxy "
                 "недоступны. Запуск — \"{2}\" или значок в трее. Журналы: {3}\\log.txt, {3}\\engine.log."
                 .format(VERSION, env.api_port, exe, env.data_dir))
-    proxy = status.get("proxy", {})
-    state = "работает" if proxy.get("running") else "запущен, но прокси не слушает порт (см. engine.log)"
-    return ("AgentProxy {0} {1}: прокси {2}:{3}, MCP-сервер agentproxy, монитор {4}, записано запросов: {5}. "
-            "Как работать — скилл agentproxy."
-            .format(status.get("version", VERSION), state, proxy.get("host"), proxy.get("port"),
-                    status.get("monitor"), status.get("flows")))
+    proxy = status.get("proxy") if isinstance(status.get("proxy"), dict) else {}
+    state = "работает" if proxy.get("running") is True else "запущен, но прокси не слушает порт (см. engine.log)"
+    flows = status.get("flows")
+    return ("AgentProxy {0} {1}: прокси 127.0.0.1:{2}, MCP-сервер agentproxy, монитор http://127.0.0.1:{3}/, "
+            "записано запросов: {4}. Как работать — скилл agentproxy."
+            .format(VERSION, state, env.proxy_port, env.api_port,
+                    flows if isinstance(flows, int) and not isinstance(flows, bool) else "?"))
 
 
 def session_start_context(env, hook_input, status=None, now=None):

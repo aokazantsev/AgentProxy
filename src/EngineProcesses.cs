@@ -34,7 +34,7 @@ namespace AgentProxy
                     {
                         if (!process.WaitForExit(ExitWaitMs))
                         {
-                            process.Kill();
+                            KillTree(process);
                             if (!process.WaitForExit(ExitWaitMs)) stopped = false;
                         }
                     }
@@ -48,6 +48,26 @@ namespace AgentProxy
                 }
             }
             return stopped;
+        }
+
+        private static void KillTree(Process process)
+        {
+            try
+            {
+                using (Process taskkill = Process.Start(new ProcessStartInfo("taskkill.exe", "/T /F /PID " + process.Id)
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                }))
+                {
+                    taskkill.WaitForExit(ExitWaitMs);
+                }
+            }
+            catch (Win32Exception)
+            {
+            }
+            if (!process.HasExited) process.Kill();
         }
 
         private static string PathOf(Process process)

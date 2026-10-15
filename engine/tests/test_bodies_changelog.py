@@ -8,6 +8,12 @@ def test_json_body_is_pretty_printed():
     assert rendered == {"encoding": "text", "size": 7, "truncated": False, "content": '{\n  "a": 1\n}'}
 
 
+def test_deeply_nested_json_stays_readable():
+    body = b"[" * 100000 + b"]" * 100000
+    rendered = bodies.render(body, len(body), "application/json", 50)
+    assert rendered["content"] == "[" * 50
+
+
 def test_truncated_json_is_not_reformatted():
     rendered = bodies.render(b'{"a":', 100, "application/json", None)
     assert rendered["content"] == '{"a":'

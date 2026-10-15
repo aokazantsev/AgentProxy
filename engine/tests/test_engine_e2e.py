@@ -259,6 +259,16 @@ def test_prompt_hook_endpoint_answers_json(engine):
     assert status == 200 and body == {}
 
 
+def test_prompt_hook_tells_open_session_about_update(engine):
+    with open(os.path.join(engine["data_dir"], "claude-sessions.json"), "w", encoding="utf-8") as stream:
+        json.dump({"old-session": {"version": "0.0.9", "seen": time.time()}}, stream)
+    status, body = api_post(engine["api_port"], "/claude/hooks/user-prompt-submit", {"session_id": "old-session"})
+    assert status == 200
+    assert "обновлён 0.0.9 →" in body["hookSpecificOutput"]["additionalContext"]
+    status, body = api_post(engine["api_port"], "/claude/hooks/user-prompt-submit", {"session_id": "old-session"})
+    assert status == 200 and body == {}
+
+
 def test_busy_port_exits_with_code_3(tmp_path):
     holder = socket.socket()
     holder.bind(("127.0.0.1", 0))
@@ -316,6 +326,24 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
             self._chunk(b'{"part": 1}\n')
             StreamingHandler.release.wait(20)
             self._chunk(b'{"part": 2}\n')
+            self._chunk(b"")
+            return
+        if self.path.startswith("/packed-"):
+            encoding = self.path[len("/packed-"):]
+            body = b'{"packed": "' + encoding.encode() + b'"}'
+            if encoding == "zstd":
+                import zstandard
+                wire = zstandard.ZstdCompressor().compress(body)
+            else:
+                import brotli
+                wire = brotli.compress(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", encoding)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self._chunk(wire[:5])
+            self._chunk(wire[5:])
             self._chunk(b"")
             return
         if self.path.startswith("/gzip-events"):
@@ -479,6 +507,19 @@ def test_compressed_stream_is_recorded_decoded(engine):
     listing = api_get(engine["api_port"], "/api/flows?path=/gzip-events")[1]
     flow = api_get(engine["api_port"], "/api/flows/" + listing["flows"][0]["id"])[1]
     assert flow["response_body"]["content"] == "data: packed\n\n"
+    target.shutdown()
+
+
+@pytest.mark.parametrize("encoding", ["zstd", "br"])
+def test_chunked_compressed_response_is_recorded_decoded(engine, encoding):
+    target = start_streaming_server()
+    path = "/packed-" + encoding
+    request = urllib.request.Request("http://127.0.0.1:{0}{1}".format(target.server_port, path),
+                                     headers={"Accept-Encoding": encoding})
+    proxied_opener(engine).open(request, timeout=10).read()
+    listing = api_get(engine["api_port"], "/api/flows?path=" + path)[1]
+    flow = api_get(engine["api_port"], "/api/flows/" + listing["flows"][0]["id"])[1]
+    assert json.loads(flow["response_body"]["content"]) == {"packed": encoding}
     target.shutdown()
 
 

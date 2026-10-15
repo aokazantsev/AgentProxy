@@ -25,7 +25,7 @@ def render(body, size, content_type, max_chars):
         if "json" in (content_type or "").lower() and stored_complete:
             try:
                 text = json.dumps(json.loads(text), ensure_ascii=False, indent=2)
-            except ValueError:
+            except (ValueError, RecursionError):
                 pass
         encoding = "text"
     else:

@@ -14,12 +14,13 @@ namespace AgentProxy
         private const string SilentFlag = "/silent";
         private const string ParentPrefix = "/parent=";
         private const string EventPrefix = "/event=";
-        private const int StepsWaitMs = 180 * 1000;
+        private const int StepsWaitMs = 300 * 1000;
         private const int ParentExitWaitMs = 30 * 1000;
         private const int ExitOk = 0;
         private const int ExitCancelled = 1;
         private const int ExitIncomplete = 2;
         private const string Title = "Удаление " + AppIdentity.Name;
+        private const string SetupMutex = AppIdentity.Name + ".Setup";
 
         [STAThread]
         private static int Main(string[] args)
@@ -51,6 +52,13 @@ namespace AgentProxy
 
         private static int Confirm(string installDirectory, bool silent)
         {
+            if (SetupRunning())
+            {
+                UninstallLog.Start(installDirectory);
+                UninstallLog.Append("uninstall refused: setup is running");
+                if (!silent) MessageBox.Show("Сейчас идёт установка " + AppIdentity.Name + ". Дождись её окончания и повтори удаление.", Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return ExitIncomplete;
+            }
             if (!silent && Ask() != DialogResult.Yes) return ExitCancelled;
             try
             {
@@ -96,8 +104,9 @@ namespace AgentProxy
             var problems = new List<string>();
             UninstallLog.Start(installDirectory);
             string registered = UninstallRegistration.InstalledLocation();
-            bool ownsRegistration = registered == null || string.Equals(Path.GetFullPath(registered).TrimEnd('\\'),
-                Path.GetFullPath(installDirectory).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+            bool ownsRegistration = registered == null || !File.Exists(Path.Combine(registered, AppIdentity.ExecutableName))
+                || string.Equals(Path.GetFullPath(registered).TrimEnd('\\'), Path.GetFullPath(installDirectory).TrimEnd('\\'),
+                    StringComparison.OrdinalIgnoreCase);
             UninstallLog.Append("registered location: " + (registered ?? "none") + ", owns registration: " + ownsRegistration);
             if (!ownsRegistration)
             {
@@ -113,7 +122,7 @@ namespace AgentProxy
                 string dataProblem = FolderRemoval.Delete(AppIdentity.DataDirectory, null);
                 if (dataProblem != null) problems.Add("папка данных удалена не полностью (" + dataProblem + ")");
             }
-            if (LooksInstalled(installDirectory))
+            if (InstallFolder.LooksInstalled(installDirectory))
             {
                 string contentProblem = FolderRemoval.DeleteContentsExcept(installDirectory, AppIdentity.UninstallerName);
                 if (contentProblem != null) problems.Add("файлы программы удалены не полностью (" + contentProblem + ")");
@@ -125,7 +134,7 @@ namespace AgentProxy
             UninstallLog.Steps(problems);
             SignalSteps(eventName);
             WaitForParent(parentPid);
-            if (IsOurFolder(installDirectory))
+            if (InstallFolder.HoldsOnlyUninstaller(installDirectory))
             {
                 string folderProblem = FolderRemoval.Delete(installDirectory, null);
                 UninstallLog.Append("install folder: " + (folderProblem ?? "removed"));
@@ -144,19 +153,11 @@ namespace AgentProxy
             return problems.Count == 0 ? ExitOk : ExitIncomplete;
         }
 
-        private static bool LooksInstalled(string directory)
+        private static bool SetupRunning()
         {
-            return File.Exists(Path.Combine(directory, AppIdentity.ExecutableName))
-                || (File.Exists(Path.Combine(directory, AppIdentity.UninstallerName)) && Directory.Exists(Path.Combine(directory, "runtime")));
-        }
-
-        private static bool IsOurFolder(string directory)
-        {
-            if (!Directory.Exists(directory)) return false;
-            foreach (string entry in Directory.GetFileSystemEntries(directory))
-            {
-                if (!string.Equals(Path.GetFileName(entry), AppIdentity.UninstallerName, StringComparison.OrdinalIgnoreCase)) return false;
-            }
+            Mutex setup;
+            if (!Mutex.TryOpenExisting(SetupMutex, out setup)) return false;
+            setup.Dispose();
             return true;
         }
 

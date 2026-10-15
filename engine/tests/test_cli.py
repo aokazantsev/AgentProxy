@@ -63,13 +63,20 @@ def test_installed_session_start_hook_runs_and_answers(cli_env):
     assert completed.returncode == 0, completed.stderr
     output = json.loads(completed.stdout)
     assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
-    assert "AgentProxy" in output["hookSpecificOutput"]["additionalContext"]
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "упал" not in context
+    assert "не отвечает" in context
+    with open(os.path.join(cli_env["data_dir"], "claude-sessions.json"), encoding="utf-8") as stream:
+        assert json.load(stream)["cli-test"]["version"] == VERSION
 
 
 def test_hook_survives_garbage_stdin(cli_env):
     code, out, _ = run_cli(cli_env, "hook", "session-start", stdin="not json")
     assert code == 0
-    assert json.loads(out)["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    output = json.loads(out)["hookSpecificOutput"]
+    assert output["hookEventName"] == "SessionStart"
+    assert "упал" not in output["additionalContext"]
+    assert "не отвечает" in output["additionalContext"]
 
 
 def test_status_without_engine_fails_fast(cli_env):

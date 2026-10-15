@@ -30,6 +30,11 @@ namespace AgentProxy.Tests
             Run("readme silent commands parse with real options", ReadmeSilentCommands);
             Run("download verification", DownloadVerification);
             Run("previous install location comparison", PreviousLocation);
+            Run("nested install locations", NestedLocations);
+            Run("install target overlapping data folder is refused", TargetOverlappingDataFolder);
+            Run("folder contents removed except uninstaller", ContentsRemovedExceptUninstaller);
+            Run("install folder recognition", InstallFolderRecognition);
+            Run("release versions compare numerically", ReleaseVersionsCompare);
             Run("json writer keeps doubles and refuses dates", JsonWriterNumbersAndDates);
             Run("json writer round trip", JsonWriterRoundTrip);
             Run("cleaner removes only our entries", CleanerRemovesOnlyOurs);
@@ -322,6 +327,79 @@ namespace AgentProxy.Tests
             Equal(false, SetupProfile.IsDifferentLocation("C:/Apps/AgentProxy", @"C:\Apps\AgentProxy"), "forward slashes");
             Equal(true, SetupProfile.IsDifferentLocation(@"C:\Apps\AgentProxy", @"D:\AgentProxy"), "other drive");
             Equal(true, SetupProfile.IsDifferentLocation(@"C:\Apps\AgentProxy", @"C:\Apps\AgentProxy2"), "prefix only");
+        }
+
+        private static void NestedLocations()
+        {
+            Equal(true, SetupProfile.IsNested(@"D:\Tools", @"D:\Tools\AgentProxy"), "target inside previous");
+            Equal(true, SetupProfile.IsNested(@"D:\Tools\AgentProxy\", @"d:\tools"), "previous inside target");
+            Equal(true, SetupProfile.IsNested(@"D:\Tools", @"D:\Tools"), "same folder");
+            Equal(false, SetupProfile.IsNested(@"D:\Tools", @"D:\Tools2\AgentProxy"), "prefix only");
+            Equal(false, SetupProfile.IsNested(@"C:\Apps\AgentProxy", @"D:\AgentProxy"), "other drive");
+        }
+
+        private static void TargetOverlappingDataFolder()
+        {
+            True(InstallTarget.Validate(Path.Combine(AppIdentity.DataDirectory, "program")) != null, "inside data folder");
+            True(InstallTarget.Validate(AppIdentity.DataDirectory) != null, "data folder itself");
+            string fresh = Path.Combine(Path.GetTempPath(), "AgentProxyTarget-" + Guid.NewGuid().ToString("N"));
+            Equal<string>(null, InstallTarget.Validate(fresh), "new folder elsewhere");
+        }
+
+        private static void ContentsRemovedExceptUninstaller()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "AgentProxyRemoval-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(root, "runtime", "python"));
+            File.WriteAllText(Path.Combine(root, "runtime", "python", "python.exe"), "x");
+            File.WriteAllText(Path.Combine(root, "AgentProxy.exe"), "x");
+            File.WriteAllText(Path.Combine(root, "UNINSTALL.EXE"), "x");
+            try
+            {
+                Equal<string>(null, FolderRemoval.DeleteContentsExcept(root, AppIdentity.UninstallerName), "problem");
+                string[] left = Directory.GetFileSystemEntries(root);
+                Equal(1, left.Length, "entries left");
+                Equal("UNINSTALL.EXE", Path.GetFileName(left[0]), "kept file");
+                Equal<string>(null, FolderRemoval.DeleteContentsExcept(Path.Combine(root, "missing"), AppIdentity.UninstallerName), "missing folder");
+                Equal<string>(null, FolderRemoval.Delete(Path.Combine(root, "missing"), null), "missing folder delete");
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+
+        private static void InstallFolderRecognition()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "AgentProxyFolder-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                Equal(false, InstallFolder.LooksInstalled(root), "empty folder");
+                Equal(true, InstallFolder.HoldsOnlyUninstaller(root), "empty folder holds nothing foreign");
+                File.WriteAllText(Path.Combine(root, AppIdentity.UninstallerName), "x");
+                Equal(false, InstallFolder.LooksInstalled(root), "uninstaller without runtime");
+                Equal(true, InstallFolder.HoldsOnlyUninstaller(root), "only uninstaller");
+                Directory.CreateDirectory(Path.Combine(root, "runtime"));
+                Equal(true, InstallFolder.LooksInstalled(root), "uninstaller with runtime");
+                Equal(false, InstallFolder.HoldsOnlyUninstaller(root), "runtime left");
+                Directory.Delete(Path.Combine(root, "runtime"));
+                File.WriteAllText(Path.Combine(root, "notes.txt"), "x");
+                Equal(false, InstallFolder.HoldsOnlyUninstaller(root), "foreign file");
+                File.WriteAllText(Path.Combine(root, AppIdentity.ExecutableName), "x");
+                Equal(true, InstallFolder.LooksInstalled(root), "program present");
+                Equal(false, InstallFolder.HoldsOnlyUninstaller(Path.Combine(root, "missing")), "missing folder");
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+
+        private static void ReleaseVersionsCompare()
+        {
+            Equal(UpdateChecker.ParseVersion("0.1"), UpdateChecker.ParseVersion("v0.1.0"), "same version with tag prefix");
+            True(UpdateChecker.ParseVersion("0.10") > UpdateChecker.ParseVersion("0.9"), "0.10 after 0.9");
+            True(UpdateChecker.ParseVersion("1.0") > UpdateChecker.ParseVersion("0.10"), "1.0 after 0.10");
         }
 
         private static void JsonWriterNumbersAndDates()

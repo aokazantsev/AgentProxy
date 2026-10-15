@@ -3,12 +3,12 @@ import time
 import uuid
 
 from .store import FlowRecord
-from .streamtap import StreamTap, should_stream
+from .streamtap import StreamTap, decode_body, should_stream
 
 log = logging.getLogger("agentproxy.recorder")
 
 UNDECODED_NOTE = "[AgentProxy] response body was passed through but not recorded: {0}"
-TLS_CLIENT_ERROR = "TLS handshake with the client failed: the app does not trust the AgentProxy certificate ({0})"
+TLS_CLIENT_ERROR = "TLS handshake with the client failed: {0}"
 
 
 def _headers(headers):
@@ -18,12 +18,11 @@ def _headers(headers):
 def _body(message, limit):
     if message is None:
         return b"", 0
-    try:
-        content = message.get_content(strict=False)
-    except ValueError:
-        content = message.raw_content
-    content = content or b""
-    return content[:limit], len(content)
+    raw = message.raw_content or b""
+    decoded = decode_body(raw, message.headers.get("content-encoding"), limit)
+    if decoded is None:
+        return raw[:limit], len(raw)
+    return decoded
 
 
 def build_record(flow, limit, tap=None, error=None):
@@ -68,13 +67,13 @@ def build_record(flow, limit, tap=None, error=None):
     return record
 
 
-def tls_failure_record(data, now=None):
+def tls_failure_record(data):
     client = data.context.client
     server = data.context.server
     host = client.sni or (server.address[0] if server and server.address else "unknown")
     port = server.address[1] if server and server.address else 443
     return FlowRecord(
-        id=str(uuid.uuid4()), started=now if now is not None else time.time(), method="CONNECT", scheme="https",
+        id=str(uuid.uuid4()), started=time.time(), method="CONNECT", scheme="https",
         host=host, port=port, path="", url="https://{0}:{1}".format(host, port), request_headers=[],
         error=TLS_CLIENT_ERROR.format(data.conn.error or "handshake failed"),
         client=client.peername[0] if client.peername else "")
