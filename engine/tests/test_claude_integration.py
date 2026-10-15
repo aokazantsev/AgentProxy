@@ -1,11 +1,14 @@
 import json
 import os
+import subprocess
 
 import pytest
 
 from agentproxy import VERSION
 from agentproxy.claude import hooks, integration, jsonfile
 from agentproxy.claude.sessions import SeenVersions
+
+from conftest import git_bash
 
 
 @pytest.fixture
@@ -184,6 +187,15 @@ def test_prompt_context_notifies_once_after_update(env):
     assert hooks.prompt_context(env, {"session_id": "old-session"}, now=3) == ""
 
 
+def test_resumed_session_learns_about_old_update(env):
+    write_json(env.state_file, {"version": "0.0.9", "updated_at": 1})
+    integration.install(env, now=1)
+    SeenVersions(env.data_dir).remember("resumed", "0.0.9", now=1)
+    text = hooks.session_start_context(env, {"session_id": "resumed"}, None, now=30 * 24 * 3600)
+    assert "обновлён 0.0.9 → " + VERSION in text
+    assert "новой сессии" in text
+
+
 def test_prompt_context_unknown_session_is_silent(env):
     assert hooks.prompt_context(env, {"session_id": "new"}, now=1) == ""
     assert SeenVersions(env.data_dir).get("new") == VERSION
@@ -207,30 +219,47 @@ def test_seen_versions_prunes_old(env):
 def test_is_ours_detection(env):
     assert integration.is_ours(integration.session_start_hook(env))
     assert integration.is_ours(integration.prompt_hook(env))
-    assert integration.is_ours({"type": "command", "command": "x.exe", "args": ["-m", "agentproxy.cli"]})
     assert not integration.is_ours({"type": "command", "command": "python other.py"})
     assert not integration.is_ours("garbage")
 
 
-def test_session_start_hook_is_plain_command_string(env):
-    hook = integration.session_start_hook(env)
+def unchanged(path):
+    return path
+
+
+@pytest.mark.parametrize("path", [r"C:\Users\Ivan\AppData\Local\Programs\AgentProxy\runtime\python\python.exe",
+                                  r"D:\Tools\AP\runtime\python\python.exe"])
+def test_safe_path_gives_bare_command_for_any_shell(path):
+    hook = integration.session_start_hook_for(path, unchanged)
     assert set(hook) == {"type", "command", "timeout"}
-    assert "\\" not in hook["command"]
-    assert hook["command"].endswith(" -I -m agentproxy.cli hook session-start")
-    spaced = integration.session_start_command(r"C:\Users\John Doe\AppData\python.exe")
-    assert spaced == '"C:/Users/John Doe/AppData/python.exe" -I -m agentproxy.cli hook session-start'
+    assert hook["command"] == path.replace("\\", "/") + " -I -m agentproxy.cli hook session-start"
 
 
-def test_refresh_replaces_outdated_exec_form_hook(env):
-    integration.install(env, now=1)
-    settings = read_json(env.settings_json)
-    settings["hooks"]["SessionStart"] = [{"hooks": [{"type": "command", "command": env.python_exe,
-                                                      "args": ["-I", "-m", "agentproxy.cli", "hook", "session-start"]}]}]
-    write_json(env.settings_json, settings)
-    assert integration.status(env)["hooks"] is False
-    assert integration.refresh(env) == "refreshed"
-    session_hooks = read_json(env.settings_json)["hooks"]["SessionStart"]
-    assert session_hooks == [{"hooks": [integration.session_start_hook(env)]}]
+@pytest.mark.parametrize("path", [r"C:\Users\John Doe\python.exe", r"C:\Users\O'Brien\python.exe",
+                                  r"C:\Users\Ivan(work)\python.exe", r"D:\R&D\python.exe", r"D:\My $dev\python.exe",
+                                  r"D:\a;b`c\python.exe"])
+def test_unsafe_path_is_quoted_for_bash(path, tmp_path):
+    hook = integration.session_start_hook_for(path, unchanged)
+    assert hook["shell"] == "bash"
+    bash = git_bash()
+    if bash is None:
+        pytest.skip("Git Bash is not installed")
+    probe = hook["command"].replace(" -I -m agentproxy.cli hook session-start", "")
+    completed = subprocess.run([bash, "-c", "printf '%s' " + probe], capture_output=True, text=True, timeout=30)
+    assert completed.stdout == path.replace("\\", "/")
+
+
+def test_short_path_is_used_when_available(tmp_path):
+    folder = tmp_path / "Program Files Test"
+    folder.mkdir()
+    executable = folder / "python.exe"
+    executable.write_bytes(b"")
+    shortened = integration.short_path(str(executable))
+    assert os.path.exists(shortened)
+    hook = integration.session_start_hook(integration.Environment(
+        claude_dir="", claude_json="", data_dir="", install_dir="", python_exe=str(executable), proxy_port=1, api_port=2))
+    if " " not in shortened:
+        assert "shell" not in hook
 
 
 def test_hooks_with_other_port_are_not_current(env):

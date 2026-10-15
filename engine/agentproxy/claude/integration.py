@@ -1,4 +1,6 @@
+import ctypes
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -14,7 +16,9 @@ STATE_FILE = "claude-integration.json"
 CLI_MODULE = "agentproxy.cli"
 HOOK_PATH = "/claude/hooks/user-prompt-submit"
 WHATS_NEW_DAYS = 3
-CLI_TIMEOUT_SECONDS = 60
+CLI_TIMEOUT_SECONDS = 25
+CLI_TIMED_OUT = -2
+SHELL_SAFE_PATH = re.compile(r"^[A-Za-z0-9_./:~+-]+$")
 SKILL_TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SKILL.md")
 
 
@@ -75,15 +79,30 @@ def find_claude_cli():
     return found
 
 
-def session_start_command(python_exe):
-    path = python_exe.replace("\\", "/")
-    if " " in path:
-        path = '"' + path + '"'
-    return path + " -I -m " + CLI_MODULE + " hook session-start"
+def short_path(path):
+    try:
+        size = ctypes.windll.kernel32.GetShortPathNameW(path, None, 0)
+        if not size:
+            return path
+        buffer = ctypes.create_unicode_buffer(size)
+        if not ctypes.windll.kernel32.GetShortPathNameW(path, buffer, size):
+            return path
+        return buffer.value
+    except (AttributeError, OSError):
+        return path
+
+
+def session_start_hook_for(python_exe, shorten=short_path):
+    arguments = " -I -m " + CLI_MODULE + " hook session-start"
+    path = shorten(python_exe).replace("\\", "/")
+    if SHELL_SAFE_PATH.match(path):
+        return {"type": "command", "command": path + arguments, "timeout": 10}
+    quoted = "'" + path.replace("'", "'\\''") + "'"
+    return {"type": "command", "command": quoted + arguments, "shell": "bash", "timeout": 10}
 
 
 def session_start_hook(env):
-    return {"type": "command", "command": session_start_command(env.python_exe), "timeout": 10}
+    return session_start_hook_for(env.python_exe)
 
 
 def prompt_hook(env):
@@ -93,8 +112,6 @@ def prompt_hook(env):
 def is_ours(hook):
     if not isinstance(hook, dict):
         return False
-    if CLI_MODULE in (hook.get("args") or []):
-        return True
     if CLI_MODULE in str(hook.get("command", "")):
         return True
     return str(hook.get("url", "")).endswith(HOOK_PATH)
@@ -177,16 +194,17 @@ def _run_cli(env, args):
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         process.kill()
-        return -1, "claude {0} timed out after {1} s".format(" ".join(args), CLI_TIMEOUT_SECONDS)
+        return CLI_TIMED_OUT, "claude {0} timed out after {1} s".format(" ".join(args), CLI_TIMEOUT_SECONDS)
     return process.returncode, output.decode("utf-8", errors="replace").strip()
 
 
 def install_mcp(env):
     if env.claude_cli:
-        _run_cli(env, ["mcp", "remove", "--scope", "user", SERVER_NAME])
-        code, output = _run_cli(env, ["mcp", "add", "--scope", "user", "--transport", "http", SERVER_NAME, env.mcp_url])
-        if code == 0:
-            return "cli"
+        code, _ = _run_cli(env, ["mcp", "remove", "--scope", "user", SERVER_NAME])
+        if code != CLI_TIMED_OUT:
+            code, _ = _run_cli(env, ["mcp", "add", "--scope", "user", "--transport", "http", SERVER_NAME, env.mcp_url])
+            if code == 0:
+                return "cli"
     data = jsonfile.load(env.claude_json, {})
     if not isinstance(data, dict):
         raise jsonfile.JsonFileError(env.claude_json + " is not a JSON object; left untouched")
@@ -269,9 +287,9 @@ def read_state(env):
 
 def install(env, now=None):
     previous = read_state(env)
-    method = install_mcp(env)
     install_skill(env)
     install_hooks(env)
+    method = install_mcp(env)
     old_version = previous.get("version") if previous else None
     state = {
         "version": VERSION,
@@ -322,8 +340,9 @@ def whats_new(env, since_version):
 def update_notice(env, since_version):
     if not since_version or since_version == VERSION:
         return ""
-    lines = ["AgentProxy обновлён {0} → {1}. Перечитай скилл agentproxy: инструменты и правила могли поменяться."
-             .format(since_version, VERSION)]
+    lines = ["AgentProxy обновлён {0} → {1}. Перечитай скилл agentproxy: инструменты и правила могли поменяться. "
+             "Новые и изменённые инструменты MCP появятся только в новой сессии Claude Code; до перезапуска "
+             "те же данные отдаёт HTTP API http://127.0.0.1:{2}/api/...".format(since_version, VERSION, env.api_port)]
     changes = whats_new(env, since_version)
     if changes:
         lines.append("Что нового:")

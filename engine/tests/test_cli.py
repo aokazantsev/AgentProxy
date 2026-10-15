@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import subprocess
 import sys
 
@@ -9,7 +8,7 @@ import pytest
 from agentproxy import VERSION
 from agentproxy.claude import integration
 
-from conftest import free_port
+from conftest import free_port, git_bash
 
 
 @pytest.fixture
@@ -56,10 +55,9 @@ def test_installed_session_start_hook_runs_and_answers(cli_env):
         settings = json.load(stream)
     hook = [h for group in settings["hooks"]["SessionStart"] for h in group["hooks"] if integration.is_ours(h)][0]
     assert "args" not in hook
-    bash = shutil.which("bash") or r"C:\Program Files\Git\bin\bash.exe"
-    if not os.path.exists(bash):
+    bash = git_bash()
+    if bash is None:
         pytest.skip("Git Bash is not installed")
-    assert hook["command"].startswith(sys.executable.replace("\\", "/"))
     completed = subprocess.run([bash, "-c", hook["command"]], env=cli_env["env"], input='{"session_id": "cli-test"}',
                                capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert completed.returncode == 0, completed.stderr

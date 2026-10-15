@@ -9,6 +9,41 @@ namespace AgentProxy
         private const int Attempts = 20;
         private const int RetryMs = 500;
 
+        public static string DeleteContentsExcept(string directory, string keptFileName)
+        {
+            if (!Directory.Exists(directory)) return null;
+            foreach (string entry in Directory.GetFileSystemEntries(directory))
+            {
+                string problem;
+                if (Directory.Exists(entry)) problem = Delete(entry, null);
+                else if (string.Equals(Path.GetFileName(entry), keptFileName, StringComparison.OrdinalIgnoreCase)) continue;
+                else problem = DeleteFile(entry);
+                if (problem != null) return problem;
+            }
+            return null;
+        }
+
+        private static string DeleteFile(string path)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    File.Delete(path);
+                    return null;
+                }
+                catch (IOException error)
+                {
+                    if (attempt >= Attempts) return error.Message;
+                }
+                catch (UnauthorizedAccessException error)
+                {
+                    if (attempt >= Attempts) return error.Message;
+                }
+                Thread.Sleep(RetryMs);
+            }
+        }
+
         public static string Delete(string directory, Action beforeAttempt)
         {
             for (int attempt = 1; ; attempt++)

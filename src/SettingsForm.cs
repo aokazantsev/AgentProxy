@@ -55,7 +55,8 @@ namespace AgentProxy
             var hint = new Label
             {
                 Text = "Прокси слушает только 127.0.0.1: устройство подключается через adb reverse. "
-                    + "После сохранения движок перезапустится, адрес MCP в Claude Code обновится сам.",
+                    + "После сохранения движок перезапустится, адрес MCP в Claude Code обновится сам; "
+                    + "уже открытые сессии Claude Code увидят новый порт после перезапуска.",
                 AutoSize = true,
                 MaximumSize = new Size(ContentWidth, 0),
                 ForeColor = SystemColors.GrayText,

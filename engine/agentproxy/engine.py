@@ -129,12 +129,9 @@ async def serve(current, data_dir, parent_pid):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="agentproxy-engine")
-    parser.add_argument("--data-dir", default=None)
     parser.add_argument("--parent-pid", type=int, default=0)
     args = parser.parse_args(argv)
-    data_dir = args.data_dir or paths.data_dir()
-    if args.data_dir:
-        os.environ["AGENTPROXY_DATA_DIR"] = data_dir
+    data_dir = paths.data_dir()
     try:
         paths.ensure(data_dir)
     except OSError as error:
@@ -157,11 +154,15 @@ def main(argv=None):
             return EXIT_PORT_BUSY
     try:
         asyncio.run(serve(current, data_dir, args.parent_pid))
+    except SystemExit as stop:
+        if stop.code in (None, 0):
+            return EXIT_OK
+        if port_problem(LOCAL_HOST, current.proxy_port):
+            log.error("PORT BUSY: proxy port %s:%s was taken while starting", LOCAL_HOST, current.proxy_port)
+            return EXIT_PORT_BUSY
+        log.critical("CRASH: mitmproxy stopped on startup errors (exit %s), see the errors above", stop.code)
+        return EXIT_CRASH
     except Exception:
         log.critical("CRASH: engine failed", exc_info=True)
         return EXIT_CRASH
     return EXIT_OK
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 
 import pytest
 
@@ -106,8 +107,8 @@ def wait_until(predicate, timeout):
 
 def launch(data_dir, extra_args=()):
     env = dict(os.environ)
-    env.pop("AGENTPROXY_DATA_DIR", None)
-    return subprocess.Popen([sys.executable, "-I", "-m", "agentproxy", "--data-dir", data_dir] + list(extra_args),
+    env["AGENTPROXY_DATA_DIR"] = data_dir
+    return subprocess.Popen([sys.executable, "-I", "-m", "agentproxy"] + list(extra_args),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
 
 
@@ -307,6 +308,37 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
             self._chunk(b"data: second\n\n")
             self._chunk(b"")
             return
+        if self.path.startswith("/chunked"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self._chunk(b'{"part": 1}\n')
+            StreamingHandler.release.wait(20)
+            self._chunk(b'{"part": 2}\n')
+            self._chunk(b"")
+            return
+        if self.path.startswith("/gzip-events"):
+            compressor = zlib.compressobj(wbits=31)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self._chunk(compressor.compress(b"data: packed\n\n") + compressor.flush(zlib.Z_SYNC_FLUSH))
+            self._chunk(compressor.flush())
+            self._chunk(b"")
+            return
+        if self.path.startswith("/bigslow"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", "10240")
+            self.end_headers()
+            self.wfile.write(b"a" * 2048)
+            self.wfile.flush()
+            StreamingHandler.release.wait(20)
+            self.wfile.write(b"b" * 8192)
+            return
         body = b"x" * 10240
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
@@ -410,3 +442,83 @@ def test_fetch_status_ignores_proxy_environment(engine, monkeypatch):
                                   python_exe="", proxy_port=engine["proxy_port"], api_port=engine["api_port"])
     status = hooks.fetch_status(env)
     assert status is not None and status["proxy"]["running"] is True
+
+
+def read_first_part_before_release(opener, url, size):
+    response = opener.open(url, timeout=10)
+    first = response.read(size) if size else response.readline()
+    StreamingHandler.release.set()
+    return first, response.read()
+
+
+def test_large_body_streams_before_upstream_finishes(start_engine):
+    engine = start_engine(max_body_bytes=1024)
+    target = start_streaming_server()
+    first, rest = read_first_part_before_release(
+        proxied_opener(engine), "http://127.0.0.1:{0}/bigslow".format(target.server_port), 2048)
+    assert first == b"a" * 2048 and len(rest) == 8192
+    target.shutdown()
+
+
+def test_chunked_response_without_length_streams_and_is_recorded(engine):
+    target = start_streaming_server()
+    first, rest = read_first_part_before_release(
+        proxied_opener(engine), "http://127.0.0.1:{0}/chunked".format(target.server_port), 0)
+    assert first == b'{"part": 1}\n' and b'"part": 2' in rest
+    listing = api_get(engine["api_port"], "/api/flows?path=/chunked")[1]
+    flow = api_get(engine["api_port"], "/api/flows/" + listing["flows"][0]["id"])[1]
+    assert '"part": 1' in flow["response_body"]["content"] and '"part": 2' in flow["response_body"]["content"]
+    target.shutdown()
+
+
+def test_compressed_stream_is_recorded_decoded(engine):
+    target = start_streaming_server()
+    request = urllib.request.Request("http://127.0.0.1:{0}/gzip-events".format(target.server_port),
+                                     headers={"Accept-Encoding": "gzip"})
+    proxied_opener(engine).open(request, timeout=10).read()
+    listing = api_get(engine["api_port"], "/api/flows?path=/gzip-events")[1]
+    flow = api_get(engine["api_port"], "/api/flows/" + listing["flows"][0]["id"])[1]
+    assert flow["response_body"]["content"] == "data: packed\n\n"
+    target.shutdown()
+
+
+def test_https_to_closed_port_is_recorded_as_connect_failure(engine):
+    closed = free_port()
+    with pytest.raises(urllib.error.URLError):
+        proxied_opener(engine).open("https://127.0.0.1:{0}/".format(closed), timeout=15)
+
+    def recorded():
+        flows = api_get(engine["api_port"], "/api/flows?failed_only=true")[1]["flows"]
+        return [f for f in flows if f["method"] == "CONNECT" and "CONNECT failed" in (f["error"] or "")]
+
+    assert wait_until(recorded, 10)
+
+
+@pytest.mark.parametrize("host", ["localhost.", "LOCALHOST", "127.0.0.1"])
+def test_guard_blocks_loopback_aliases(engine, host):
+    request = urllib.request.Request("http://{0}:{1}/api/flows".format(host, engine["api_port"]),
+                                     headers={"Host": "127.0.0.1:{0}".format(engine["api_port"])})
+    with pytest.raises(urllib.error.HTTPError) as failure:
+        proxied_opener(engine).open(request, timeout=15)
+    assert failure.value.code == 403
+
+
+def test_documented_routes_answer(engine):
+    port = engine["api_port"]
+    target = start_server()
+    proxied_opener(engine).open("http://127.0.0.1:{0}/one".format(target.server_port), timeout=15)
+    seq = api_get(port, "/api/flows")[1]["flows"][0]["seq"]
+    assert api_get(port, "/api/flows/{0}".format(seq))[0] == 200
+    status, waited = api_get(port, "/api/flows/wait?timeout_seconds=1")
+    assert status == 200 and waited["timed_out"] is True
+    status, cer = api_get(port, "/api/ca.cer")
+    assert status == 200 and cer
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    connection.request("DELETE", "/api/flows")
+    response = connection.getresponse()
+    assert response.status == 200 and json.loads(response.read())["removed"] >= 1
+    connection.close()
+    status, call = api_post(port, "/mcp", {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                                           "params": {"name": "get_flow", "arguments": {"id": seq}}})
+    assert call["result"]["isError"] is True and "not found" in call["result"]["content"][0]["text"]
+    target.shutdown()

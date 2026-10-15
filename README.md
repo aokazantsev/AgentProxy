@@ -16,10 +16,10 @@
    ```bash
    curl -fL -o "$TEMP/AgentProxySetup.exe" https://github.com/aokazantsev/AgentProxy/releases/latest/download/AgentProxySetup.exe
    ```
-2. Сверить контрольную сумму с опубликованной (поле `digest` у файла в последнем релизе):
+2. Сверить контрольную сумму с опубликованной (поле `digest` у файла в последнем релизе). Команда печатает `OK`
+   или `MISMATCH`; при `MISMATCH` или пустом `digest` установщик не запускать и сказать пользователю:
    ```bash
-   curl -s https://api.github.com/repos/aokazantsev/AgentProxy/releases/latest | grep -o '"digest": *"sha256:[0-9a-f]*"'
-   sha256sum "$TEMP/AgentProxySetup.exe"
+   expected=$(curl -s https://api.github.com/repos/aokazantsev/AgentProxy/releases/latest | grep -o '"digest": *"sha256:[0-9a-f]*"' | grep -o '[0-9a-f]\{64\}'); actual=$(sha256sum "$TEMP/AgentProxySetup.exe" | cut -d' ' -f1); [ -n "$expected" ] && [ "$expected" = "$actual" ] && echo OK || echo MISMATCH
    ```
 3. Поставить молча, права администратора не нужны:
    ```bash
@@ -28,7 +28,8 @@
    Код выхода 0 — успех, журнал установки — `%TEMP%\AgentProxy-setup.log`. Установщик кладёт программу в
    `%LOCALAPPDATA%\Programs\AgentProxy`, включает автозапуск, запускает программу и подключает Claude Code:
    MCP-сервер `agentproxy`, скилл `agentproxy` и хуки. Ключи: `--noautostart`, `--dir="<папка>"`,
-   `--option:claude=0` (не подключать Claude Code), `--option:crashReports=1` (отправлять автору отчёты о сбоях).
+   `--option:claude=0` (не подключать Claude Code), `--option:crashReports=1` (отправлять автору отчёты о сбоях — только если пользователь прямо согласился:
+   в отчёт уходит журнал программы).
    Ключи пишутся и через `/` (`/silent`), но из Git Bash — только через `--`: Git Bash превращает `/silent` в путь.
 4. Проверить:
    ```bash
@@ -111,6 +112,7 @@ adb reverse --remove tcp:8890
 |---|---|
 | Встроенный Python и зависимости | `py tools\runtime.py fetch` |
 | Обновить зафиксированные версии | `py tools\runtime.py lock` |
+| Пересобрать значок `src\app.ico` | `py tools\make_icon.py` (нужен Pillow: `py -m pip install pillow`) |
 | Все тесты (движок и C#) | `test.cmd` |
 | Только тесты движка | `py tools\test.py` |
 | Программа без запуска | `build.cmd nostart` |

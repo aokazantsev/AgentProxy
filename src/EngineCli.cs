@@ -8,7 +8,7 @@ namespace AgentProxy
 {
     internal static class EngineCli
     {
-        private const int TimeoutMs = 120 * 1000;
+        private const int TimeoutMs = 180 * 1000;
 
         public static string PythonPath(string installDirectory)
         {
@@ -17,7 +17,7 @@ namespace AgentProxy
 
         public static ProcessStartInfo StartInfo(string installDirectory, string arguments)
         {
-            return new ProcessStartInfo(PythonPath(installDirectory), "-I " + arguments)
+            return new ProcessStartInfo(PythonPath(installDirectory), "-I -X utf8 " + arguments)
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -74,7 +74,15 @@ namespace AgentProxy
         {
             try
             {
-                process.Kill();
+                using (Process tree = Process.Start(new ProcessStartInfo("taskkill.exe", "/T /F /PID " + process.Id)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }))
+                {
+                    tree.WaitForExit(10000);
+                }
+                if (!process.HasExited) process.Kill();
             }
             catch (InvalidOperationException)
             {

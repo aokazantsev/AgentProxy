@@ -36,12 +36,15 @@ def describe(env, status):
 
 def session_start_context(env, hook_input, status=None, now=None):
     parts = [describe(env, status)]
-    previous = integration.recent_update(env, now)
+    session_id = hook_input.get("session_id") if isinstance(hook_input, dict) else None
+    seen = SeenVersions(env.data_dir)
+    previous = seen.get(session_id) if session_id else None
+    if previous is None or previous == VERSION:
+        previous = integration.recent_update(env, now)
     if previous:
         parts.append(integration.update_notice(env, previous))
-    session_id = hook_input.get("session_id") if isinstance(hook_input, dict) else None
     if session_id:
-        SeenVersions(env.data_dir).remember(session_id, VERSION, now)
+        seen.remember(session_id, VERSION, now)
     return "\n\n".join(part for part in parts if part)
 
 

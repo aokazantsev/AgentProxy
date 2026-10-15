@@ -28,6 +28,9 @@ namespace AgentProxy.Tests
             Run("silent setup rejects unknown", SilentRejectsUnknown);
             Run("dash arguments become slash arguments", DashArguments);
             Run("readme silent commands parse with real options", ReadmeSilentCommands);
+            Run("download verification", DownloadVerification);
+            Run("previous install location comparison", PreviousLocation);
+            Run("json writer keeps doubles and refuses dates", JsonWriterNumbersAndDates);
             Run("json writer round trip", JsonWriterRoundTrip);
             Run("cleaner removes only our entries", CleanerRemovesOnlyOurs);
             Run("engine starts with tray start info and stops by token", EngineStartsWithTrayStartInfo);
@@ -289,6 +292,47 @@ namespace AgentProxy.Tests
             Equal(true, custom.Has(CrashReportConsent.OptionKey), "crash reports on");
             Equal(false, custom.EnablesAutostart, "autostart off");
             Equal(@"D:\AP", custom.TargetDirectory, "dir");
+        }
+
+        private static void DownloadVerification()
+        {
+            string path = Path.GetTempFileName();
+            try
+            {
+                File.WriteAllText(path, "abc");
+                const string abcHash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+                UpdateChecker.Verify(path, new UpdateRelease("0.2", "u", 3, abcHash));
+                UpdateChecker.Verify(path, new UpdateRelease("0.2", "u", 3, null));
+                True(File.Exists(path), "accepted file kept");
+                Throws<IOException>(() => UpdateChecker.Verify(path, new UpdateRelease("0.2", "u", 3, new string('0', 64))), "hash mismatch");
+                True(!File.Exists(path), "rejected file deleted");
+                File.WriteAllText(path, "abc");
+                Throws<IOException>(() => UpdateChecker.Verify(path, new UpdateRelease("0.2", "u", 4, abcHash)), "size mismatch");
+                True(!File.Exists(path), "short file deleted");
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+
+        private static void PreviousLocation()
+        {
+            Equal(false, SetupProfile.IsDifferentLocation(@"C:\Apps\AgentProxy", @"c:\apps\agentproxy\"), "case and slash");
+            Equal(false, SetupProfile.IsDifferentLocation("C:/Apps/AgentProxy", @"C:\Apps\AgentProxy"), "forward slashes");
+            Equal(true, SetupProfile.IsDifferentLocation(@"C:\Apps\AgentProxy", @"D:\AgentProxy"), "other drive");
+            Equal(true, SetupProfile.IsDifferentLocation(@"C:\Apps\AgentProxy", @"C:\Apps\AgentProxy2"), "prefix only");
+        }
+
+        private static void JsonWriterNumbersAndDates()
+        {
+            var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
+            object parsed = serializer.DeserializeObject("{\"x\": 1.2345678901234567e-5, \"big\": 9007199254740993, \"n\": 3}");
+            string written = JsonWriter.Write(parsed);
+            object again = serializer.DeserializeObject(written);
+            Equal(serializer.Serialize(parsed), serializer.Serialize(again), "numbers survive: " + written);
+            object dated = serializer.DeserializeObject("{\"d\": \"\\/Date(0)\\/\"}");
+            Throws<ArgumentException>(() => JsonWriter.Write(dated), "date refused");
         }
 
         private static void JsonWriterRoundTrip()

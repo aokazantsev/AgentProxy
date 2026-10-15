@@ -1,7 +1,10 @@
+import logging
 import os
 import time
 
 from . import jsonfile
+
+log = logging.getLogger("agentproxy.sessions")
 
 FILE_NAME = "claude-sessions.json"
 MAX_SESSIONS = 300
@@ -37,7 +40,8 @@ class SeenVersions:
         for _ in range(SAVE_ATTEMPTS):
             try:
                 jsonfile.save(self.path, fresh)
-                return True
-            except OSError:
+                return
+            except OSError as error:
+                problem = error
                 time.sleep(SAVE_RETRY_SECONDS)
-        return False
+        log.warning("seen versions not saved: %s", problem)

@@ -3,10 +3,11 @@ import time
 import uuid
 
 from .store import FlowRecord
+from .streamtap import StreamTap, should_stream
 
 log = logging.getLogger("agentproxy.recorder")
 
-STREAMED_TYPES = ("text/event-stream",)
+UNDECODED_NOTE = "[AgentProxy] response body was passed through but not recorded: {0}"
 TLS_CLIENT_ERROR = "TLS handshake with the client failed: the app does not trust the AgentProxy certificate ({0})"
 
 
@@ -23,29 +24,6 @@ def _body(message, limit):
         content = message.raw_content
     content = content or b""
     return content[:limit], len(content)
-
-
-def should_stream(content_type, content_length, limit):
-    if any(kind in (content_type or "").lower() for kind in STREAMED_TYPES):
-        return True
-    try:
-        return content_length is not None and int(content_length) > limit
-    except ValueError:
-        return False
-
-
-class StreamTap:
-    def __init__(self, limit):
-        self.limit = limit
-        self.captured = bytearray()
-        self.size = 0
-
-    def __call__(self, chunk):
-        self.size += len(chunk)
-        room = self.limit - len(self.captured)
-        if room > 0:
-            self.captured.extend(chunk[:room])
-        return chunk
 
 
 def build_record(flow, limit, tap=None, error=None):
@@ -69,7 +47,9 @@ def build_record(flow, limit, tap=None, error=None):
     )
     response = flow.response
     if response is not None:
-        if tap is not None:
+        if tap is not None and tap.decode_error is not None:
+            response_body, response_size = UNDECODED_NOTE.format(tap.decode_error).encode("utf-8"), 0
+        elif tap is not None:
             response_body, response_size = bytes(tap.captured), tap.size
         else:
             response_body, response_size = _body(response, limit)
@@ -108,8 +88,9 @@ class Recorder:
 
     def responseheaders(self, flow):
         headers = flow.response.headers
-        if should_stream(headers.get("content-type"), headers.get("content-length"), self.body_limit):
-            tap = StreamTap(self.body_limit)
+        if should_stream(flow.request.method, flow.response.status_code, headers.get("content-type"),
+                         headers.get("content-length"), self.body_limit):
+            tap = StreamTap(self.body_limit, headers.get("content-encoding"))
             self.taps[flow.id] = tap
             flow.response.stream = tap
 

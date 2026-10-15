@@ -1,10 +1,24 @@
 import os
+import shutil
 import socket
 
 import pytest
 
 from agentproxy.settings import Settings
 from agentproxy.store import FlowRecord, FlowStore
+
+
+def git_bash():
+    candidates = [os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")]
+    git = shutil.which("git")
+    if git:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(git)))
+        candidates.append(os.path.join(root, "bin", "bash.exe"))
+    candidates.append(os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"))
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def free_port():

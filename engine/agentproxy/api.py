@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import json
 import logging
@@ -145,10 +146,10 @@ class McpHandler(BaseHandler):
 
 
 class PromptHookHandler(BaseHandler):
-    def post(self):
+    async def post(self):
         try:
             hook_input = self.json_body()
-            context = claude_hooks.prompt_context(self.context["claude_env"], hook_input)
+            context = await asyncio.to_thread(claude_hooks.prompt_context, self.context["claude_env"], hook_input)
         except Exception:
             log.exception("prompt hook failed")
             context = ""

@@ -141,6 +141,13 @@ namespace AgentProxy
             {
                 code = -1;
             }
+            try
+            {
+                exited.WaitForExit();
+            }
+            catch (InvalidOperationException)
+            {
+            }
             ui.Post(state => HandleExit(exited, code), null);
         }
 

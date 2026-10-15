@@ -12,6 +12,8 @@ namespace AgentProxy
         private const string NoAutostartFlag = "/noautostart";
         private const string OptionPrefix = "/option:";
         public const string NotifyFlag = "/notify";
+        private const int UninstallWaitMs = 60 * 1000;
+        private const int UninstallPollMs = 500;
         public const int ExitOk = 0;
         public const int ExitFailed = 1;
         public const int ExitBadArguments = 2;
@@ -30,11 +32,19 @@ namespace AgentProxy
             return false;
         }
 
+        private static void WaitForUninstall()
+        {
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(UninstallWaitMs);
+            while (RunningApp.IsUninstalling() && DateTime.UtcNow < deadline) System.Threading.Thread.Sleep(UninstallPollMs);
+        }
+
         private static void ReportFailure(string targetDirectory, Exception error)
         {
             string executable = Path.Combine(targetDirectory, AppIdentity.ExecutableName);
             bool relaunched = false;
-            if (File.Exists(executable))
+            bool engineIntact = File.Exists(EngineCli.PythonPath(targetDirectory))
+                && Directory.Exists(Path.Combine(targetDirectory, "engine"));
+            if (File.Exists(executable) && engineIntact)
             {
                 try
                 {
@@ -48,7 +58,7 @@ namespace AgentProxy
             }
             MessageBox.Show(
                 "Обновление " + AppIdentity.Name + " не установилось: " + error.Message + Environment.NewLine + Environment.NewLine
-                + (relaunched ? "Прежняя версия запущена снова. " : "")
+                + (relaunched ? "Прежняя версия запущена снова. " : "Программа повреждена и не запущена. ")
                 + "Подробности — в " + SetupLog.FilePath + ". Скачанный установщик можно запустить ещё раз двойным щелчком.",
                 AppIdentity.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -113,6 +123,7 @@ namespace AgentProxy
                 return ExitBadArguments;
             }
             request.TargetDirectory = Path.GetFullPath(request.TargetDirectory);
+            WaitForUninstall();
             var installation = new Installation(request, (percent, message) => { });
             try
             {

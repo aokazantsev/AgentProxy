@@ -114,7 +114,6 @@ namespace AgentProxy
             if (hook == null) return false;
             object value;
             if (hook.TryGetValue("command", out value) && value is string && ((string)value).Contains(CliModule)) return true;
-            if (hook.TryGetValue("args", out value) && value is object[] && Array.IndexOf((object[])value, CliModule) >= 0) return true;
             return hook.TryGetValue("url", out value) && value is string && ((string)value).EndsWith(HookPath, StringComparison.Ordinal);
         }
 
@@ -131,7 +130,15 @@ namespace AgentProxy
 
         private static void Save(string path, Dictionary<string, object> data)
         {
-            File.WriteAllText(path, JsonWriter.Write(data) + "\n", new UTF8Encoding(false));
+            string text = JsonWriter.Write(data) + "\n";
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            {
+                File.WriteAllText(path, text, new UTF8Encoding(false));
+                return;
+            }
+            string temporary = path + ".agentproxy-tmp";
+            File.WriteAllText(temporary, text, new UTF8Encoding(false));
+            File.Replace(temporary, path, null);
         }
     }
 }

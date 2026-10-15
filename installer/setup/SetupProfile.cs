@@ -99,13 +99,22 @@ namespace AgentProxy
                 if (problem != null) throw new InvalidOperationException("Не удалось заменить файлы движка (" + problem + "). Закрой программы, которые их держат, и повтори установку.");
             }
             SetupLog.Append("old engine and runtime removed");
-            RemovePreviousLocation(target, notes);
+        }
+
+        public static bool IsDifferentLocation(string previous, string target)
+        {
+            return !string.Equals(Normalize(previous), Normalize(target), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string Normalize(string path)
+        {
+            return Path.GetFullPath(path.Replace('/', '\\')).TrimEnd('\\');
         }
 
         private static void RemovePreviousLocation(string target, List<string> notes)
         {
             string previous = UninstallRegistration.InstalledLocation();
-            if (previous == null || string.Equals(Path.GetFullPath(previous).TrimEnd('\\'), target.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return;
+            if (previous == null || !IsDifferentLocation(previous, target)) return;
             if (!File.Exists(Path.Combine(previous, AppIdentity.ExecutableName))) return;
             string problem = FolderRemoval.Delete(previous, () => EngineProcesses.StopAll(previous));
             SetupLog.Append("previous location " + previous + ": " + (problem ?? "removed"));
@@ -116,6 +125,7 @@ namespace AgentProxy
 
         public static void AfterExtract(InstallRequest request, Action<int, string> report, List<string> notes)
         {
+            RemovePreviousLocation(request.TargetDirectory, notes);
             report(80, "Claude Code…");
             bool wanted = request.Has(ClaudeKey);
             EngineCliResult result = EngineCli.Run(request.TargetDirectory, "claude " + (wanted ? "install" : "uninstall"));

@@ -10,6 +10,9 @@ namespace AgentProxy
 
         public static void Remove(string installDirectory, List<string> problems)
         {
+            bool stopped = EngineProcesses.StopAll(installDirectory);
+            UninstallLog.Append("engine stopped: " + stopped);
+            if (!stopped) problems.Add("движок не закрылся");
             EngineCliResult result = EngineCli.Run(installDirectory, "claude uninstall");
             UninstallLog.Append("claude uninstall: " + result.Describe());
             if (!result.Succeeded)
@@ -18,9 +21,6 @@ namespace AgentProxy
                 UninstallLog.Append("claude fallback cleanup: " + (fallback ?? "done"));
                 if (fallback != null) problems.Add("интеграция с Claude Code снята не полностью: " + fallback);
             }
-            bool stopped = EngineProcesses.StopAll(installDirectory);
-            UninstallLog.Append("engine stopped: " + stopped);
-            if (!stopped) problems.Add("движок не закрылся");
         }
     }
 }

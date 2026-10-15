@@ -13,9 +13,6 @@ def data_dir():
 
 
 def install_dir():
-    override = os.environ.get("AGENTPROXY_INSTALL_DIR")
-    if override:
-        return override
     python_dir = os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.dirname(python_dir))
 

@@ -91,7 +91,7 @@ namespace AgentProxy
             }
             if (state == EngineState.Starting) return "запускается…";
             if (state == EngineState.Stopped) return "остановлен";
-            if (state == EngineState.PortBusy) return "порт занят";
+            if (state == EngineState.PortBusy) return detail ?? "порт занят";
             if (state == EngineState.Crashed) return detail ?? "движок упал";
             return detail ?? state.ToString();
         }
@@ -126,7 +126,7 @@ namespace AgentProxy
                 tray.ShowBalloonTip(5000, AppIdentity.Name, StateText(state, engine.Settings ?? EngineSettings.Load())
                     + ". Подробности — в журнале.", ToolTipIcon.Warning);
             }
-            notifiedState = state;
+            if (state != EngineState.Starting) notifiedState = state;
         }
 
         private void OpenMonitor()

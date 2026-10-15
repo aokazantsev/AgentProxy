@@ -20,5 +20,5 @@ half = 190
 draw.polygon([(S // 2, y - half), (S // 2 + half, y), (S // 2, y + half), (S // 2 - half, y)], fill=ACCENT)
 draw.ellipse((S // 2 - 70, y - 70, S // 2 + 70, y + 70), fill=NODE)
 
-image.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.ico"),
+image.save(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "app.ico"),
            sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (256, 256)])

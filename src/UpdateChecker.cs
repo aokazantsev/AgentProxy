@@ -56,6 +56,16 @@ namespace AgentProxy
                 asset.Groups[2].Success ? asset.Groups[2].Value.ToLowerInvariant() : null);
         }
 
+        public static void Verify(string path, UpdateRelease release)
+        {
+            string problem = null;
+            if (release.Size > 0 && new FileInfo(path).Length != release.Size) problem = "файл скачался не полностью";
+            else if (release.Sha256 != null && Sha256Of(path) != release.Sha256) problem = "контрольная сумма скачанного файла не совпала с опубликованной на GitHub";
+            if (problem == null) return;
+            File.Delete(path);
+            throw new IOException(problem);
+        }
+
         public static string Sha256Of(string path)
         {
             using (FileStream stream = File.OpenRead(path))
@@ -78,16 +88,7 @@ namespace AgentProxy
             {
                 source.CopyTo(output, BufferSize);
             }
-            if (release.Size > 0 && new FileInfo(partial).Length != release.Size)
-            {
-                File.Delete(partial);
-                throw new IOException("файл скачался не полностью");
-            }
-            if (release.Sha256 != null && Sha256Of(partial) != release.Sha256)
-            {
-                File.Delete(partial);
-                throw new IOException("контрольная сумма скачанного файла не совпала с опубликованной на GitHub");
-            }
+            Verify(partial, release);
             if (File.Exists(target)) File.Delete(target);
             File.Move(partial, target);
             return target;

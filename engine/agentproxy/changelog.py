@@ -1,6 +1,6 @@
 import re
 
-HEADING = re.compile(r"^##\s+(\d+(?:\.\d+)*)\b(.*)$")
+HEADING = re.compile(r"^##\s+(\d+(?:\.\d+)*)\b")
 
 
 def version_key(text):
@@ -13,7 +13,7 @@ def parse(text):
     for line in text.splitlines():
         match = HEADING.match(line)
         if match:
-            current = {"version": match.group(1), "title": match.group(2).strip(" —-"), "lines": []}
+            current = {"version": match.group(1), "lines": []}
             entries.append(current)
             continue
         if line.startswith("## ") or line.startswith("# "):

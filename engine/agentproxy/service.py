@@ -118,6 +118,9 @@ class ProxyService:
         return {"flows": self.store.query(build_filter(arguments), limit)}
 
     def get_flow(self, arguments):
+        raw_id = arguments.get("id")
+        if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+            arguments = dict(arguments, id=str(raw_id))
         flow_id = _str(arguments, "id")
         if flow_id is None:
             raise ToolError("id is required")
