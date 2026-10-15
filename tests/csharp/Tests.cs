@@ -35,6 +35,8 @@ namespace AgentProxy.Tests
             Run("folder contents removed except uninstaller", ContentsRemovedExceptUninstaller);
             Run("install folder recognition", InstallFolderRecognition);
             Run("release versions compare numerically", ReleaseVersionsCompare);
+            Run("install target refusals", TargetRefusals);
+            Run("uninstaller owns registration", OwnsRegistration);
             Run("json writer keeps doubles and refuses dates", JsonWriterNumbersAndDates);
             Run("json writer round trip", JsonWriterRoundTrip);
             Run("cleaner removes only our entries", CleanerRemovesOnlyOurs);
@@ -388,6 +390,49 @@ namespace AgentProxy.Tests
                 File.WriteAllText(Path.Combine(root, AppIdentity.ExecutableName), "x");
                 Equal(true, InstallFolder.LooksInstalled(root), "program present");
                 Equal(false, InstallFolder.HoldsOnlyUninstaller(Path.Combine(root, "missing")), "missing folder");
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+
+        private static void TargetRefusals()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "AgentProxyRefuse-" + Guid.NewGuid().ToString("N"));
+            string foreign = Path.Combine(root, "documents");
+            string installed = Path.Combine(root, "installed");
+            Directory.CreateDirectory(foreign);
+            Directory.CreateDirectory(installed);
+            File.WriteAllText(Path.Combine(foreign, "notes.txt"), "x");
+            File.WriteAllText(Path.Combine(installed, AppIdentity.ExecutableName), "x");
+            try
+            {
+                True(InstallTarget.Validate(foreign, null) != null, "foreign non-empty folder");
+                Equal<string>(null, InstallTarget.Validate(installed, installed), "same installation");
+                True(InstallTarget.Validate(@"C:\", null) != null, "drive root");
+                True(InstallTarget.Validate(Path.Combine(installed, "inner"), installed) != null, "inside previous installation");
+                True(InstallTarget.Validate(root, installed) != null, "around previous installation");
+                Equal<string>(null, InstallTarget.Validate(Path.Combine(root, "other"), installed), "next to previous installation");
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+
+        private static void OwnsRegistration()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "AgentProxyOwner-" + Guid.NewGuid().ToString("N"));
+            string current = Path.Combine(root, "current");
+            Directory.CreateDirectory(current);
+            File.WriteAllText(Path.Combine(current, AppIdentity.ExecutableName), "x");
+            try
+            {
+                Equal(true, InstallFolder.OwnsRegistration(null, Path.Combine(root, "old")), "no registration");
+                Equal(true, InstallFolder.OwnsRegistration(current, current.ToUpperInvariant() + "\\"), "same folder");
+                Equal(false, InstallFolder.OwnsRegistration(current, Path.Combine(root, "old")), "registration of moved install");
+                Equal(true, InstallFolder.OwnsRegistration(Path.Combine(root, "gone"), Path.Combine(root, "old")), "dead registration");
             }
             finally
             {

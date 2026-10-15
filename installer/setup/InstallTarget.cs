@@ -14,6 +14,11 @@ namespace AgentProxy
 
         public static string Validate(string directory)
         {
+            return Validate(directory, UninstallRegistration.InstalledLocation());
+        }
+
+        public static string Validate(string directory, string installed)
+        {
             if (string.IsNullOrWhiteSpace(directory)) return "Укажи папку установки.";
             string fullPath;
             try
@@ -28,7 +33,6 @@ namespace AgentProxy
             {
                 return "Нельзя ставить в корень диска — выбери папку, например " + AppIdentity.DefaultInstallDirectory + ".";
             }
-            string installed = UninstallRegistration.InstalledLocation();
             if (installed != null && SetupProfile.IsDifferentLocation(installed, fullPath) && SetupProfile.IsNested(installed, fullPath))
             {
                 return "Папка пересекается с прежней установкой в " + installed + ". Выбери эту же папку или папку вне её.";

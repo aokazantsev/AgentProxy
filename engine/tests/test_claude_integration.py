@@ -164,6 +164,7 @@ def test_session_start_context_running(env):
               "monitor": "http://127.0.0.1:8891/", "flows": 3}
     text = hooks.session_start_context(env, {"session_id": "s1"}, status, now=10)
     assert "работает" in text and "8890" in text
+    assert "записано запросов: 3" in text
     assert SeenVersions(env.data_dir).get("s1") == VERSION
 
 
@@ -181,6 +182,7 @@ def test_session_start_context_ignores_strings_from_status(env):
 def test_session_start_context_not_running(env):
     text = hooks.session_start_context(env, {}, None)
     assert "не отвечает" in text
+    assert "explorer.exe" in text and "AgentProxy.exe" in text and "engine.log" in text
 
 
 def test_session_start_includes_recent_update(env):

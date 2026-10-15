@@ -479,6 +479,22 @@ def read_first_part_before_release(opener, url, size):
     return first, response.read()
 
 
+def test_large_request_body_is_streamed_and_cut_to_limit(start_engine):
+    engine = start_engine(max_body_bytes=1024)
+    target = start_server()
+    body = b"y" * 10240
+    request = urllib.request.Request("http://127.0.0.1:{0}/upload".format(target.server_port), data=body,
+                                     method="POST")
+    reply = json.loads(proxied_opener(engine).open(request, timeout=15).read())
+    assert reply["echo"] == body.decode()
+    listing = api_get(engine["api_port"], "/api/flows?path=/upload")[1]
+    flow = api_get(engine["api_port"], "/api/flows/" + listing["flows"][0]["id"])[1]
+    assert flow["request_body"]["size"] == 10240
+    assert flow["request_body"]["truncated"] is True
+    assert flow["request_body"]["content"] == "y" * 1024
+    target.shutdown()
+
+
 def test_large_body_streams_before_upstream_finishes(start_engine):
     engine = start_engine(max_body_bytes=1024)
     target = start_streaming_server()

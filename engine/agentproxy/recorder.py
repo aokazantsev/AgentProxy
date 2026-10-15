@@ -3,7 +3,7 @@ import time
 import uuid
 
 from .store import FlowRecord
-from .streamtap import StreamTap, decode_body, should_stream
+from .streamtap import StreamTap, decode_body, should_stream, should_stream_request
 
 log = logging.getLogger("agentproxy.recorder")
 
@@ -25,9 +25,16 @@ def _body(message, limit):
     return decoded
 
 
-def build_record(flow, limit, tap=None, error=None):
+def _tapped(tap):
+    if tap.decode_error is not None:
+        note = UNDECODED_NOTE.format(tap.decode_error).encode("utf-8")
+        return note, len(note)
+    return bytes(tap.captured), tap.size
+
+
+def build_record(flow, limit, tap=None, error=None, request_tap=None):
     request = flow.request
-    request_body, request_size = _body(request, limit)
+    request_body, request_size = _tapped(request_tap) if request_tap is not None else _body(request, limit)
     record = FlowRecord(
         id=flow.id,
         started=request.timestamp_start or time.time(),
@@ -46,10 +53,8 @@ def build_record(flow, limit, tap=None, error=None):
     )
     response = flow.response
     if response is not None:
-        if tap is not None and tap.decode_error is not None:
-            response_body, response_size = UNDECODED_NOTE.format(tap.decode_error).encode("utf-8"), 0
-        elif tap is not None:
-            response_body, response_size = bytes(tap.captured), tap.size
+        if tap is not None:
+            response_body, response_size = _tapped(tap)
         else:
             response_body, response_size = _body(response, limit)
         record.status = response.status_code
@@ -84,6 +89,14 @@ class Recorder:
         self.store = store
         self.body_limit = body_limit
         self.taps = {}
+        self.request_taps = {}
+
+    def requestheaders(self, flow):
+        headers = flow.request.headers
+        if should_stream_request(headers.get("content-length"), self.body_limit):
+            tap = StreamTap(self.body_limit, headers.get("content-encoding"))
+            self.request_taps[flow.id] = tap
+            flow.request.stream = tap
 
     def responseheaders(self, flow):
         headers = flow.response.headers
@@ -114,7 +127,8 @@ class Recorder:
 
     def _save(self, flow, error=None):
         tap = self.taps.pop(flow.id, None)
+        request_tap = self.request_taps.pop(flow.id, None)
         try:
-            self.store.insert(build_record(flow, self.body_limit, tap, error))
+            self.store.insert(build_record(flow, self.body_limit, tap, error, request_tap))
         except Exception:
             log.exception("flow %s not recorded", flow.id)

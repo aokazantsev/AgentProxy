@@ -11,6 +11,13 @@ namespace AgentProxy
                 || (File.Exists(Path.Combine(directory, AppIdentity.UninstallerName)) && Directory.Exists(Path.Combine(directory, "runtime")));
         }
 
+        public static bool OwnsRegistration(string registered, string installDirectory)
+        {
+            if (registered == null || !File.Exists(Path.Combine(registered, AppIdentity.ExecutableName))) return true;
+            return string.Equals(Path.GetFullPath(registered).TrimEnd('\\'), Path.GetFullPath(installDirectory).TrimEnd('\\'),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
         public static bool HoldsOnlyUninstaller(string directory)
         {
             if (!Directory.Exists(directory)) return false;

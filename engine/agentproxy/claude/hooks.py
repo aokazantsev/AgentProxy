@@ -24,7 +24,7 @@ def describe(env, status):
     if status is None:
         exe = os.path.join(env.install_dir, "AgentProxy.exe")
         return ("AgentProxy {0} установлен, но движок не отвечает на 127.0.0.1:{1}: MCP-инструменты agentproxy "
-                "недоступны. Запуск — \"{2}\" или значок в трее. Журналы: {3}\\log.txt, {3}\\engine.log."
+                "недоступны. Запуск без ожидания: explorer.exe \"{2}\" (не вызывать exe напрямую из Bash — команда повиснет), или значок в трее. Журналы: {3}\\log.txt, {3}\\engine.log."
                 .format(VERSION, env.api_port, exe, env.data_dir))
     proxy = status.get("proxy") if isinstance(status.get("proxy"), dict) else {}
     state = "работает" if proxy.get("running") is True else "запущен, но прокси не слушает порт (см. engine.log)"

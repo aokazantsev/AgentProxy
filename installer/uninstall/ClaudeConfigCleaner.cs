@@ -144,7 +144,7 @@ namespace AgentProxy
             }
             catch (Exception)
             {
-                File.Delete(temporary);
+                if (File.Exists(path)) File.Delete(temporary);
                 throw;
             }
         }

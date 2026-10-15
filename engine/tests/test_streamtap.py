@@ -1,4 +1,6 @@
 import gzip
+import os
+import time
 import zlib
 
 import brotli
@@ -7,7 +9,8 @@ import zstandard
 from mitmproxy.test import tflow
 
 from agentproxy import recorder
-from agentproxy.streamtap import COUNTED_BYTES_LIMIT, StreamTap, decode_body, should_stream
+from agentproxy.streamtap import (COUNTED_BYTES_LIMIT, OUTPUT_STEP, StreamTap, decode_body, should_stream,
+                                   should_stream_request)
 
 
 @pytest.mark.parametrize("method,status,content_type,length,expected", [
@@ -69,11 +72,43 @@ def zstd_bytes(raw):
     ("gzip", gzip.compress(b"abc" * 1000) + b"\0\0trailing junk"),
 ])
 def test_tap_decodes_variants_mitmproxy_accepts(encoding, wire):
-    tap = StreamTap(10000, encoding)
-    assert feed(tap, wire) == wire
-    assert tap.decode_error is None
-    assert bytes(tap.captured) == b"abc" * 1000
-    assert tap.size == 3000
+    for pieces in (1, 7, len(wire)):
+        tap = StreamTap(10000, encoding)
+        assert feed(tap, wire, pieces) == wire
+        assert tap.decode_error is None
+        assert bytes(tap.captured) == b"abc" * 1000
+        assert tap.size == 3000
+
+
+def test_zstd_frames_split_anywhere_are_all_decoded():
+    first, second = os.urandom(300), os.urandom(20)
+    wire = zstd_bytes(first) + zstd_bytes(second)
+    for cut in range(1, len(wire)):
+        tap = StreamTap(1000, "zstd")
+        tap(wire[:cut])
+        tap(wire[cut:])
+        assert bytes(tap.captured) == first + second, cut
+
+
+def test_zstd_frame_with_huge_window_is_refused():
+    params = zstandard.ZstdCompressionParameters(window_log=27, write_content_size=False)
+    compressor = zstandard.ZstdCompressor(compression_params=params).compressobj()
+    wire = compressor.compress(b"a" * 100) + compressor.flush()
+    tap = StreamTap(1000, "zstd")
+    assert tap(wire) == wire
+    assert tap.decode_error is not None
+
+
+@pytest.mark.parametrize("encoding,encode", [
+    ("zstd", lambda raw: zstandard.ZstdCompressor(level=1).compress(raw)),
+    ("gzip", lambda raw: gzip.compress(raw, compresslevel=1)),
+    ("br", lambda raw: brotli.compress(raw, quality=1)),
+])
+def test_large_body_decodes_in_linear_time(encoding, encode):
+    wire = encode(os.urandom(8 * 1024 * 1024))
+    started = time.monotonic()
+    assert decode_body(wire, encoding, 1000)[1] == 8 * 1024 * 1024
+    assert time.monotonic() - started < 3
 
 
 @pytest.mark.parametrize("encoding,encode", [
@@ -82,12 +117,18 @@ def test_tap_decodes_variants_mitmproxy_accepts(encoding, wire):
     ("zstd", lambda raw: zstandard.ZstdCompressor(level=19).compress(raw)),
 ])
 def test_tap_stops_decoding_a_compression_bomb(encoding, encode):
-    wire = encode(b"\0" * (COUNTED_BYTES_LIMIT * 2))
+    wire = encode(b"\0" * (COUNTED_BYTES_LIMIT * 4))
     tap = StreamTap(1000, encoding)
-    feed(tap, wire, pieces=3)
+    tap(wire)
     assert tap.decode_error is None
     assert len(tap.captured) == 1000
-    assert COUNTED_BYTES_LIMIT <= tap.size < COUNTED_BYTES_LIMIT * 2
+    assert COUNTED_BYTES_LIMIT <= tap.size <= COUNTED_BYTES_LIMIT + 8 * 1024 * 1024
+    assert OUTPUT_STEP < COUNTED_BYTES_LIMIT
+
+
+@pytest.mark.parametrize("length,expected", [(None, True), ("100", False), ("5000", True), ("bad", True)])
+def test_should_stream_request(length, expected):
+    assert should_stream_request(length, 1024) is expected
 
 
 def test_decode_body_returns_prefix_and_full_size():
@@ -102,7 +143,15 @@ def test_record_keeps_note_when_stream_was_not_decoded():
     tap(b"not gzip at all")
     record = recorder.build_record(flow, 100, tap)
     assert record.response_body.startswith(b"[AgentProxy] response body was passed through but not recorded")
-    assert record.response_body_size == 0
+    assert record.response_body_size == len(record.response_body)
+
+
+def test_record_takes_streamed_request_body_from_its_tap():
+    flow = tflow.tflow(resp=True)
+    request_tap = StreamTap(4, None)
+    request_tap(b"uploaded")
+    record = recorder.build_record(flow, 4, None, None, request_tap)
+    assert record.request_body == b"uplo" and record.request_body_size == 8
 
 
 def test_record_decodes_compressed_body_within_limit():

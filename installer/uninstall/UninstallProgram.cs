@@ -20,7 +20,6 @@ namespace AgentProxy
         private const int ExitCancelled = 1;
         private const int ExitIncomplete = 2;
         private const string Title = "Удаление " + AppIdentity.Name;
-        private const string SetupMutex = AppIdentity.Name + ".Setup";
 
         [STAThread]
         private static int Main(string[] args)
@@ -56,7 +55,7 @@ namespace AgentProxy
             {
                 UninstallLog.Start(installDirectory);
                 UninstallLog.Append("uninstall refused: setup is running");
-                if (!silent) MessageBox.Show("Сейчас идёт установка " + AppIdentity.Name + ". Дождись её окончания и повтори удаление.", Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (!silent) MessageBox.Show("Открыт установщик " + AppIdentity.Name + ". Дождись окончания установки, закрой его окно и повтори удаление.", Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return ExitIncomplete;
             }
             if (!silent && Ask() != DialogResult.Yes) return ExitCancelled;
@@ -104,9 +103,7 @@ namespace AgentProxy
             var problems = new List<string>();
             UninstallLog.Start(installDirectory);
             string registered = UninstallRegistration.InstalledLocation();
-            bool ownsRegistration = registered == null || !File.Exists(Path.Combine(registered, AppIdentity.ExecutableName))
-                || string.Equals(Path.GetFullPath(registered).TrimEnd('\\'), Path.GetFullPath(installDirectory).TrimEnd('\\'),
-                    StringComparison.OrdinalIgnoreCase);
+            bool ownsRegistration = InstallFolder.OwnsRegistration(registered, installDirectory);
             UninstallLog.Append("registered location: " + (registered ?? "none") + ", owns registration: " + ownsRegistration);
             if (!ownsRegistration)
             {
@@ -156,7 +153,7 @@ namespace AgentProxy
         private static bool SetupRunning()
         {
             Mutex setup;
-            if (!Mutex.TryOpenExisting(SetupMutex, out setup)) return false;
+            if (!Mutex.TryOpenExisting(AppIdentity.SetupMutex, out setup)) return false;
             setup.Dispose();
             return true;
         }
