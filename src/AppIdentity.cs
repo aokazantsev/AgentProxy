@@ -10,6 +10,7 @@ namespace AgentProxy
         public const string ExecutableName = "AgentProxy.exe";
         public const string ProcessName = "AgentProxy";
         public const string UninstallerName = "Uninstall.exe";
+        public const string InstallMarkerName = "AgentProxy.install";
         public const string SingleInstanceMutex = "AgentProxy.SingleInstance";
         public const string SetupMutex = "AgentProxy.Setup";
         public const string GitHubUrl = "https://github.com/aokazantsev/AgentProxy";

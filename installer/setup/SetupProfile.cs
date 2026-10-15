@@ -132,6 +132,7 @@ namespace AgentProxy
 
         public static void AfterExtract(InstallRequest request, Action<int, string> report, List<string> notes)
         {
+            InstallFolder.Mark(request.TargetDirectory);
             RemovePreviousLocation(request.TargetDirectory, notes);
             report(80, "Claude Code…");
             bool wanted = request.Has(ClaudeKey);

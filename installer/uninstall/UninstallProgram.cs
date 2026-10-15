@@ -119,19 +119,20 @@ namespace AgentProxy
                 string dataProblem = FolderRemoval.Delete(AppIdentity.DataDirectory, null);
                 if (dataProblem != null) problems.Add("папка данных удалена не полностью (" + dataProblem + ")");
             }
-            if (InstallFolder.LooksInstalled(installDirectory))
+            if (InstallFolder.IsOurs(installDirectory, registered))
             {
-                string contentProblem = FolderRemoval.DeleteContentsExcept(installDirectory, AppIdentity.UninstallerName);
+                string contentProblem = FolderRemoval.DeleteContentsExcept(installDirectory, AppIdentity.UninstallerName,
+                    AppIdentity.InstallMarkerName);
                 if (contentProblem != null) problems.Add("файлы программы удалены не полностью (" + contentProblem + ")");
             }
             else
             {
-                UninstallLog.Append("install folder skipped: no " + AppIdentity.ExecutableName + " in it");
+                UninstallLog.Append("install folder skipped: not recognised as an installation");
             }
             UninstallLog.Steps(problems);
             SignalSteps(eventName);
             WaitForParent(parentPid);
-            if (InstallFolder.HoldsOnlyUninstaller(installDirectory))
+            if (InstallFolder.HoldsOnlyLeftovers(installDirectory))
             {
                 string folderProblem = FolderRemoval.Delete(installDirectory, null);
                 UninstallLog.Append("install folder: " + (folderProblem ?? "removed"));
@@ -189,7 +190,8 @@ namespace AgentProxy
 
         private static void ScheduleSelfDelete()
         {
-            Process.Start(new ProcessStartInfo("cmd.exe", "/c ping -n 3 127.0.0.1 >nul & del /f /q \"" + Application.ExecutablePath + "\"")
+            Process.Start(new ProcessStartInfo(SystemTools.Cmd, "/c \"\"" + SystemTools.Ping + "\" -n 3 127.0.0.1 >nul & del /f /q \""
+                + Application.ExecutablePath + "\"\"")
             {
                 CreateNoWindow = true,
                 UseShellExecute = false,

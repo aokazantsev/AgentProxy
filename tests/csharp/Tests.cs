@@ -373,23 +373,25 @@ namespace AgentProxy.Tests
         private static void InstallFolderRecognition()
         {
             string root = Path.Combine(Path.GetTempPath(), "AgentProxyFolder-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(root);
+            string repository = Path.Combine(root, "repository");
+            Directory.CreateDirectory(Path.Combine(repository, "runtime", "python"));
+            File.WriteAllText(Path.Combine(repository, AppIdentity.ExecutableName), "x");
+            File.WriteAllText(Path.Combine(repository, AppIdentity.UninstallerName), "x");
+            File.WriteAllText(Path.Combine(repository, "runtime", "python", "python.exe"), "x");
             try
             {
-                Equal(false, InstallFolder.LooksInstalled(root), "empty folder");
-                Equal(true, InstallFolder.HoldsOnlyUninstaller(root), "empty folder holds nothing foreign");
-                File.WriteAllText(Path.Combine(root, AppIdentity.UninstallerName), "x");
-                Equal(false, InstallFolder.LooksInstalled(root), "uninstaller without runtime");
-                Equal(true, InstallFolder.HoldsOnlyUninstaller(root), "only uninstaller");
-                Directory.CreateDirectory(Path.Combine(root, "runtime"));
-                Equal(true, InstallFolder.LooksInstalled(root), "uninstaller with runtime");
-                Equal(false, InstallFolder.HoldsOnlyUninstaller(root), "runtime left");
-                Directory.Delete(Path.Combine(root, "runtime"));
-                File.WriteAllText(Path.Combine(root, "notes.txt"), "x");
-                Equal(false, InstallFolder.HoldsOnlyUninstaller(root), "foreign file");
-                File.WriteAllText(Path.Combine(root, AppIdentity.ExecutableName), "x");
-                Equal(true, InstallFolder.LooksInstalled(root), "program present");
-                Equal(false, InstallFolder.HoldsOnlyUninstaller(Path.Combine(root, "missing")), "missing folder");
+                Equal(false, InstallFolder.IsOurs(repository, null), "built repository is not an installation");
+                Equal(false, InstallFolder.IsOurs(repository, Path.Combine(root, "other")), "registered elsewhere");
+                Equal(true, InstallFolder.IsOurs(repository, repository.ToUpperInvariant() + "\\"), "registered here");
+                Equal(false, InstallFolder.HoldsOnlyLeftovers(root), "foreign entries are not leftovers");
+                InstallFolder.Mark(repository);
+                Equal(true, InstallFolder.IsOurs(repository, null), "marked by the installer");
+                Equal<string>(null, FolderRemoval.DeleteContentsExcept(repository, AppIdentity.UninstallerName, AppIdentity.InstallMarkerName), "cleanup");
+                Equal(true, InstallFolder.HoldsOnlyLeftovers(repository), "uninstaller and marker left");
+                Equal(true, InstallFolder.IsOurs(repository, null), "half-removed installation is still ours");
+                File.WriteAllText(Path.Combine(repository, "notes.txt"), "x");
+                Equal(false, InstallFolder.HoldsOnlyLeftovers(repository), "foreign file");
+                Equal(false, InstallFolder.HoldsOnlyLeftovers(Path.Combine(root, "missing")), "missing folder");
             }
             finally
             {
@@ -409,6 +411,12 @@ namespace AgentProxy.Tests
             try
             {
                 True(InstallTarget.Validate(foreign, null) != null, "foreign non-empty folder");
+                string built = Path.Combine(root, "built");
+                Directory.CreateDirectory(built);
+                File.WriteAllText(Path.Combine(built, AppIdentity.ExecutableName), "x");
+                True(InstallTarget.Validate(built, null) != null, "folder with a stray AgentProxy.exe");
+                InstallFolder.Mark(built);
+                Equal<string>(null, InstallTarget.Validate(built, null), "folder marked by the installer");
                 Equal<string>(null, InstallTarget.Validate(installed, installed), "same installation");
                 True(InstallTarget.Validate(@"C:\", null) != null, "drive root");
                 True(InstallTarget.Validate(Path.Combine(installed, "inner"), installed) != null, "inside previous installation");

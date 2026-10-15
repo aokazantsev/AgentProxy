@@ -47,7 +47,7 @@ namespace AgentProxy
             var copy = new Button { Text = "Скопировать вкладку", AutoSize = true };
             copy.Click += (sender, e) => CopyCurrent();
             var folder = new Button { Text = "Открыть папку журналов", AutoSize = true };
-            folder.Click += (sender, e) => Process.Start(new ProcessStartInfo("explorer.exe", "\"" + UserDataPaths.Directory + "\"") { UseShellExecute = false });
+            folder.Click += (sender, e) => Process.Start(new ProcessStartInfo(SystemTools.Explorer, "\"" + UserDataPaths.Directory + "\"") { UseShellExecute = false });
             buttons.Controls.Add(close);
             buttons.Controls.Add(copy);
             buttons.Controls.Add(folder);

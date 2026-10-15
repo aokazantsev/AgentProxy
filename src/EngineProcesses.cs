@@ -54,7 +54,7 @@ namespace AgentProxy
         {
             try
             {
-                using (Process taskkill = Process.Start(new ProcessStartInfo("taskkill.exe", "/T /F /PID " + process.Id)
+                using (Process taskkill = Process.Start(new ProcessStartInfo(SystemTools.Taskkill, "/T /F /PID " + process.Id)
                 {
                     CreateNoWindow = true,
                     UseShellExecute = false,

@@ -7,7 +7,8 @@ NO_BODY_STATUSES = (204, 304)
 COUNTED_BYTES_LIMIT = 64 * 1024 * 1024
 OUTPUT_STEP = 256 * 1024
 ZLIB_INPUT_STEP = 64 * 1024
-ZSTD_INPUT_STEP = 256
+ZSTD_INPUT_STEP = 64
+MAX_MEMBERS = 1000
 ZSTD_MAX_WINDOW = 8 * 1024 * 1024
 GZIP_MAGIC = b"\x1f\x8b"
 
@@ -32,6 +33,8 @@ class _ZlibDecoder:
         position = 0
         while position < len(buffer) and not self.done:
             if self.decompressor is None:
+                if self.members >= MAX_MEMBERS:
+                    raise ValueError("too many compressed members")
                 if self.members == 0 and self.wbits is not None:
                     self.decompressor = zlib.decompressobj(self.wbits)
                     self.members = 1
@@ -61,7 +64,7 @@ class _ZlibDecoder:
                     position -= len(self.decompressor.unused_data)
                     self.decompressor = None
                     break
-                if not pending:
+                if not pending and len(piece) < OUTPUT_STEP:
                     break
 
 
@@ -94,6 +97,7 @@ class _ZstdDecoder:
     def __init__(self):
         import zstandard
         self.zstandard = zstandard
+        self.frames = 1
         self.decompressor = self._new()
 
     def _new(self):
@@ -106,13 +110,15 @@ class _ZstdDecoder:
                 yield piece
             while self.decompressor.eof and self.decompressor.unused_data:
                 tail = self.decompressor.unused_data
-                self.decompressor = self._new()
                 piece = self._feed(tail)
                 if piece:
                     yield piece
 
     def _feed(self, part):
         if self.decompressor.eof:
+            self.frames += 1
+            if self.frames > MAX_MEMBERS:
+                raise ValueError("too many compressed frames")
             self.decompressor = self._new()
         return self.decompressor.decompress(part)
 
@@ -154,48 +160,45 @@ def _over_limit(content_length, limit):
 
 
 class StreamTap:
-    def __init__(self, limit, content_encoding=None):
+    def __init__(self, limit, content_encoding=None, wire_limit=None):
         self.limit = limit
-        self.captured = bytearray()
-        self.size = 0
-        self.decode_error = None
-        self.counted_limit = max(limit, COUNTED_BYTES_LIMIT)
-        try:
-            self.decoder = _decoder(content_encoding)
-        except (ValueError, ImportError) as error:
-            self.decoder = None
-            self.decode_error = str(error)
+        self.encoding = content_encoding
+        self.wire_limit = limit if wire_limit is None else wire_limit
+        self.wire = bytearray()
+        self.wire_size = 0
 
     def __call__(self, chunk):
-        if chunk and self.decode_error is None:
-            self._capture(chunk)
+        if chunk:
+            self.wire_size += len(chunk)
+            room = self.wire_limit - len(self.wire)
+            if room > 0:
+                self.wire.extend(chunk[:room])
         return chunk
 
-    def _capture(self, chunk):
-        if self.decoder is None:
-            self._keep(chunk)
-            return
-        if self.size >= self.counted_limit:
-            return
+    def body(self, expected_size=0):
+        total = max(self.wire_size, expected_size)
+        if total == 0:
+            return b"", 0, None
+        missing = total - len(self.wire)
         try:
-            for piece in self.decoder.pieces(chunk):
-                self._keep(piece)
-                if self.size >= self.counted_limit:
-                    return
+            decoder = _decoder(self.encoding)
+        except (ValueError, ImportError) as error:
+            return None, total, str(error)
+        if decoder is None:
+            return bytes(self.wire[:self.limit]), total, None
+        captured = bytearray()
+        size = 0
+        counted_limit = max(self.limit, COUNTED_BYTES_LIMIT)
+        try:
+            for piece in decoder.pieces(self.wire):
+                size += len(piece)
+                room = self.limit - len(captured)
+                if room > 0:
+                    captured.extend(piece[:room])
+                if size >= counted_limit:
+                    break
         except Exception as error:
-            self.decode_error = "body could not be decoded: {0}".format(error)
-            log.warning("stream body not decoded: %s", error)
+            log.warning("body not decoded: %s", error)
+            return None, total, "body could not be decoded: {0}".format(error)
+        return bytes(captured), size + missing, None
 
-    def _keep(self, data):
-        self.size += len(data)
-        room = self.limit - len(self.captured)
-        if room > 0:
-            self.captured.extend(data[:room])
-
-
-def decode_body(raw, encoding, limit):
-    tap = StreamTap(limit, encoding)
-    tap(raw)
-    if tap.decode_error is not None:
-        return None
-    return bytes(tap.captured), tap.size

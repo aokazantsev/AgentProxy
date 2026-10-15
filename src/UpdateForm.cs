@@ -155,7 +155,7 @@ namespace AgentProxy
         {
             try
             {
-                Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = false });
+                Process.Start(new ProcessStartInfo(SystemTools.Explorer, "/select,\"" + path + "\"") { UseShellExecute = false });
             }
             catch (System.ComponentModel.Win32Exception error)
             {
