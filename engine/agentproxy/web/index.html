@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentProxy</title>
+<style>
+:root { --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e5e5ea; --row: #f5f5f7; --ok: #1a7f37; --bad: #c62828; --accent: #0a66c2; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161618; --fg: #f2f2f2; --muted: #9a9aa0; --line: #2c2c30; --row: #202024; --ok: #4cc26d; --bad: #ff6b6b; --accent: #5aa9ff; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+header { display: flex; gap: 18px; align-items: baseline; padding: 14px 20px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+.stat { color: var(--muted); }
+.stat b { color: var(--fg); font-weight: 600; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
+.dot.on { background: var(--ok); } .dot.off { background: var(--bad); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); height: calc(100vh - 50px); }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; height: auto; } }
+#list { overflow: auto; border-right: 1px solid var(--line); }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 5px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
+th { position: sticky; top: 0; background: var(--bg); color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); }
+tbody tr { cursor: pointer; } tbody tr:hover, tbody tr.sel { background: var(--row); }
+.s2 { color: var(--ok); } .s4, .s5, .err { color: var(--bad); }
+#detail { overflow: auto; padding: 14px 20px; }
+#detail h2 { font-size: 13px; margin: 18px 0 6px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .04em; }
+pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px/1.45 Consolas, monospace; background: var(--row); padding: 8px 10px; border-radius: 6px; }
+.empty { color: var(--muted); padding: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AgentProxy</h1>
+  <span class="stat"><span id="dot" class="dot"></span><span id="state">…</span></span>
+  <span class="stat">прокси <b id="proxy">—</b></span>
+  <span class="stat">запросов <b id="count">—</b></span>
+  <span class="stat">версия <b id="version">—</b></span>
+</header>
+<main>
+  <section id="list">
+    <table>
+      <colgroup><col style="width:56px"><col style="width:64px"><col style="width:52px"><col style="width:26%"><col><col style="width:60px"></colgroup>
+      <thead><tr><th>#</th><th>метод</th><th>код</th><th>хост</th><th>путь</th><th>мс</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="none" class="empty" hidden>Запросов пока нет. Направь трафик устройства на прокси — инструкция в скилле agentproxy.</div>
+  </section>
+  <section id="detail"><div class="empty">Выбери запрос слева.</div></section>
+</main>
+<script>
+"use strict";
+let selected = null;
+const text = (value) => value === null || value === undefined ? "" : String(value);
+function cell(row, value, cls) { const td = row.insertCell(); td.textContent = text(value); td.title = text(value); if (cls) td.className = cls; }
+async function getJson(url) { const response = await fetch(url, { cache: "no-store" }); if (!response.ok) throw new Error(response.status); return response.json(); }
+async function refreshStatus() {
+  try {
+    const status = await getJson("/api/status");
+    document.getElementById("dot").className = "dot " + (status.proxy.running ? "on" : "off");
+    document.getElementById("state").textContent = status.proxy.running ? "работает" : "прокси не слушает порт";
+    document.getElementById("proxy").textContent = status.proxy.host + ":" + status.proxy.port;
+    document.getElementById("count").textContent = status.flows;
+    document.getElementById("version").textContent = status.version;
+  } catch (error) {
+    document.getElementById("dot").className = "dot off";
+    document.getElementById("state").textContent = "движок не отвечает";
+  }
+}
+async function refreshFlows() {
+  let data;
+  try { data = await getJson("/api/flows?limit=300"); } catch (error) { return; }
+  const body = document.getElementById("rows");
+  body.textContent = "";
+  for (const flow of data.flows) {
+    const row = body.insertRow();
+    if (flow.id === selected) row.className = "sel";
+    row.onclick = () => showFlow(flow.id);
+    cell(row, flow.seq);
+    cell(row, flow.method);
+    cell(row, flow.error ? "ошибка" : flow.status, flow.error ? "err" : "s" + String(flow.status || "").charAt(0));
+    cell(row, flow.host);
+    cell(row, flow.path);
+    cell(row, flow.duration_ms);
+  }
+  document.getElementById("none").hidden = data.flows.length > 0;
+}
+function headersText(headers) { return (headers || []).map((pair) => pair[0] + ": " + pair[1]).join("\n"); }
+function section(parent, title, content) {
+  const heading = document.createElement("h2"); heading.textContent = title; parent.appendChild(heading);
+  const block = document.createElement("pre"); block.textContent = content || "—"; parent.appendChild(block);
+}
+function bodyText(body) {
+  if (!body || !body.size) return "";
+  const note = body.truncated ? "\n\n… обрезано, полный размер " + body.size + " байт" : "";
+  return (body.encoding === "base64" ? "[base64] " : "") + body.content + note;
+}
+async function showFlow(id) {
+  selected = id;
+  let flow;
+  try { flow = await getJson("/api/flows/" + encodeURIComponent(id)); } catch (error) { return; }
+  const detail = document.getElementById("detail");
+  detail.textContent = "";
+  section(detail, "Запрос", flow.method + " " + flow.url);
+  section(detail, "Ответ", flow.error ? "Ошибка: " + flow.error : text(flow.status) + " " + text(flow.reason) + (flow.duration_ms !== null ? ", " + flow.duration_ms + " мс" : ""));
+  section(detail, "Заголовки запроса", headersText(flow.request_headers));
+  section(detail, "Тело запроса", bodyText(flow.request_body));
+  section(detail, "Заголовки ответа", headersText(flow.response_headers));
+  section(detail, "Тело ответа", bodyText(flow.response_body));
+  refreshFlows();
+}
+refreshStatus(); refreshFlows();
+setInterval(refreshStatus, 3000);
+setInterval(refreshFlows, 2000);
+</script>
+</body>
+</html>

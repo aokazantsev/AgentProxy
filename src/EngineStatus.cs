@@ -1,0 +1,71 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Web.Script.Serialization;
+
+namespace AgentProxy
+{
+    internal sealed class EngineStatus
+    {
+        private const int TimeoutMs = 2000;
+
+        public string Version;
+        public bool ProxyRunning;
+        public int Flows;
+
+        public static EngineStatus Parse(string json)
+        {
+            Dictionary<string, object> data;
+            try
+            {
+                data = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+            if (data == null) return null;
+            var status = new EngineStatus();
+            object value;
+            if (data.TryGetValue("version", out value)) status.Version = value as string;
+            if (data.TryGetValue("flows", out value) && value is int) status.Flows = (int)value;
+            if (data.TryGetValue("proxy", out value))
+            {
+                var proxy = value as Dictionary<string, object>;
+                object running;
+                if (proxy != null && proxy.TryGetValue("running", out running) && running is bool) status.ProxyRunning = (bool)running;
+            }
+            return status;
+        }
+
+        public static EngineStatus Fetch(int apiPort)
+        {
+            try
+            {
+                var request = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + apiPort + "/api/status");
+                request.Timeout = TimeoutMs;
+                request.ReadWriteTimeout = TimeoutMs;
+                request.Proxy = null;
+                using (var response = (HttpWebResponse)request.GetResponse())
+                using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+                {
+                    return Parse(reader.ReadToEnd());
+                }
+            }
+            catch (WebException)
+            {
+                return null;
+            }
+            catch (IOException)
+            {
+                return null;
+            }
+        }
+    }
+}

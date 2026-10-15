@@ -1,0 +1,11 @@
+AgentProxy.exe
+AgentProxy.old.exe
+AgentProxy.exe.config
+Uninstall.exe
+installer/obj/
+tests/csharp/obj/
+dist/
+runtime/
+__pycache__/
+*.pyc
+.pytest_cache/

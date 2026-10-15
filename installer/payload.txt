@@ -1,0 +1,9 @@
+AgentProxy.exe
+AgentProxy.exe.config
+Uninstall.exe
+agentproxy.cmd
+README.md
+LICENSE
+CHANGELOG.md
+engine\agentproxy
+runtime\python
