@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -172,6 +173,20 @@ def test_damaged_database_is_set_aside_and_started_anew(tmp_path, content):
     assert fresh.count() == 1
     fresh.close()
     assert (tmp_path / "flows.db.broken").read_bytes() == content
+
+
+def test_unwritable_database_is_not_set_aside(tmp_path):
+    import sqlite3
+    import stat
+    path = tmp_path / "flows.db"
+    FlowStore(str(path), 100).close()
+    os.chmod(str(path), stat.S_IREAD)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            FlowStore(str(path), 100)
+    finally:
+        os.chmod(str(path), stat.S_IREAD | stat.S_IWRITE)
+    assert not (tmp_path / "flows.db.broken").exists()
 
 
 def test_reopen_keeps_data(tmp_path):

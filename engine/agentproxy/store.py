@@ -119,6 +119,8 @@ class FlowStore:
         self._lock = threading.Lock()
         try:
             self._db = self._open(path)
+        except sqlite3.OperationalError:
+            raise
         except sqlite3.DatabaseError as error:
             log.warning("history %s is damaged and is started anew: %s", path, error)
             for suffix in ("", "-wal", "-shm"):

@@ -6,6 +6,7 @@ import socket
 log = logging.getLogger("agentproxy.guard")
 
 BLOCKED_MESSAGE = "AgentProxy: its own ports are not reachable through the proxy"
+OWN_PORT_MARK = "agentproxy_own_port"
 
 
 def is_loopback_address(address):
@@ -22,6 +23,17 @@ def is_loopback_address(address):
 class OwnPortsGuard:
     def __init__(self, proxy_port, api_port):
         self.ports = {proxy_port, api_port}
+
+    async def requestheaders(self, flow):
+        await self.mark(flow)
+
+    async def http_connect(self, flow):
+        await self.mark(flow)
+
+    async def mark(self, flow):
+        request = flow.request
+        if request.port in self.ports and await self.reaches_loopback(request.host, request.port):
+            flow.metadata[OWN_PORT_MARK] = True
 
     async def server_connect(self, data):
         server = data.server

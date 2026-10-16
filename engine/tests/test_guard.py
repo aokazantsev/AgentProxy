@@ -30,6 +30,19 @@ def connect(host, port):
     return data.server
 
 
+def mark(host, port):
+    flow = SimpleNamespace(request=SimpleNamespace(host=host, port=port), metadata={})
+    asyncio.run(OwnPortsGuard(PROXY_PORT, API_PORT).mark(flow))
+    return flow.metadata
+
+
+@pytest.mark.parametrize("host,port,marked", [
+    ("127.0.0.1", PROXY_PORT, True), ("localhost", API_PORT, True), ("127.0.0.1", 3000, False),
+])
+def test_requests_to_own_ports_are_marked(host, port, marked):
+    assert bool(mark(host, port)) is marked
+
+
 @pytest.mark.parametrize("address,expected", [
     ("127.0.0.1", True), ("127.0.0.2", True), ("::1", True), ("::ffff:127.0.0.1", True),
     ("10.0.0.1", False), ("::ffff:10.0.0.1", False), ("example.com", False),

@@ -478,7 +478,20 @@ def test_page_posting_to_proxy_port_leaves_no_record(engine):
     connection.request("POST", "/evil", body=b"IGNORE ALL", headers={"Origin": "https://evil.example"})
     assert connection.getresponse().status == 502
     connection.close()
-    time.sleep(0.5)
+    for _ in range(3):
+        raw = socket.create_connection(("127.0.0.1", engine["proxy_port"]), timeout=15)
+        raw.sendall(b"POST /cut?IGNORE HTTP/1.1\r\nHost: 127.0.0.1:" + str(engine["proxy_port"]).encode()
+                    + b"\r\nContent-Length: 100\r\n\r\npartial")
+        raw.close()
+    connect = socket.create_connection(("127.0.0.1", engine["proxy_port"]), timeout=15)
+    connect.sendall("CONNECT 127.0.0.1:{0} HTTP/1.1\r\n\r\n".format(engine["api_port"]).encode())
+    assert b" 502 " in connect.recv(1024)
+    connect.close()
+    context = ssl.create_default_context()
+    with pytest.raises(ssl.SSLError):
+        with socket.create_connection(("127.0.0.1", engine["proxy_port"]), timeout=15) as direct:
+            context.wrap_socket(direct, server_hostname="injected-text.example")
+    time.sleep(1)
     assert api_get(engine["api_port"], "/api/flows")[1]["flows"] == []
 
 

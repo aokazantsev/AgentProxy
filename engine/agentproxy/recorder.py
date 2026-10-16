@@ -2,7 +2,7 @@ import logging
 import time
 import uuid
 
-from .guard import BLOCKED_MESSAGE
+from .guard import OWN_PORT_MARK
 from .store import FlowRecord
 from .streamtap import StreamTap, should_stream, should_stream_request
 
@@ -117,13 +117,8 @@ class Recorder:
         self._save(flow)
 
     def error(self, flow):
-        if flow.request is None:
-            return
-        if flow.error is not None and BLOCKED_MESSAGE in flow.error.msg:
-            self.taps.pop(flow.id, None)
-            self.request_taps.pop(flow.id, None)
-            return
-        self._save(flow)
+        if flow.request is not None:
+            self._save(flow)
 
     def http_connect_error(self, flow):
         reason = "CONNECT failed"
@@ -132,6 +127,9 @@ class Recorder:
         self._save(flow, reason)
 
     def tls_failed_client(self, data):
+        server = data.context.server
+        if not (server and server.address):
+            return
         try:
             self.store.insert(tls_failure_record(data))
         except Exception:
@@ -140,6 +138,8 @@ class Recorder:
     def _save(self, flow, error=None):
         tap = self.taps.pop(flow.id, None)
         request_tap = self.request_taps.pop(flow.id, None)
+        if flow.metadata.get(OWN_PORT_MARK):
+            return
         try:
             self.store.insert(build_record(flow, self.body_limit, tap, error, request_tap))
         except Exception:
