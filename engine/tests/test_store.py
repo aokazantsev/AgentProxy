@@ -77,7 +77,9 @@ def test_prune_keeps_max_flows(tmp_path):
     ("request_body", b"x" * 64 * 1024),
     ("path", "/" + "p" * 64 * 1024),
     ("response_headers", [["x-big", "h" * 64 * 1024]]),
-], ids=["response_body", "request_body", "path", "response_headers"])
+    ("url", "https://api.example.com/" + "u" * 64 * 1024),
+    ("request_headers", [["cookie", "c" * 64 * 1024]]),
+], ids=["response_body", "request_body", "path", "response_headers", "url", "request_headers"])
 def test_history_stays_under_byte_budget_on_insert(tmp_path, monkeypatch, field, value):
     monkeypatch.setattr(store_module, "PRUNE_EVERY_BYTES", 256 * 1024)
     small = FlowStore(str(tmp_path / "bytes.db"), max_flows=5000, max_bytes=1024 * 1024)
@@ -116,6 +118,23 @@ def test_clear_and_count(store):
     assert store.clear() == 2
     assert store.count() == 0
     assert store.last_seq() == 0
+
+
+def test_database_of_older_schema_starts_empty(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE flows (seq INTEGER PRIMARY KEY, id TEXT)")
+    old.execute("INSERT INTO flows (id) VALUES ('legacy')")
+    old.execute("PRAGMA user_version=1")
+    old.commit()
+    old.close()
+    fresh = FlowStore(path, 1000)
+    assert fresh.count() == 0
+    fresh.insert(make_record(1, response_body=b"z" * 1000))
+    assert fresh._stored_bytes() >= 1000
+    assert "stored_bytes" not in fresh.get("flow-1")
+    fresh.close()
 
 
 def test_reopen_keeps_data(tmp_path):

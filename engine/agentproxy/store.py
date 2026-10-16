@@ -3,12 +3,11 @@ import sqlite3
 import threading
 from dataclasses import dataclass, field
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_HISTORY_BYTES = 512 * 1024 * 1024
 PRUNE_EVERY_BYTES = 64 * 1024 * 1024
 WAL_LIMIT_BYTES = 16 * 1024 * 1024
-STORED_BYTES = ("LENGTH(url) + LENGTH(path) + LENGTH(request_headers) + COALESCE(LENGTH(response_headers), 0) "
-                "+ COALESCE(LENGTH(request_body), 0) + COALESCE(LENGTH(response_body), 0)")
+COUNTED_FIELDS = ("url", "path", "request_headers", "response_headers", "request_body", "response_body")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -16,6 +15,7 @@ CREATE TABLE IF NOT EXISTS flows (
     id TEXT NOT NULL UNIQUE,
     started REAL NOT NULL,
     duration_ms INTEGER,
+    stored_bytes INTEGER NOT NULL DEFAULT 0,
     method TEXT NOT NULL,
     scheme TEXT NOT NULL,
     host TEXT NOT NULL,
@@ -114,7 +114,7 @@ class FlowStore:
 
     def _migrate(self):
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
-        if version > SCHEMA_VERSION:
+        if version != SCHEMA_VERSION:
             self._db.execute("DROP TABLE IF EXISTS flows")
         self._db.executescript(SCHEMA)
         self._db.execute("PRAGMA user_version={0}".format(SCHEMA_VERSION))
@@ -138,6 +138,7 @@ class FlowStore:
             "response_body_size": record.response_body_size,
             "response_content_type": record.response_content_type, "client": record.client,
         }
+        row["stored_bytes"] = sum(len(row[name] or b"") for name in COUNTED_FIELDS)
         names = ", ".join(row)
         marks = ", ".join(":" + name for name in row)
         with self._lock:
@@ -147,8 +148,7 @@ class FlowStore:
                 "INSERT OR REPLACE INTO flows ({0}) VALUES ({1})".format(names, marks), row)
             seq = cursor.lastrowid
             self._inserted_since_prune += 1
-            self._bytes_since_prune += sum(len(row[name] or b"") for name in (
-                "url", "path", "request_headers", "response_headers", "request_body", "response_body"))
+            self._bytes_since_prune += row["stored_bytes"]
             if self._inserted_since_prune >= 100 or self._bytes_since_prune >= PRUNE_EVERY_BYTES:
                 self._prune()
         summary = self.summary(seq)
@@ -167,7 +167,7 @@ class FlowStore:
                 "(SELECT MAX(COUNT(*) / 10, 1) FROM flows))")
 
     def _stored_bytes(self):
-        return self._db.execute("SELECT COALESCE(SUM({0}), 0) FROM flows".format(STORED_BYTES)).fetchone()[0]
+        return self._db.execute("SELECT COALESCE(SUM(stored_bytes), 0) FROM flows").fetchone()[0]
 
     def summary(self, seq):
         with self._lock:
@@ -211,6 +211,7 @@ class FlowStore:
         if row is None:
             return None
         result = dict(row)
+        del result["stored_bytes"]
         result["request_headers"] = json.loads(result["request_headers"])
         result["response_headers"] = json.loads(result["response_headers"] or "[]")
         return result

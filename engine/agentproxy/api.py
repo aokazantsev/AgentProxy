@@ -70,6 +70,8 @@ class BaseHandler(tornado.web.RequestHandler):
     async def run_tool(self, name, arguments):
         try:
             self.write_json(await call_tool(self.service, name, arguments))
+        except asyncio.CancelledError:
+            return
         except ToolError as error:
             status = 404 if "not found" in str(error) else 400
             self.write_json({"error": str(error)}, status)
@@ -129,7 +131,10 @@ class ShutdownHandler(BaseHandler):
 
 class McpHandler(BaseHandler):
     async def post(self):
-        response = await mcp.handle_body(self.service, self.request.body)
+        try:
+            response = await mcp.handle_body(self.service, self.request.body)
+        except asyncio.CancelledError:
+            return
         if response is None:
             self.set_status(202)
             self.finish()

@@ -25,6 +25,13 @@ def test_assembly_infos_match_engine():
         assert 'AssemblyFileVersion("{0}")'.format(numeric) in text, path
 
 
+def test_installers_restrict_dll_search_first():
+    for path in (("installer", "setup", "SetupProgram.cs"), ("installer", "uninstall", "UninstallProgram.cs")):
+        body = read(*path).split("Main(string[] args)", 1)[1]
+        first = body.split("{", 1)[1].strip().splitlines()[0].strip()
+        assert first == "SystemTools.LoadDllsOnlyFromSystem();", path
+
+
 def test_changelog_top_entry_is_current_version():
     entries = changelog.parse(read("CHANGELOG.md"))
     assert entries and entries[0]["version"] == VERSION

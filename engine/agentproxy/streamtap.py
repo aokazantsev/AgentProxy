@@ -36,8 +36,12 @@ def _zlib_pieces(data, raw_deflate_fallback):
                 if decompressor.eof or (not pending and len(piece) < OUTPUT_STEP):
                     break
         if not decompressor.eof:
-            return
+            raise Unfinished()
         position -= len(decompressor.unused_data)
+
+
+class Unfinished(Exception):
+    pass
 
 
 class TooManyMembers(Exception):
@@ -65,17 +69,27 @@ def _brotli_pieces(data):
             if not piece:
                 break
             yield piece
+    if not decompressor.is_finished():
+        raise Unfinished()
 
 
 def _zstd_pieces(data):
     import zstandard
     reader = zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW).stream_reader(
         io.BytesIO(data), read_across_frames=True)
+    produced = 0
     while True:
         piece = reader.read(OUTPUT_STEP)
         if not piece:
-            return
+            break
+        produced += len(piece)
         yield piece
+    try:
+        expected = zstandard.get_frame_parameters(data).content_size
+    except zstandard.ZstdError:
+        return
+    if expected != zstandard.CONTENTSIZE_UNKNOWN and produced < expected:
+        raise Unfinished()
 
 
 def _pieces(encoding, data):
@@ -146,6 +160,11 @@ class StreamTap:
                     break
         except TooManyMembers as stop:
             size += stop.undecoded
+        except Unfinished:
+            if not captured:
+                return raw[:self.limit], total
+            if total == len(raw):
+                size += 1
         except Exception as error:
             log.warning("body kept as received, not decoded: %s", error)
             return raw[:self.limit], total

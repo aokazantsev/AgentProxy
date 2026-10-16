@@ -55,7 +55,7 @@ def build_record(flow, limit, tap=None, error=None, request_tap=None):
     response = flow.response
     if response is not None:
         if tap is not None:
-            response_body, response_size = tap.body()
+            response_body, response_size = tap.body(_content_length(response))
         else:
             response_body, response_size = _body(response, limit)
         record.status = response.status_code

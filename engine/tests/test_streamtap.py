@@ -185,6 +185,28 @@ def test_wire_beyond_the_kept_prefix_counts_as_lower_bound():
     assert body == raw[:len(body)] and size > len(body)
 
 
+@pytest.mark.parametrize("encoding,encode", [("gzip", gzip.compress), ("br", brotli.compress)])
+def test_unfinished_compressed_body_is_marked_cut(encoding, encode):
+    raw = os.urandom(1000) + b"a" * 2000
+    body, size = whole(10000, encoding, encode(raw)[:-30])
+    assert body and body == raw[:len(body)] and size > len(body)
+
+
+@pytest.mark.parametrize("encoding,encode", [
+    ("gzip", gzip.compress), ("br", brotli.compress), ("zstd", zstd_bytes)])
+def test_compressed_empty_body_is_empty(encoding, encode):
+    assert whole(1000, encoding, encode(b"")) == (b"", 0)
+
+
+def test_cut_response_stream_keeps_announced_size():
+    flow = tflow.tflow(resp=True)
+    flow.response.headers["content-length"] = "10000"
+    tap = StreamTap(100, None)
+    tap(b"r" * 3000)
+    record = recorder.build_record(flow, 100, tap)
+    assert record.response_body == b"r" * 100 and record.response_body_size == 10000
+
+
 def test_empty_body_with_unknown_encoding_is_empty():
     assert StreamTap(100, "compress").body() == (b"", 0)
 
