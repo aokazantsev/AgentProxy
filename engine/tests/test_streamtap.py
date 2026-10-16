@@ -209,6 +209,28 @@ def test_junk_after_zstd_frame_is_ignored():
     assert whole(100000, "zstd", zstd_bytes(raw) + b"\n") == (raw, 4000)
 
 
+@pytest.mark.parametrize("first_byte", [0x50, 0x5F])
+def test_zstd_skippable_frame_between_frames_is_skipped(first_byte):
+    first, second = os.urandom(3000), os.urandom(2000)
+    skippable = bytes([first_byte]) + b"\x2a\x4d\x18" + (5).to_bytes(4, "little") + b"hello"
+    wire = zstd_bytes(first) + skippable + zstd_bytes(second)
+    assert whole(100000, "zstd", wire) == (first + second, 5000)
+
+
+@pytest.mark.parametrize("tail", [b"\x28", b"\x28\xb5\x2f", b"\x5a\x2a"], ids=["one", "three", "skippable"])
+def test_zstd_cut_inside_next_frame_magic_is_marked_cut(tail):
+    raw = os.urandom(3000)
+    assert whole(100000, "zstd", zstd_bytes(raw) + tail) == (raw, 3001)
+
+
+@pytest.mark.parametrize("encoding,wire", [
+    ("zstd", zstd_bytes(b"abc" * 1000) + b"\x28\xb5\x2f\xfdjunkjunk"),
+    ("gzip", gzip.compress(b"abc" * 1000) + b"\x1f\x8bjunkjunk"),
+], ids=["zstd", "gzip"])
+def test_broken_part_after_decoded_part_keeps_what_was_decoded(encoding, wire):
+    assert whole(100000, encoding, wire) == (b"abc" * 1000, 3001)
+
+
 def test_second_zstd_frame_cut_keeps_the_first():
     first = os.urandom(4000)
     wire = zstd_bytes(first) + zstd_streamed(os.urandom(4000))[:-30]

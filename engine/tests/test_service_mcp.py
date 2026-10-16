@@ -130,6 +130,15 @@ def test_mcp_tools_list_and_call(service, store):
     assert call["structuredContent"]["flows"][0]["id"] == "flow-1"
 
 
+def test_mcp_serves_flow_with_raw_header_bytes(service, store):
+    raw = b"\xcf\xf0".decode("utf-8", "surrogateescape")
+    store.insert(make_record(1, response_headers=[["content-disposition", "attachment; filename=" + raw]]))
+    response = rpc(service, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                             "params": {"name": "get_flow", "arguments": {"id": "flow-1"}}})
+    text = json.dumps(response, ensure_ascii=False).encode("utf-8")
+    assert response["result"]["isError"] is False and b"filename=\\\\xcf\\\\xf0" in text
+
+
 def test_mcp_tool_error_is_reported_in_result(service):
     call = rpc(service, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                          "params": {"name": "get_flow", "arguments": {"id": "x"}}})["result"]

@@ -17,7 +17,8 @@ def setup(directory, file_name="engine.log"):
     for handler in list(root.handlers):
         root.removeHandler(handler)
     handler = logging.handlers.RotatingFileHandler(
-        os.path.join(directory, file_name), maxBytes=MAX_BYTES, backupCount=BACKUPS, encoding="utf-8")
+        os.path.join(directory, file_name), maxBytes=MAX_BYTES, backupCount=BACKUPS, encoding="utf-8",
+        errors="backslashreplace")
     handler.setFormatter(logging.Formatter(FORMAT, DATE_FORMAT))
     root.addHandler(handler)
     root.setLevel(logging.INFO)

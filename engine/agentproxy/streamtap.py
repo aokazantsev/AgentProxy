@@ -80,7 +80,10 @@ def _zstd_pieces(data):
     context = zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW)
     position = 0
     while position < len(data):
-        if position and not _starts_zstd_frame(data[position:position + 4]):
+        head = data[position:position + 4]
+        if position and not _starts_zstd_frame(head):
+            if len(head) < 4 and _may_start_zstd_frame(head):
+                raise Unfinished()
             return
         decompressor = context.decompressobj()
         while position < len(data) and not decompressor.eof:
@@ -98,6 +101,12 @@ def _starts_zstd_frame(head):
     if head == ZSTD_MAGIC:
         return True
     return len(head) == 4 and head[0] & 0xF0 == 0x50 and head[1:] == ZSTD_SKIPPABLE_MAGIC
+
+
+def _may_start_zstd_frame(head):
+    if ZSTD_MAGIC.startswith(head):
+        return True
+    return head[0] & 0xF0 == 0x50 and ZSTD_SKIPPABLE_MAGIC.startswith(head[1:])
 
 
 def _pieces(encoding, data):
@@ -174,6 +183,9 @@ class StreamTap:
             if total == len(raw):
                 size += 1
         except Exception as error:
-            log.warning("body kept as received, not decoded: %s", error)
-            return raw[:self.limit], total
+            if not captured:
+                log.warning("body kept as received, not decoded: %s", error)
+                return raw[:self.limit], total
+            log.warning("body decoded only up to a broken part: %s", error)
+            size += 1
         return bytes(captured), size + total - len(raw)
