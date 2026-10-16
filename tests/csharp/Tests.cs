@@ -37,6 +37,7 @@ namespace AgentProxy.Tests
             Run("release versions compare numerically", ReleaseVersionsCompare);
             Run("install target refusals", TargetRefusals);
             Run("uninstaller owns registration", OwnsRegistration);
+            Run("dead registration is not an update", DeadRegistrationIsNotUpdate);
             Run("json writer keeps doubles and refuses dates", JsonWriterNumbersAndDates);
             Run("json writer round trip", JsonWriterRoundTrip);
             Run("cleaner removes only our entries", CleanerRemovesOnlyOurs);
@@ -448,6 +449,23 @@ namespace AgentProxy.Tests
                 Equal(true, InstallFolder.OwnsRegistration(current, current.ToUpperInvariant() + "\\"), "same folder");
                 Equal(false, InstallFolder.OwnsRegistration(current, Path.Combine(root, "old")), "registration of moved install");
                 Equal(true, InstallFolder.OwnsRegistration(Path.Combine(root, "gone"), Path.Combine(root, "old")), "dead registration");
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+
+        private static void DeadRegistrationIsNotUpdate()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "AgentProxyUpdate-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                Equal(false, SetupProfile.IsUpdate(null), "no registration");
+                Equal(false, SetupProfile.IsUpdate(root), "registration without program");
+                File.WriteAllText(Path.Combine(root, AppIdentity.ExecutableName), "x");
+                Equal(true, SetupProfile.IsUpdate(root), "installed program");
             }
             finally
             {

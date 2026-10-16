@@ -96,6 +96,10 @@ class FlowFilter:
         return True
 
 
+def _storable(text):
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+
+
 class FlowStore:
     def __init__(self, path, max_flows, max_bytes=MAX_HISTORY_BYTES):
         self.max_flows = max_flows
@@ -138,6 +142,9 @@ class FlowStore:
             "response_body_size": record.response_body_size,
             "response_content_type": record.response_content_type, "client": record.client,
         }
+        for name, value in row.items():
+            if isinstance(value, str):
+                row[name] = _storable(value)
         row["stored_bytes"] = sum(len(row[name] or b"") for name in COUNTED_FIELDS)
         names = ", ".join(row)
         marks = ", ".join(":" + name for name in row)

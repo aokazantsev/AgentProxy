@@ -73,8 +73,12 @@ namespace AgentProxy
 
         public static bool IsUpdate()
         {
-            string installed = UninstallRegistration.InstalledLocation();
-            return installed != null && File.Exists(Path.Combine(installed, AppIdentity.ExecutableName));
+            return IsUpdate(UninstallRegistration.InstalledLocation());
+        }
+
+        public static bool IsUpdate(string installedLocation)
+        {
+            return installedLocation != null && File.Exists(Path.Combine(installedLocation, AppIdentity.ExecutableName));
         }
 
         private static bool ClaudeWanted()

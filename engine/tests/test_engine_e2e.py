@@ -254,6 +254,29 @@ def test_shutdown_requires_token(engine):
     assert not os.path.exists(os.path.join(engine["data_dir"], "engine-runtime.json"))
 
 
+def test_waiting_clients_get_error_when_engine_stops(engine):
+    port = engine["api_port"]
+    answers = {}
+    mcp_call = {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
+        "name": "wait_for_flow", "arguments": {"path": "/never", "timeout_seconds": 60}}}
+    waiters = [
+        threading.Thread(target=lambda: answers.update(api=api_get(port, "/api/flows/wait?path=/never&timeout_seconds=60", timeout=30))),
+        threading.Thread(target=lambda: answers.update(mcp=api_post(port, "/mcp", mcp_call))),
+    ]
+    for waiter in waiters:
+        waiter.start()
+    time.sleep(1)
+    with open(os.path.join(engine["data_dir"], "engine-runtime.json")) as stream:
+        runtime = json.load(stream)
+    api_post(port, "/api/shutdown", {}, headers={"X-AgentProxy-Token": runtime["token"]})
+    for waiter in waiters:
+        waiter.join(30)
+    assert answers["api"] == (503, {"error": "engine is stopping"})
+    status, body = answers["mcp"]
+    assert status == 503 and body["id"] == 7 and body["error"]["message"] == "engine is stopping"
+    assert engine["process"].wait(20) == 0
+
+
 def test_prompt_hook_endpoint_answers_json(engine):
     status, body = api_post(engine["api_port"], "/claude/hooks/user-prompt-submit", {"session_id": "e2e"})
     assert status == 200 and body == {}

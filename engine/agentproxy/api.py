@@ -71,7 +71,7 @@ class BaseHandler(tornado.web.RequestHandler):
         try:
             self.write_json(await call_tool(self.service, name, arguments))
         except asyncio.CancelledError:
-            return
+            self.write_json({"error": mcp.STOPPING_MESSAGE}, 503)
         except ToolError as error:
             status = 404 if "not found" in str(error) else 400
             self.write_json({"error": str(error)}, status)
@@ -134,6 +134,7 @@ class McpHandler(BaseHandler):
         try:
             response = await mcp.handle_body(self.service, self.request.body)
         except asyncio.CancelledError:
+            self.write_json(mcp.stopping_error(self.request.body), 503)
             return
         if response is None:
             self.set_status(202)

@@ -24,7 +24,9 @@ def _content_length(message):
 def _body(message, limit):
     if message is None:
         return b"", 0
-    raw = message.raw_content or b""
+    if message.raw_content is None:
+        return b"", _content_length(message)
+    raw = message.raw_content
     tap = StreamTap(limit, message.headers.get("content-encoding"), wire_limit=len(raw))
     tap(raw)
     return tap.body()

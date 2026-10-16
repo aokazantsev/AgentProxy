@@ -6,6 +6,13 @@ from agentproxy.store import FlowFilter, FlowStore
 from conftest import make_record
 
 
+def test_text_with_raw_bytes_is_stored(store):
+    raw = b"/search?q=\xcf\xf0".decode("utf-8", "surrogateescape")
+    store.insert(make_record(1, path=raw, url="http://h" + raw, response_content_type=raw))
+    flow = store.get("flow-1")
+    assert flow["path"] == "/search?q=\\xcf\\xf0" and flow["response_content_type"] == flow["path"]
+
+
 def test_insert_and_get_round_trip(store):
     seq = store.insert(make_record(1, request_body=b"hello", request_body_size=5))
     flow = store.get("flow-1")
@@ -120,13 +127,14 @@ def test_clear_and_count(store):
     assert store.last_seq() == 0
 
 
-def test_database_of_older_schema_starts_empty(tmp_path):
+@pytest.mark.parametrize("version", [1, 99])
+def test_database_of_other_schema_starts_empty(tmp_path, version):
     import sqlite3
     path = str(tmp_path / "old.db")
     old = sqlite3.connect(path)
     old.execute("CREATE TABLE flows (seq INTEGER PRIMARY KEY, id TEXT)")
     old.execute("INSERT INTO flows (id) VALUES ('legacy')")
-    old.execute("PRAGMA user_version=1")
+    old.execute("PRAGMA user_version={0}".format(version))
     old.commit()
     old.close()
     fresh = FlowStore(path, 1000)

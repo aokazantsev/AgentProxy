@@ -14,6 +14,7 @@ INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
+STOPPING_MESSAGE = "engine is stopping"
 
 INSTRUCTIONS = (
     "AgentProxy is a local HTTP(S) debugging proxy (Charles replacement) controlled by you. "
@@ -26,6 +27,15 @@ INSTRUCTIONS = (
 
 def _error(request_id, code, message):
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def stopping_error(body):
+    try:
+        message = json.loads(body)
+    except ValueError:
+        message = None
+    request_id = message.get("id") if isinstance(message, dict) else None
+    return _error(request_id, INTERNAL_ERROR, STOPPING_MESSAGE)
 
 
 def _result(request_id, result):

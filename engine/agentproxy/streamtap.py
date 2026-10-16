@@ -1,4 +1,3 @@
-import io
 import logging
 import zlib
 
@@ -9,6 +8,7 @@ IDENTITY_ENCODINGS = ("", "identity", "none")
 COUNTED_BYTES_LIMIT = 64 * 1024 * 1024
 OUTPUT_STEP = 256 * 1024
 INPUT_STEP = 64 * 1024
+ZSTD_INPUT_STEP = 256
 MAX_MEMBERS = 1000
 ZSTD_MAX_WINDOW = 8 * 1024 * 1024
 GZIP_MAGIC = b"\x1f\x8b"
@@ -75,21 +75,19 @@ def _brotli_pieces(data):
 
 def _zstd_pieces(data):
     import zstandard
-    reader = zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW).stream_reader(
-        io.BytesIO(data), read_across_frames=True)
-    produced = 0
-    while True:
-        piece = reader.read(OUTPUT_STEP)
-        if not piece:
-            break
-        produced += len(piece)
-        yield piece
-    try:
-        expected = zstandard.get_frame_parameters(data).content_size
-    except zstandard.ZstdError:
-        return
-    if expected != zstandard.CONTENTSIZE_UNKNOWN and produced < expected:
-        raise Unfinished()
+    context = zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW)
+    position = 0
+    while position < len(data):
+        decompressor = context.decompressobj()
+        while position < len(data) and not decompressor.eof:
+            pending = data[position:position + ZSTD_INPUT_STEP]
+            position += len(pending)
+            output = decompressor.decompress(pending)
+            for start in range(0, len(output), OUTPUT_STEP):
+                yield output[start:start + OUTPUT_STEP]
+        if not decompressor.eof:
+            raise Unfinished()
+        position -= len(decompressor.unused_data)
 
 
 def _pieces(encoding, data):

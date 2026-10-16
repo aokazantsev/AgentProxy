@@ -185,9 +185,15 @@ def test_wire_beyond_the_kept_prefix_counts_as_lower_bound():
     assert body == raw[:len(body)] and size > len(body)
 
 
-@pytest.mark.parametrize("encoding,encode", [("gzip", gzip.compress), ("br", brotli.compress)])
+def zstd_streamed(raw):
+    compressor = zstandard.ZstdCompressor(write_content_size=False).compressobj()
+    return compressor.compress(raw) + compressor.flush()
+
+
+@pytest.mark.parametrize("encoding,encode", [
+    ("gzip", gzip.compress), ("br", brotli.compress), ("zstd", zstd_bytes), ("zstd", zstd_streamed)])
 def test_unfinished_compressed_body_is_marked_cut(encoding, encode):
-    raw = os.urandom(1000) + b"a" * 2000
+    raw = os.urandom(300000) + b"a" * 2000
     body, size = whole(10000, encoding, encode(raw)[:-30])
     assert body and body == raw[:len(body)] and size > len(body)
 
@@ -196,6 +202,29 @@ def test_unfinished_compressed_body_is_marked_cut(encoding, encode):
     ("gzip", gzip.compress), ("br", brotli.compress), ("zstd", zstd_bytes)])
 def test_compressed_empty_body_is_empty(encoding, encode):
     assert whole(1000, encoding, encode(b"")) == (b"", 0)
+
+
+def test_second_zstd_frame_cut_keeps_the_first():
+    first = os.urandom(4000)
+    wire = zstd_bytes(first) + zstd_streamed(os.urandom(4000))[:-30]
+    body, size = whole(100000, "zstd", wire)
+    assert body[:4000] == first and size > len(body)
+
+
+@pytest.mark.parametrize("encoding,wire", [
+    ("br", brotli.compress(b"abc" * 5000)[:6]),
+    ("zstd", zstd_streamed(b"abc" * 5000)[:10]),
+], ids=["br", "zstd"])
+def test_compressed_body_cut_before_first_output_is_kept_as_received(encoding, wire):
+    assert whole(10000, encoding, wire) == (wire, len(wire))
+
+
+def test_cut_buffered_body_keeps_announced_size():
+    flow = tflow.tflow(resp=True)
+    flow.response.headers["content-length"] = "500000"
+    flow.response.raw_content = None
+    record = recorder.build_record(flow, 1000, None)
+    assert record.response_body == b"" and record.response_body_size == 500000
 
 
 def test_cut_response_stream_keeps_announced_size():
