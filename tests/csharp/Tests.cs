@@ -38,6 +38,7 @@ namespace AgentProxy.Tests
             Run("install target refusals", TargetRefusals);
             Run("uninstaller owns registration", OwnsRegistration);
             Run("dead registration is not an update", DeadRegistrationIsNotUpdate);
+            Run("tray reads claude status from engine cli", EngineCliClaudeRoundTrip);
             Run("json writer keeps doubles and refuses dates", JsonWriterNumbersAndDates);
             Run("json writer round trip", JsonWriterRoundTrip);
             Run("cleaner removes only our entries", CleanerRemovesOnlyOurs);
@@ -452,6 +453,39 @@ namespace AgentProxy.Tests
             }
             finally
             {
+                Directory.Delete(root, true);
+            }
+        }
+
+        private static void EngineCliClaudeRoundTrip()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "AgentProxyCli-" + Guid.NewGuid().ToString("N"));
+            string claudeDir = Path.Combine(root, "claude");
+            string dataDir = Path.Combine(root, "data");
+            Directory.CreateDirectory(claudeDir);
+            Directory.CreateDirectory(dataDir);
+            string previousClaude = Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR");
+            string previousData = Environment.GetEnvironmentVariable("AGENTPROXY_DATA_DIR");
+            Environment.SetEnvironmentVariable("CLAUDE_CONFIG_DIR", claudeDir);
+            Environment.SetEnvironmentVariable("AGENTPROXY_DATA_DIR", dataDir);
+            try
+            {
+                string install = Environment.CurrentDirectory;
+                True(EngineCli.Run(install, "claude install --no-cli").Succeeded, "install succeeded");
+                EngineCliResult status = EngineCli.Run(install, "claude status");
+                True(status.Succeeded, "status succeeded");
+                Dictionary<string, object> json = status.Json();
+                foreach (string key in new[] { "installed", "mcp", "skill", "hooks" })
+                {
+                    Equal(true, json != null && json.ContainsKey(key) && Equals(json[key], true), key);
+                }
+                True(EngineCli.Run(install, "claude uninstall --no-cli").Succeeded, "uninstall succeeded");
+                Equal(false, Equals(EngineCli.Run(install, "claude status").Json()["installed"], true), "removed");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("CLAUDE_CONFIG_DIR", previousClaude);
+                Environment.SetEnvironmentVariable("AGENTPROXY_DATA_DIR", previousData);
                 Directory.Delete(root, true);
             }
         }

@@ -162,6 +162,18 @@ def test_database_of_other_schema_starts_empty(tmp_path, version):
     fresh.close()
 
 
+@pytest.mark.parametrize("content", [b"not a database at all" * 50, b"SQLite format 3\0" + b"\xff" * 84],
+                         ids=["garbage", "cut"])
+def test_damaged_database_is_set_aside_and_started_anew(tmp_path, content):
+    path = tmp_path / "flows.db"
+    path.write_bytes(content)
+    fresh = FlowStore(str(path), 100)
+    fresh.insert(make_record(1))
+    assert fresh.count() == 1
+    fresh.close()
+    assert (tmp_path / "flows.db.broken").read_bytes() == content
+
+
 def test_reopen_keeps_data(tmp_path):
     path = str(tmp_path / "persist.db")
     first = FlowStore(path, 1000)

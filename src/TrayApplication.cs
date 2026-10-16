@@ -33,7 +33,7 @@ namespace AgentProxy
             claude = new ClaudeLink(installDirectory);
             BuildMenu();
             tray.ContextMenuStrip = menu;
-            tray.DoubleClick += (sender, e) => OpenMonitor();
+            tray.DoubleClick += (sender, e) => OpenFromIcon();
             tray.Visible = true;
             engine.Changed += (sender, e) => UpdateView();
             claude.Changed += (sender, e) => UpdateView();
@@ -160,6 +160,12 @@ namespace AgentProxy
             string problem = enable ? Autostart.Enable(Application.ExecutablePath) : Autostart.Disable();
             AppLog.Append("autostart " + (enable ? "enable" : "disable") + ": " + (problem ?? "ok"));
             if (problem != null) MessageBox.Show(problem, AppIdentity.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        private void OpenFromIcon()
+        {
+            if (monitorItem.Enabled) OpenMonitor();
+            else JournalForm.ShowSingle();
         }
 
         private void Quit()

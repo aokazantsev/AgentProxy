@@ -309,6 +309,20 @@ def test_mcp_via_cli_success(env, tmp_path):
     assert not os.path.exists(env.claude_json)
 
 
+def test_mcp_removed_via_cli(env, tmp_path):
+    cli, log = fake_claude(tmp_path, 0)
+    assert integration.remove_mcp(with_cli(env, cli)) is True
+    assert log.read_text().splitlines() == ["mcp remove --scope user agentproxy"]
+
+
+def test_mcp_removal_falls_back_to_file_when_cli_fails(env, tmp_path):
+    with open(env.claude_json, "w", encoding="utf-8") as stream:
+        json.dump({"mcpServers": {"agentproxy": {"type": "http", "url": env.mcp_url}, "other": {}}}, stream)
+    cli, _ = fake_claude(tmp_path, 1)
+    assert integration.remove_mcp(with_cli(env, cli)) is True
+    assert read_json(env.claude_json)["mcpServers"] == {"other": {}}
+
+
 def test_mcp_via_cli_failure_falls_back_to_file(env, tmp_path):
     cli, _ = fake_claude(tmp_path, 1)
     assert integration.install_mcp(with_cli(env, cli)) == "file"

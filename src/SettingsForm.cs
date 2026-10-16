@@ -80,7 +80,7 @@ namespace AgentProxy
 
         private static NumericUpDown PortBox()
         {
-            return new NumericUpDown { Minimum = EngineSettings.MinPort, Maximum = EngineSettings.MaxPort, Width = 90 };
+            return new NumericUpDown { Minimum = 0, Maximum = 99999, Width = 90 };
         }
 
         private static void AddRow(TableLayoutPanel layout, string text, Control control)

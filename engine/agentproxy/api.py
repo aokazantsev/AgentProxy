@@ -15,7 +15,7 @@ log = logging.getLogger("agentproxy.api")
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 TOKEN_HEADER = "X-AgentProxy-Token"
-LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+LOCAL_HOSTS = ("127.0.0.1", "localhost")
 
 
 def allowed_hosts(port):

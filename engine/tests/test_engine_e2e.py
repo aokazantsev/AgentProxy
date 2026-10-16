@@ -473,6 +473,37 @@ def test_proxy_refuses_requests_to_its_own_ports(engine):
     assert failure.value.code == 502
 
 
+def test_page_posting_to_proxy_port_leaves_no_record(engine):
+    connection = http.client.HTTPConnection("127.0.0.1", engine["proxy_port"], timeout=15)
+    connection.request("POST", "/evil", body=b"IGNORE ALL", headers={"Origin": "https://evil.example"})
+    assert connection.getresponse().status == 502
+    connection.close()
+    time.sleep(0.5)
+    assert api_get(engine["api_port"], "/api/flows")[1]["flows"] == []
+
+
+def test_upstream_with_untrusted_certificate_fails_when_verified(start_engine, tmp_path):
+    engine = start_engine(verify_upstream=True)
+    target = start_server(str(tmp_path))
+    with pytest.raises(urllib.error.HTTPError) as failure:
+        proxied_opener(engine, os.path.join(engine["data_dir"], "certs", "mitmproxy-ca-cert.pem")).open(
+            "https://localhost:{0}/selfsigned".format(target.server_port), timeout=15)
+    assert failure.value.code == 502
+    failed = api_get(engine["api_port"], "/api/flows?failed_only=true")[1]["flows"]
+    assert any("Certificate verify failed" in (flow["error"] or "") for flow in failed)
+    target.shutdown()
+
+
+def test_status_command_waits_for_running_engine(engine, tmp_path):
+    (tmp_path / "claude").mkdir()
+    env = dict(os.environ, AGENTPROXY_DATA_DIR=engine["data_dir"], CLAUDE_CONFIG_DIR=str(tmp_path / "claude"))
+    result = subprocess.run([sys.executable, "-I", "-m", "agentproxy.cli", "status", "--wait", "30"],
+                            capture_output=True, env=env, timeout=60)
+    report = json.loads(result.stdout)
+    assert result.returncode == 0 and report["running"] is True
+    assert set(report["claude"]) >= {"mcp", "skill", "hooks"}
+
+
 def start_websocket_echo():
     import asyncio as aio
     import tornado.web
@@ -666,6 +697,8 @@ def test_documented_routes_answer(engine):
     proxied_opener(engine).open("http://127.0.0.1:{0}/one".format(target.server_port), timeout=15)
     seq = api_get(port, "/api/flows")[1]["flows"][0]["seq"]
     assert api_get(port, "/api/flows/{0}".format(seq))[0] == 200
+    assert api_get(port, "/api/flows/nope")[0] == 404
+    assert api_get(port, "/api/flows?limit=0")[0] == 400
     status, waited = api_get(port, "/api/flows/wait?timeout_seconds=1")
     assert status == 200 and waited["timed_out"] is True
     status, cer = api_get(port, "/api/ca.cer")

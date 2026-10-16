@@ -61,6 +61,8 @@ def test_proxy_passes_websocket_through_as_raw_tcp(tmp_path):
     assert opts.websocket is False
     assert opts.rawtcp is True
     assert opts.listen_host == "127.0.0.1"
+    assert opts.ssl_insecure is False
+    assert proxy_options(Settings(verify_upstream=False), str(tmp_path)).ssl_insecure is True
 
 
 class FakeHandler:

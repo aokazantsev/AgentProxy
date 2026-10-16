@@ -31,7 +31,6 @@ namespace AgentProxy
 
         public static UpdateRelease FetchLatest()
         {
-            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             string url = ApiPrefix + AppIdentity.GitHubUrl.Substring(GitHubPrefix.Length) + "/releases/latest";
             HttpWebRequest request = CreateRequest(url, RequestTimeoutMs);
             request.Accept = "application/vnd.github+json";

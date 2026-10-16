@@ -1,7 +1,11 @@
 import json
+import logging
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass, field
+
+log = logging.getLogger("agentproxy.store")
 
 SCHEMA_VERSION = 2
 MAX_HISTORY_BYTES = 512 * 1024 * 1024
@@ -113,24 +117,36 @@ class FlowStore:
         self.max_flows = max_flows
         self.max_bytes = max_bytes
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        self._db.row_factory = sqlite3.Row
-        self._db.create_function("text_lower", 1, _text_lower, deterministic=True)
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=NORMAL")
-        self._db.execute("PRAGMA journal_size_limit={0}".format(WAL_LIMIT_BYTES))
-        self._migrate()
+        try:
+            self._db = self._open(path)
+        except sqlite3.DatabaseError as error:
+            log.warning("history %s is damaged and is started anew: %s", path, error)
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(path + suffix):
+                    os.replace(path + suffix, path + suffix + ".broken")
+            self._db = self._open(path)
         self._closed = False
         self._listeners = []
         self._inserted_since_prune = 0
         self._bytes_since_prune = 0
 
-    def _migrate(self):
-        version = self._db.execute("PRAGMA user_version").fetchone()[0]
-        if version != SCHEMA_VERSION:
-            self._db.execute("DROP TABLE IF EXISTS flows")
-        self._db.executescript(SCHEMA)
-        self._db.execute("PRAGMA user_version={0}".format(SCHEMA_VERSION))
+    @staticmethod
+    def _open(path):
+        db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        try:
+            db.row_factory = sqlite3.Row
+            db.create_function("text_lower", 1, _text_lower, deterministic=True)
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=NORMAL")
+            db.execute("PRAGMA journal_size_limit={0}".format(WAL_LIMIT_BYTES))
+            if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                db.execute("DROP TABLE IF EXISTS flows")
+            db.executescript(SCHEMA)
+            db.execute("PRAGMA user_version={0}".format(SCHEMA_VERSION))
+        except sqlite3.DatabaseError:
+            db.close()
+            raise
+        return db
 
     def add_listener(self, listener):
         self._listeners.append(listener)

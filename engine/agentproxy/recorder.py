@@ -2,6 +2,7 @@ import logging
 import time
 import uuid
 
+from .guard import BLOCKED_MESSAGE
 from .store import FlowRecord
 from .streamtap import StreamTap, should_stream, should_stream_request
 
@@ -116,8 +117,13 @@ class Recorder:
         self._save(flow)
 
     def error(self, flow):
-        if flow.request is not None:
-            self._save(flow)
+        if flow.request is None:
+            return
+        if flow.error is not None and BLOCKED_MESSAGE in flow.error.msg:
+            self.taps.pop(flow.id, None)
+            self.request_taps.pop(flow.id, None)
+            return
+        self._save(flow)
 
     def http_connect_error(self, flow):
         reason = "CONNECT failed"

@@ -23,7 +23,6 @@ namespace AgentProxy
             else if (value is string) WriteString(output, (string)value);
             else if (value is bool) output.Append((bool)value ? "true" : "false");
             else if (value is double) output.Append(((double)value).ToString("R", CultureInfo.InvariantCulture));
-            else if (value is float) output.Append(((float)value).ToString("R", CultureInfo.InvariantCulture));
             else if (value is DateTime) throw new ArgumentException("date values are not written back");
             else if (value is IDictionary<string, object>) WriteObject(output, (IDictionary<string, object>)value, depth);
             else if (value is IEnumerable) WriteArray(output, (IEnumerable)value, depth);
