@@ -19,9 +19,11 @@ def _zlib_pieces(data, raw_deflate_fallback):
     if raw_deflate_fallback and not _has_zlib_header(data[:2]):
         wbits = -15
     position = 0
-    for member in range(MAX_MEMBERS):
+    for member in range(MAX_MEMBERS + 1):
         if member and data[position:position + 2] != GZIP_MAGIC:
             return
+        if member == MAX_MEMBERS:
+            raise TooManyMembers(len(data) - position)
         decompressor = zlib.decompressobj(wbits)
         while position < len(data) and not decompressor.eof:
             pending = data[position:position + INPUT_STEP]
@@ -36,6 +38,12 @@ def _zlib_pieces(data, raw_deflate_fallback):
         if not decompressor.eof:
             return
         position -= len(decompressor.unused_data)
+
+
+class TooManyMembers(Exception):
+    def __init__(self, undecoded):
+        Exception.__init__(self, "too many gzip members")
+        self.undecoded = undecoded
 
 
 def _has_zlib_header(head):
@@ -54,10 +62,9 @@ def _brotli_pieces(data):
         while True:
             piece = decompressor.process(chunk, output_buffer_limit=OUTPUT_STEP)
             chunk = b""
-            if piece:
-                yield piece
-            if len(piece) < OUTPUT_STEP or decompressor.is_finished():
+            if not piece:
                 break
+            yield piece
 
 
 def _zstd_pieces(data):
@@ -137,6 +144,8 @@ class StreamTap:
                     captured.extend(piece[:room])
                 if size >= counted_limit:
                     break
+        except TooManyMembers as stop:
+            size += stop.undecoded
         except Exception as error:
             log.warning("body kept as received, not decoded: %s", error)
             return raw[:self.limit], total

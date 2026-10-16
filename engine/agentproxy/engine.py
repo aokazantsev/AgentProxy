@@ -90,16 +90,19 @@ async def probe_proxy(service):
         await asyncio.sleep(PROBE_INTERVAL_SECONDS if seen_listening else STARTUP_PROBE_SECONDS)
 
 
-async def serve(current, data_dir, parent_pid):
+def proxy_options(current, cert_dir):
     from mitmproxy import options
+    return options.Options(listen_host=LOCAL_HOST, listen_port=current.proxy_port, confdir=cert_dir,
+                           ssl_insecure=not current.verify_upstream, websocket=False)
+
+
+async def serve(current, data_dir, parent_pid):
     from mitmproxy.tools.dump import DumpMaster
 
     cert_dir = paths.ensure(os.path.join(data_dir, "certs"))
     store = FlowStore(os.path.join(data_dir, "flows.db"), current.max_flows)
     service = ProxyService(store, current, data_dir, cert_dir)
-    opts = options.Options(listen_host=LOCAL_HOST, listen_port=current.proxy_port, confdir=cert_dir,
-                           ssl_insecure=not current.verify_upstream, websocket=False)
-    master = DumpMaster(opts, with_termlog=False, with_dumper=False)
+    master = DumpMaster(proxy_options(current, cert_dir), with_termlog=False, with_dumper=False)
     master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
     master.addons.add(Recorder(store, current.max_body_bytes))
     loop = asyncio.get_running_loop()

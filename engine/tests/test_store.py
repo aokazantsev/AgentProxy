@@ -1,3 +1,6 @@
+import pytest
+
+from agentproxy import store as store_module
 from agentproxy.store import FlowFilter, FlowStore
 
 from conftest import make_record
@@ -69,27 +72,41 @@ def test_prune_keeps_max_flows(tmp_path):
     small.close()
 
 
-def test_prune_keeps_history_under_byte_budget(tmp_path):
+@pytest.mark.parametrize("field,value", [
+    ("response_body", b"x" * 64 * 1024),
+    ("request_body", b"x" * 64 * 1024),
+    ("path", "/" + "p" * 64 * 1024),
+    ("response_headers", [["x-big", "h" * 64 * 1024]]),
+], ids=["response_body", "request_body", "path", "response_headers"])
+def test_history_stays_under_byte_budget_on_insert(tmp_path, monkeypatch, field, value):
+    monkeypatch.setattr(store_module, "PRUNE_EVERY_BYTES", 256 * 1024)
     small = FlowStore(str(tmp_path / "bytes.db"), max_flows=5000, max_bytes=1024 * 1024)
     for index in range(1, 301):
-        small.insert(make_record(index, response_body=b"x" * 64 * 1024))
-    small._prune()
-    assert small._stored_bytes() <= 1024 * 1024
+        small.insert(make_record(index, **{field: value}))
+        assert small._stored_bytes() <= 1024 * 1024 + 256 * 1024 + 2 * len(str(value))
     assert small.get("flow-300") is not None
     assert small.get("flow-1") is None
     small.close()
 
 
-def test_clear_returns_disk_space(tmp_path):
+def test_clear_truncates_the_journal(tmp_path):
     path = tmp_path / "space.db"
     big = FlowStore(str(path), max_flows=5000)
     for index in range(1, 41):
         big.insert(make_record(index, response_body=b"y" * 256 * 1024))
-    full = path.stat().st_size + (tmp_path / "space.db-wal").stat().st_size
     big.clear()
-    big._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    assert path.stat().st_size < full / 4
+    assert (tmp_path / "space.db-wal").stat().st_size == 0
+    size = path.stat().st_size
+    for index in range(41, 81):
+        big.insert(make_record(index, response_body=b"y" * 256 * 1024))
+    assert path.stat().st_size <= size * 1.2
     big.close()
+
+
+def test_insert_after_close_is_ignored(tmp_path):
+    closed = FlowStore(str(tmp_path / "closed.db"), max_flows=100)
+    closed.close()
+    assert closed.insert(make_record(1)) is None
 
 
 def test_clear_and_count(store):

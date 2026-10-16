@@ -24,6 +24,7 @@ namespace AgentProxy
         [STAThread]
         private static int Main(string[] args)
         {
+            SystemTools.LoadDllsOnlyFromSystem();
             Application.EnableVisualStyles();
             args = CommandLine.Normalize(args);
             bool silent = HasFlag(args, SilentFlag);

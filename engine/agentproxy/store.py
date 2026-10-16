@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 SCHEMA_VERSION = 1
 MAX_HISTORY_BYTES = 512 * 1024 * 1024
 PRUNE_EVERY_BYTES = 64 * 1024 * 1024
+WAL_LIMIT_BYTES = 16 * 1024 * 1024
+STORED_BYTES = ("LENGTH(url) + LENGTH(path) + LENGTH(request_headers) + COALESCE(LENGTH(response_headers), 0) "
+                "+ COALESCE(LENGTH(request_body), 0) + COALESCE(LENGTH(response_body), 0)")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -102,15 +105,14 @@ class FlowStore:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
+        self._db.execute("PRAGMA journal_size_limit={0}".format(WAL_LIMIT_BYTES))
         self._migrate()
+        self._closed = False
         self._listeners = []
         self._inserted_since_prune = 0
         self._bytes_since_prune = 0
 
     def _migrate(self):
-        if self._db.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
-            self._db.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            self._db.execute("VACUUM")
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             self._db.execute("DROP TABLE IF EXISTS flows")
@@ -139,11 +141,14 @@ class FlowStore:
         names = ", ".join(row)
         marks = ", ".join(":" + name for name in row)
         with self._lock:
+            if self._closed:
+                return None
             cursor = self._db.execute(
                 "INSERT OR REPLACE INTO flows ({0}) VALUES ({1})".format(names, marks), row)
             seq = cursor.lastrowid
             self._inserted_since_prune += 1
-            self._bytes_since_prune += len(record.request_body or b"") + len(record.response_body or b"")
+            self._bytes_since_prune += sum(len(row[name] or b"") for name in (
+                "url", "path", "request_headers", "response_headers", "request_body", "response_body"))
             if self._inserted_since_prune >= 100 or self._bytes_since_prune >= PRUNE_EVERY_BYTES:
                 self._prune()
         summary = self.summary(seq)
@@ -160,11 +165,9 @@ class FlowStore:
             self._db.execute(
                 "DELETE FROM flows WHERE seq IN (SELECT seq FROM flows ORDER BY seq LIMIT "
                 "(SELECT MAX(COUNT(*) / 10, 1) FROM flows))")
-        self._db.execute("PRAGMA incremental_vacuum").fetchall()
 
     def _stored_bytes(self):
-        return self._db.execute(
-            "SELECT COALESCE(SUM(LENGTH(request_body) + LENGTH(response_body)), 0) FROM flows").fetchone()[0]
+        return self._db.execute("SELECT COALESCE(SUM({0}), 0) FROM flows".format(STORED_BYTES)).fetchone()[0]
 
     def summary(self, seq):
         with self._lock:
@@ -224,9 +227,10 @@ class FlowStore:
     def clear(self):
         with self._lock:
             removed = self._db.execute("DELETE FROM flows").rowcount
-            self._db.execute("PRAGMA incremental_vacuum").fetchall()
+            self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
         return removed
 
     def close(self):
         with self._lock:
+            self._closed = True
             self._db.close()

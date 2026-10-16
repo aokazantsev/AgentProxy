@@ -9,6 +9,7 @@ namespace AgentProxy
         [STAThread]
         private static int Main(string[] args)
         {
+            SystemTools.LoadDllsOnlyFromSystem();
             args = CommandLine.Normalize(args);
             bool silent = SilentSetup.IsRequested(args);
             bool isFirstInstance;

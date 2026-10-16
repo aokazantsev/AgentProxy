@@ -114,7 +114,17 @@ def test_zstd_frame_with_huge_window_is_kept_as_received():
 
 def test_endless_gzip_members_stop_but_keep_what_was_decoded():
     wire = gzip.compress(b"x") * (MAX_MEMBERS + 50)
-    assert whole(100000, "gzip", wire) == (b"x" * MAX_MEMBERS, MAX_MEMBERS)
+    body, size = whole(100000, "gzip", wire)
+    assert body == b"x" * MAX_MEMBERS and size > len(body)
+
+
+def test_brotli_prefix_of_a_cut_stream_is_fully_decoded():
+    raw = os.urandom(3 * 1024 * 1024)
+    wire = brotli.compress(raw, quality=1)
+    tap = StreamTap(4 * 1024 * 1024, "br", wire_limit=len(wire) // 2)
+    feed(tap, wire)
+    body, size = tap.body()
+    assert len(body) > 0.9 * tap.wire_limit and body == raw[:len(body)] and size > len(body)
 
 
 @pytest.mark.parametrize("encoding,encode", [
