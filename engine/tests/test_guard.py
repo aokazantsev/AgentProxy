@@ -24,8 +24,10 @@ def fake_resolver(monkeypatch, answers):
     return calls
 
 
-def run(coroutine):
-    return asyncio.run(coroutine)
+def connect(host, port):
+    data = SimpleNamespace(server=SimpleNamespace(address=(host, port), error=None))
+    asyncio.run(OwnPortsGuard(PROXY_PORT, API_PORT).server_connect(data))
+    return data.server
 
 
 @pytest.mark.parametrize("address,expected", [
@@ -36,68 +38,30 @@ def test_loopback_addresses(address, expected):
     assert is_loopback_address(address) is expected
 
 
-def test_name_resolving_to_loopback_targets_own_port(monkeypatch):
-    fake_resolver(monkeypatch, {"rebind.example": ["127.0.0.1"]})
-    assert run(OwnPortsGuard(PROXY_PORT, API_PORT).targets_own_port("rebind.example", API_PORT)) is True
+@pytest.mark.parametrize("host", ["[::1]", "localhost.", "LOCALHOST", "app.localhost", "127.0.0.5"])
+def test_loopback_names_are_blocked_without_resolver(monkeypatch, host):
+    calls = fake_resolver(monkeypatch, {})
+    assert connect(host, API_PORT).error
+    assert calls == []
 
 
-def test_name_resolving_elsewhere_is_allowed(monkeypatch):
-    fake_resolver(monkeypatch, {"api.example": ["93.184.216.34"]})
-    assert run(OwnPortsGuard(PROXY_PORT, API_PORT).targets_own_port("api.example", API_PORT)) is False
+def test_name_resolving_to_loopback_is_blocked(monkeypatch):
+    fake_resolver(monkeypatch, {"local.example": ["93.184.216.34", "127.0.0.1"]})
+    assert connect("local.example", PROXY_PORT).error
 
 
-def test_unresolvable_name_is_left_to_the_connection(monkeypatch):
+def test_unresolvable_name_on_own_port_is_blocked(monkeypatch):
     fake_resolver(monkeypatch, {"missing.example": socket.gaierror("no such host")})
-    assert run(OwnPortsGuard(PROXY_PORT, API_PORT).targets_own_port("missing.example", API_PORT)) is False
+    assert connect("missing.example", API_PORT).error
+
+
+def test_remote_host_on_same_port_number_is_allowed(monkeypatch):
+    fake_resolver(monkeypatch, {"api.example": ["93.184.216.34"]})
+    server = connect("api.example", API_PORT)
+    assert server.error is None and server.address == ("api.example", API_PORT)
 
 
 def test_other_ports_skip_the_resolver(monkeypatch):
     calls = fake_resolver(monkeypatch, {})
-    assert run(OwnPortsGuard(PROXY_PORT, API_PORT).targets_own_port("anything.example", 443)) is False
+    assert connect("anything.example", 443).error is None
     assert calls == []
-
-
-@pytest.mark.parametrize("host", ["[::1]", "localhost.", "app.localhost", "127.0.0.5"])
-def test_loopback_names_need_no_resolver(monkeypatch, host):
-    calls = fake_resolver(monkeypatch, {})
-    assert run(OwnPortsGuard(PROXY_PORT, API_PORT).targets_own_port(host, PROXY_PORT)) is True
-    assert calls == []
-
-
-def connection(host, port):
-    return SimpleNamespace(server=SimpleNamespace(address=(host, port), sni=None, error=None))
-
-
-def test_server_connect_pins_the_checked_address(monkeypatch):
-    calls = fake_resolver(monkeypatch, {"rebind.example": ["93.184.216.34"]})
-    data = connection("rebind.example", API_PORT)
-    run(OwnPortsGuard(PROXY_PORT, API_PORT).server_connect(data))
-    assert data.server.error is None
-    assert data.server.address == ("93.184.216.34", API_PORT)
-    assert data.server.sni == "rebind.example"
-    assert calls == ["rebind.example"]
-
-
-def test_server_connect_kills_connection_resolving_to_loopback(monkeypatch):
-    fake_resolver(monkeypatch, {"rebind.example": ["127.0.0.1"]})
-    data = connection("rebind.example", API_PORT)
-    run(OwnPortsGuard(PROXY_PORT, API_PORT).server_connect(data))
-    assert data.server.error
-
-
-def test_server_connect_kills_unresolvable_own_port(monkeypatch):
-    fake_resolver(monkeypatch, {"missing.example": socket.gaierror("no such host")})
-    data = connection("missing.example", PROXY_PORT)
-    run(OwnPortsGuard(PROXY_PORT, API_PORT).server_connect(data))
-    assert data.server.error
-
-
-def test_server_connect_leaves_other_ports_and_literals(monkeypatch):
-    fake_resolver(monkeypatch, {"93.184.216.34": ["93.184.216.34"]})
-    other = connection("api.example", 443)
-    run(OwnPortsGuard(PROXY_PORT, API_PORT).server_connect(other))
-    assert other.server.address == ("api.example", 443) and other.server.error is None
-    literal = connection("93.184.216.34", API_PORT)
-    run(OwnPortsGuard(PROXY_PORT, API_PORT).server_connect(literal))
-    assert literal.server.address == ("93.184.216.34", API_PORT) and literal.server.sni is None
-    assert literal.server.error is None

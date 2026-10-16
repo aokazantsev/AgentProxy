@@ -98,7 +98,7 @@ async def serve(current, data_dir, parent_pid):
     store = FlowStore(os.path.join(data_dir, "flows.db"), current.max_flows)
     service = ProxyService(store, current, data_dir, cert_dir)
     opts = options.Options(listen_host=LOCAL_HOST, listen_port=current.proxy_port, confdir=cert_dir,
-                           ssl_insecure=not current.verify_upstream)
+                           ssl_insecure=not current.verify_upstream, websocket=False)
     master = DumpMaster(opts, with_termlog=False, with_dumper=False)
     master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
     master.addons.add(Recorder(store, current.max_body_bytes))

@@ -12,8 +12,9 @@ def is_textual(content_type, body):
         return True
     try:
         body.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
+    except UnicodeDecodeError as error:
+        if error.reason != "unexpected end of data":
+            return False
     return b"\x00" not in body[:1024]
 
 

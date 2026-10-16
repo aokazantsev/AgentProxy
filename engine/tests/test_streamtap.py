@@ -61,6 +61,7 @@ def zstd_bytes(raw):
 
 @pytest.mark.parametrize("encoding,encode", [
     (None, lambda raw: raw),
+    ("none", lambda raw: raw),
     ("gzip", gzip_bytes),
     ("GZIP", gzip_bytes),
     ("deflate", zlib.compress),
@@ -72,7 +73,7 @@ def test_tap_passes_wire_bytes_and_keeps_decoded_prefix(encoding, encode):
     wire = encode(raw)
     tap = StreamTap(1000, encoding, wire_limit=len(wire))
     assert feed(tap, wire) == wire
-    assert tap.body() == (raw[:1000], len(raw), None)
+    assert tap.body() == (raw[:1000], len(raw))
 
 
 @pytest.mark.parametrize("encoding,wire", [
@@ -85,13 +86,13 @@ def test_tap_decodes_variants_mitmproxy_accepts(encoding, wire):
     for pieces in (1, 7, len(wire)):
         tap = StreamTap(10000, encoding)
         assert feed(tap, wire, pieces) == wire
-        assert tap.body() == (b"abc" * 1000, 3000, None)
+        assert tap.body() == (b"abc" * 1000, 3000)
 
 
 @pytest.mark.parametrize("size", [OUTPUT_STEP, OUTPUT_STEP + 1, OUTPUT_STEP + 200, 2 * OUTPUT_STEP + 7])
 def test_raw_deflate_keeps_its_tail(size):
     raw = (b"abcdefgh" * (size // 8 + 1))[:size]
-    assert whole(size, "deflate", raw_deflate(raw)) == (raw, size, None)
+    assert whole(size, "deflate", raw_deflate(raw)) == (raw, size)
 
 
 def test_zstd_frames_split_anywhere_are_all_decoded():
@@ -101,21 +102,19 @@ def test_zstd_frames_split_anywhere_are_all_decoded():
         tap = StreamTap(1000, "zstd")
         tap(wire[:cut])
         tap(wire[cut:])
-        assert tap.body() == (first + second, 320, None), cut
+        assert tap.body() == (first + second, 320), cut
 
 
-def test_zstd_frame_with_huge_window_is_refused():
+def test_zstd_frame_with_huge_window_is_kept_as_received():
     params = zstandard.ZstdCompressionParameters(window_log=27, write_content_size=False)
     compressor = zstandard.ZstdCompressor(compression_params=params).compressobj()
     wire = compressor.compress(b"a" * 100) + compressor.flush()
-    body, size, error = whole(1000, "zstd", wire)
-    assert body is None and size == len(wire) and error
+    assert whole(1000, "zstd", wire) == (wire, len(wire))
 
 
-@pytest.mark.parametrize("encoding,member", [("gzip", gzip.compress(b"")), ("zstd", zstd_bytes(b""))])
-def test_endless_empty_members_stop_decoding(encoding, member):
-    body, _, error = whole(1000, encoding, member * (MAX_MEMBERS + 5))
-    assert body is None and "too many" in error
+def test_endless_gzip_members_stop_but_keep_what_was_decoded():
+    wire = gzip.compress(b"x") * (MAX_MEMBERS + 50)
+    assert whole(100000, "gzip", wire) == (b"x" * MAX_MEMBERS, MAX_MEMBERS)
 
 
 @pytest.mark.parametrize("encoding,encode", [
@@ -138,11 +137,11 @@ def test_large_body_decodes_in_linear_time(encoding, encode):
 def test_tap_stops_decoding_a_compression_bomb(encoding, encode):
     wire = encode(b"\0" * (COUNTED_BYTES_LIMIT * 4))
     tracemalloc.start()
-    body, size, error = whole(1000, encoding, wire)
+    body, size = whole(1000, encoding, wire)
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
-    assert error is None and body == b"\0" * 1000
-    assert COUNTED_BYTES_LIMIT <= size <= COUNTED_BYTES_LIMIT + 8 * 1024 * 1024
+    assert body == b"\0" * 1000
+    assert COUNTED_BYTES_LIMIT <= size <= COUNTED_BYTES_LIMIT + OUTPUT_STEP
     assert peak < 32 * 1024 * 1024
 
 
@@ -166,33 +165,38 @@ def test_wire_beyond_the_kept_prefix_counts_as_lower_bound():
     raw = os.urandom(5000)
     tap = StreamTap(1000, None, wire_limit=1000)
     feed(tap, raw)
-    assert tap.body() == (raw[:1000], 5000, None)
+    assert len(tap.wire) == 1000
+    assert tap.body() == (raw[:1000], 5000)
     packed = gzip.compress(raw)
     tap = StreamTap(10000, "gzip", wire_limit=2000)
     feed(tap, packed)
-    body, size, error = tap.body()
-    assert error is None and body == raw[:len(body)] and size > len(body)
+    assert len(tap.wire) == 2000
+    body, size = tap.body()
+    assert body == raw[:len(body)] and size > len(body)
 
 
 def test_empty_body_with_unknown_encoding_is_empty():
-    assert StreamTap(100, "compress").body() == (b"", 0, None)
+    assert StreamTap(100, "compress").body() == (b"", 0)
 
 
-@pytest.mark.parametrize("encoding,wire", [("gzip", b"not gzip at all"), ("compress", b"x"), ("gzip, br", b"xy")])
-def test_undecodable_body_reports_error_and_wire_size(encoding, wire):
+@pytest.mark.parametrize("encoding,wire", [
+    ("gzip", b"not gzip at all"),
+    ("compress", b"x"),
+    ("gzip, br", b"xy"),
+    ("UTF-8", b'{"plain": true}'),
+])
+def test_undecodable_body_is_kept_as_received(encoding, wire):
     tap = StreamTap(100, encoding)
     assert tap(wire) == wire
-    body, size, error = tap.body()
-    assert body is None and size == len(wire) and error
+    assert tap.body() == (wire, len(wire))
 
 
-def test_record_keeps_neutral_note_when_body_was_not_decoded():
+def test_record_keeps_body_that_does_not_decode():
     flow = tflow.tflow(resp=True)
-    tap = StreamTap(100, "gzip")
-    tap(b"not gzip at all")
-    record = recorder.build_record(flow, 100, tap)
-    assert record.response_body.startswith(b"[AgentProxy] body was passed through but not recorded")
-    assert record.response_body_size == 15
+    flow.response.headers["content-encoding"] = "none"
+    flow.response.raw_content = b'{"plain": true}'
+    record = recorder.build_record(flow, 1000, None)
+    assert record.response_body == b'{"plain": true}' and record.response_body_size == 15
 
 
 def test_record_takes_streamed_request_body_from_its_tap():
@@ -221,22 +225,8 @@ def test_record_decodes_compressed_body_within_limit():
     assert record.response_body_size >= COUNTED_BYTES_LIMIT
 
 
-def test_record_marks_body_that_does_not_decode():
-    flow = tflow.tflow(resp=True)
-    flow.response.headers["content-encoding"] = "gzip"
-    flow.response.raw_content = b"not gzip"
-    record = recorder.build_record(flow, 1000, None)
-    assert record.response_body.startswith(b"[AgentProxy] body was passed through but not recorded")
-    assert record.response_body_size == 8
-
-
-def test_websocket_and_tcp_messages_are_not_kept():
-    store_records = []
-    keeper = recorder.Recorder(type("Store", (), {"insert": store_records.append})(), 100)
-    flow = tflow.twebsocketflow()
-    assert flow.websocket.messages
-    keeper.websocket_message(flow)
-    assert flow.websocket.messages == []
+def test_tcp_messages_are_not_kept():
+    keeper = recorder.Recorder(None, 100)
     tcp = tflow.ttcpflow()
     assert tcp.messages
     keeper.tcp_message(tcp)

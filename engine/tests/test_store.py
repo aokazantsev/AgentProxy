@@ -69,6 +69,29 @@ def test_prune_keeps_max_flows(tmp_path):
     small.close()
 
 
+def test_prune_keeps_history_under_byte_budget(tmp_path):
+    small = FlowStore(str(tmp_path / "bytes.db"), max_flows=5000, max_bytes=1024 * 1024)
+    for index in range(1, 301):
+        small.insert(make_record(index, response_body=b"x" * 64 * 1024))
+    small._prune()
+    assert small._stored_bytes() <= 1024 * 1024
+    assert small.get("flow-300") is not None
+    assert small.get("flow-1") is None
+    small.close()
+
+
+def test_clear_returns_disk_space(tmp_path):
+    path = tmp_path / "space.db"
+    big = FlowStore(str(path), max_flows=5000)
+    for index in range(1, 41):
+        big.insert(make_record(index, response_body=b"y" * 256 * 1024))
+    full = path.stat().st_size + (tmp_path / "space.db-wal").stat().st_size
+    big.clear()
+    big._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    assert path.stat().st_size < full / 4
+    big.close()
+
+
 def test_clear_and_count(store):
     store.insert(make_record(1))
     store.insert(make_record(2))

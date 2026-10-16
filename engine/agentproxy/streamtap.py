@@ -1,71 +1,41 @@
+import io
 import logging
 import zlib
 
 log = logging.getLogger("agentproxy.streamtap")
 
 NO_BODY_STATUSES = (204, 304)
+IDENTITY_ENCODINGS = ("", "identity", "none")
 COUNTED_BYTES_LIMIT = 64 * 1024 * 1024
 OUTPUT_STEP = 256 * 1024
-ZLIB_INPUT_STEP = 64 * 1024
-ZSTD_INPUT_STEP = 64
+INPUT_STEP = 64 * 1024
 MAX_MEMBERS = 1000
 ZSTD_MAX_WINDOW = 8 * 1024 * 1024
 GZIP_MAGIC = b"\x1f\x8b"
 
 
-def _slices(data, step):
-    view = memoryview(data)
-    for start in range(0, len(view), step):
-        yield view[start:start + step]
-
-
-class _ZlibDecoder:
-    def __init__(self, raw_deflate_fallback):
-        self.wbits = None if raw_deflate_fallback else 47
-        self.held = b""
-        self.decompressor = None
-        self.members = 0
-        self.done = False
-
-    def pieces(self, data):
-        buffer = self.held + bytes(data)
-        self.held = b""
-        position = 0
-        while position < len(buffer) and not self.done:
-            if self.decompressor is None:
-                if self.members >= MAX_MEMBERS:
-                    raise ValueError("too many compressed members")
-                if self.members == 0 and self.wbits is not None:
-                    self.decompressor = zlib.decompressobj(self.wbits)
-                    self.members = 1
-                    continue
-                head = buffer[position:position + 2]
-                if len(head) < 2:
-                    if self.wbits is None or GZIP_MAGIC.startswith(head):
-                        self.held = head
-                    else:
-                        self.done = True
-                    return
-                if self.wbits is None:
-                    self.wbits = 47 if _has_zlib_header(head) else -15
-                elif head != GZIP_MAGIC:
-                    self.done = True
-                    return
-                self.decompressor = zlib.decompressobj(self.wbits)
-                self.members += 1
-            pending = buffer[position:position + ZLIB_INPUT_STEP]
+def _zlib_pieces(data, raw_deflate_fallback):
+    wbits = 47
+    if raw_deflate_fallback and not _has_zlib_header(data[:2]):
+        wbits = -15
+    position = 0
+    for member in range(MAX_MEMBERS):
+        if member and data[position:position + 2] != GZIP_MAGIC:
+            return
+        decompressor = zlib.decompressobj(wbits)
+        while position < len(data) and not decompressor.eof:
+            pending = data[position:position + INPUT_STEP]
             position += len(pending)
             while True:
-                piece = self.decompressor.decompress(pending, OUTPUT_STEP)
+                piece = decompressor.decompress(pending, OUTPUT_STEP)
                 if piece:
                     yield piece
-                pending = self.decompressor.unconsumed_tail
-                if self.decompressor.eof:
-                    position -= len(self.decompressor.unused_data)
-                    self.decompressor = None
+                pending = decompressor.unconsumed_tail
+                if decompressor.eof or (not pending and len(piece) < OUTPUT_STEP):
                     break
-                if not pending and len(piece) < OUTPUT_STEP:
-                    break
+        if not decompressor.eof:
+            return
+        position -= len(decompressor.unused_data)
 
 
 def _has_zlib_header(head):
@@ -76,65 +46,41 @@ def _has_zlib_header(head):
     return True
 
 
-class _BrotliDecoder:
-    def __init__(self):
-        import brotli
-        self.decompressor = brotli.Decompressor()
-
-    def pieces(self, data):
-        for part in _slices(data, ZLIB_INPUT_STEP):
-            chunk = bytes(part)
-            while True:
-                piece = self.decompressor.process(chunk, output_buffer_limit=OUTPUT_STEP)
-                chunk = b""
-                if piece:
-                    yield piece
-                if len(piece) < OUTPUT_STEP or self.decompressor.is_finished():
-                    break
-
-
-class _ZstdDecoder:
-    def __init__(self):
-        import zstandard
-        self.zstandard = zstandard
-        self.frames = 1
-        self.decompressor = self._new()
-
-    def _new(self):
-        return self.zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW).decompressobj()
-
-    def pieces(self, data):
-        for part in _slices(data, ZSTD_INPUT_STEP):
-            piece = self._feed(part)
+def _brotli_pieces(data):
+    import brotli
+    decompressor = brotli.Decompressor()
+    for start in range(0, len(data), INPUT_STEP):
+        chunk = data[start:start + INPUT_STEP]
+        while True:
+            piece = decompressor.process(chunk, output_buffer_limit=OUTPUT_STEP)
+            chunk = b""
             if piece:
                 yield piece
-            while self.decompressor.eof and self.decompressor.unused_data:
-                tail = self.decompressor.unused_data
-                piece = self._feed(tail)
-                if piece:
-                    yield piece
-
-    def _feed(self, part):
-        if self.decompressor.eof:
-            self.frames += 1
-            if self.frames > MAX_MEMBERS:
-                raise ValueError("too many compressed frames")
-            self.decompressor = self._new()
-        return self.decompressor.decompress(part)
+            if len(piece) < OUTPUT_STEP or decompressor.is_finished():
+                break
 
 
-def _decoder(encoding):
+def _zstd_pieces(data):
+    import zstandard
+    reader = zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW).stream_reader(
+        io.BytesIO(data), read_across_frames=True)
+    while True:
+        piece = reader.read(OUTPUT_STEP)
+        if not piece:
+            return
+        yield piece
+
+
+def _pieces(encoding, data):
     name = (encoding or "").strip().lower()
-    if name in ("", "identity"):
-        return None
     if name in ("gzip", "x-gzip"):
-        return _ZlibDecoder(False)
+        return _zlib_pieces(data, False)
     if name == "deflate":
-        return _ZlibDecoder(True)
+        return _zlib_pieces(data, True)
     if name == "br":
-        return _BrotliDecoder()
+        return _brotli_pieces(data)
     if name == "zstd":
-        return _ZstdDecoder()
+        return _zstd_pieces(data)
     raise ValueError("unsupported content-encoding " + name)
 
 
@@ -177,20 +123,14 @@ class StreamTap:
 
     def body(self, expected_size=0):
         total = max(self.wire_size, expected_size)
-        if total == 0:
-            return b"", 0, None
-        missing = total - len(self.wire)
-        try:
-            decoder = _decoder(self.encoding)
-        except (ValueError, ImportError) as error:
-            return None, total, str(error)
-        if decoder is None:
-            return bytes(self.wire[:self.limit]), total, None
+        raw = bytes(self.wire)
+        if total == 0 or (self.encoding or "").strip().lower() in IDENTITY_ENCODINGS:
+            return raw[:self.limit], total
         captured = bytearray()
         size = 0
         counted_limit = max(self.limit, COUNTED_BYTES_LIMIT)
         try:
-            for piece in decoder.pieces(self.wire):
+            for piece in _pieces(self.encoding, raw):
                 size += len(piece)
                 room = self.limit - len(captured)
                 if room > 0:
@@ -198,7 +138,6 @@ class StreamTap:
                 if size >= counted_limit:
                     break
         except Exception as error:
-            log.warning("body not decoded: %s", error)
-            return None, total, "body could not be decoded: {0}".format(error)
-        return bytes(captured), size + missing, None
-
+            log.warning("body kept as received, not decoded: %s", error)
+            return raw[:self.limit], total
+        return bytes(captured), size + total - len(raw)

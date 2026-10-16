@@ -89,6 +89,7 @@ namespace AgentProxy
                 if (File.Exists(settingsPath)) File.Delete(settingsPath);
                 SetupLog.Append("settings reset");
             }
+            InstallFolder.Mark(request.TargetDirectory);
             CrashReportConsent.Set(request.Has(CrashReportConsent.OptionKey));
             SetupLog.Append("crash reports: " + request.Has(CrashReportConsent.OptionKey));
             report(5, "Останавливаю движок…");
@@ -132,7 +133,6 @@ namespace AgentProxy
 
         public static void AfterExtract(InstallRequest request, Action<int, string> report, List<string> notes)
         {
-            InstallFolder.Mark(request.TargetDirectory);
             RemovePreviousLocation(request.TargetDirectory, notes);
             report(80, "Claude Code…");
             bool wanted = request.Has(ClaudeKey);

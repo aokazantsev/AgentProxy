@@ -121,8 +121,7 @@ namespace AgentProxy
             }
             if (InstallFolder.IsOurs(installDirectory, registered))
             {
-                string contentProblem = FolderRemoval.DeleteContentsExcept(installDirectory, AppIdentity.UninstallerName,
-                    AppIdentity.InstallMarkerName);
+                string contentProblem = FolderRemoval.DeleteContentsExcept(installDirectory, InstallFolder.LeftoverNames);
                 if (contentProblem != null) problems.Add("файлы программы удалены не полностью (" + contentProblem + ")");
             }
             else

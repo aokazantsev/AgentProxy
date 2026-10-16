@@ -73,3 +73,9 @@ def test_changelog_render_limit():
 
 def test_version_key_orders_numerically():
     assert changelog.version_key("0.10") > changelog.version_key("0.9")
+
+
+def test_text_cut_inside_a_character_stays_text():
+    body = ("привет" * 100).encode("utf-8")[:301]
+    rendered = bodies.render(body, 1200, "", None)
+    assert rendered["encoding"] == "text" and rendered["content"].startswith("привет")

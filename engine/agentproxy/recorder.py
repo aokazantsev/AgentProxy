@@ -7,7 +7,6 @@ from .streamtap import StreamTap, should_stream, should_stream_request
 
 log = logging.getLogger("agentproxy.recorder")
 
-UNDECODED_NOTE = "[AgentProxy] body was passed through but not recorded: {0}"
 TLS_CLIENT_ERROR = "TLS handshake with the client failed: {0}"
 
 
@@ -22,26 +21,19 @@ def _content_length(message):
         return 0
 
 
-def _tapped(tap, expected_size=0):
-    body, size, error = tap.body(expected_size)
-    if error is not None:
-        return UNDECODED_NOTE.format(error).encode("utf-8"), size
-    return body, size
-
-
 def _body(message, limit):
     if message is None:
         return b"", 0
     raw = message.raw_content or b""
     tap = StreamTap(limit, message.headers.get("content-encoding"), wire_limit=len(raw))
     tap(raw)
-    return _tapped(tap)
+    return tap.body()
 
 
 def build_record(flow, limit, tap=None, error=None, request_tap=None):
     request = flow.request
     if request_tap is not None:
-        request_body, request_size = _tapped(request_tap, _content_length(request))
+        request_body, request_size = request_tap.body(_content_length(request))
     else:
         request_body, request_size = _body(request, limit)
     record = FlowRecord(
@@ -63,7 +55,7 @@ def build_record(flow, limit, tap=None, error=None, request_tap=None):
     response = flow.response
     if response is not None:
         if tap is not None:
-            response_body, response_size = _tapped(tap)
+            response_body, response_size = tap.body()
         else:
             response_body, response_size = _body(response, limit)
         record.status = response.status_code
@@ -114,9 +106,6 @@ class Recorder:
             tap = StreamTap(self.body_limit, headers.get("content-encoding"))
             self.taps[flow.id] = tap
             flow.response.stream = tap
-
-    def websocket_message(self, flow):
-        flow.websocket.messages.clear()
 
     def tcp_message(self, flow):
         flow.messages.clear()

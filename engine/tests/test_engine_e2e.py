@@ -447,7 +447,84 @@ def certifi_bundle():
 def test_proxy_refuses_requests_to_its_own_ports(engine):
     with pytest.raises(urllib.error.HTTPError) as failure:
         proxied_opener(engine).open("http://127.0.0.1:{0}/api/flows".format(engine["api_port"]), timeout=15)
-    assert failure.value.code == 403
+    assert failure.value.code == 502
+
+
+def start_websocket_echo():
+    import asyncio as aio
+    import tornado.web
+    import tornado.websocket
+
+    class Echo(tornado.websocket.WebSocketHandler):
+        def on_message(self, message):
+            self.write_message(message, binary=isinstance(message, bytes))
+
+    ready = threading.Event()
+    holder = {}
+
+    def serve():
+        loop = aio.new_event_loop()
+        aio.set_event_loop(loop)
+        server = tornado.web.Application([(r"/ws", Echo)]).listen(0, "127.0.0.1")
+        holder["port"] = next(iter(server._sockets.values())).getsockname()[1]
+        holder["loop"] = loop
+        ready.set()
+        loop.run_forever()
+
+    threading.Thread(target=serve, daemon=True).start()
+    ready.wait(10)
+    return holder
+
+
+CRLF = b"\r\n"
+HEADERS_END = CRLF + CRLF
+
+
+def masked_frame(payload):
+    mask = bytes([1, 2, 3, 4])
+    body = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    return bytes([0x81, 0x80 | len(payload)]) + mask + body
+
+
+def test_websocket_passes_through_and_handshake_is_recorded(engine):
+    target = start_websocket_echo()
+    sock = socket.create_connection(("127.0.0.1", engine["proxy_port"]), timeout=15)
+    try:
+        lines = ["GET http://127.0.0.1:{0}/ws HTTP/1.1".format(target["port"]),
+                 "Host: 127.0.0.1:{0}".format(target["port"]), "Upgrade: websocket", "Connection: Upgrade",
+                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13"]
+        sock.sendall(CRLF.join(line.encode() for line in lines) + HEADERS_END)
+        head = b""
+        while HEADERS_END not in head:
+            head += sock.recv(4096)
+        assert head.startswith(b"HTTP/1.1 101")
+        rest = head.split(HEADERS_END, 1)[1]
+        sock.sendall(masked_frame(b"hello"))
+        while len(rest) < 7:
+            rest += sock.recv(4096)
+        assert rest[:7] == bytes([0x81, 5]) + b"hello"
+    finally:
+        sock.close()
+        target["loop"].call_soon_threadsafe(target["loop"].stop)
+
+    def recorded():
+        flows = api_get(engine["api_port"], "/api/flows?path=/ws")[1]["flows"]
+        return [flow for flow in flows if flow["status"] == 101]
+
+    assert wait_until(recorded, 10)
+
+
+def test_streamed_upload_to_own_port_never_reaches_it(engine):
+    def chunks():
+        yield b'{"jsonrpc": "2.0", "id": 1, "method": "tools/call",'
+        yield b' "params": {"name": "clear_flows", "arguments": {}}}'
+
+    request = urllib.request.Request("http://localhost:{0}/mcp".format(engine["api_port"]), data=chunks(),
+                                     method="POST", headers={"Content-Type": "application/json",
+                                                             "Transfer-Encoding": "chunked"})
+    with pytest.raises(urllib.error.HTTPError) as failure:
+        proxied_opener(engine).open(request, timeout=15)
+    assert failure.value.code == 502
 
 
 def test_claude_urls_from_integration_hit_engine_routes(engine):
@@ -557,7 +634,7 @@ def test_guard_blocks_loopback_aliases(engine, host):
                                      headers={"Host": "127.0.0.1:{0}".format(engine["api_port"])})
     with pytest.raises(urllib.error.HTTPError) as failure:
         proxied_opener(engine).open(request, timeout=15)
-    assert failure.value.code == 403
+    assert failure.value.code == 502
 
 
 def test_documented_routes_answer(engine):

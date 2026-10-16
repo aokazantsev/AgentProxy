@@ -386,7 +386,7 @@ namespace AgentProxy.Tests
                 Equal(false, InstallFolder.HoldsOnlyLeftovers(root), "foreign entries are not leftovers");
                 InstallFolder.Mark(repository);
                 Equal(true, InstallFolder.IsOurs(repository, null), "marked by the installer");
-                Equal<string>(null, FolderRemoval.DeleteContentsExcept(repository, AppIdentity.UninstallerName, AppIdentity.InstallMarkerName), "cleanup");
+                Equal<string>(null, FolderRemoval.DeleteContentsExcept(repository, InstallFolder.LeftoverNames), "cleanup");
                 Equal(true, InstallFolder.HoldsOnlyLeftovers(repository), "uninstaller and marker left");
                 Equal(true, InstallFolder.IsOurs(repository, null), "half-removed installation is still ours");
                 File.WriteAllText(Path.Combine(repository, "notes.txt"), "x");
@@ -417,6 +417,13 @@ namespace AgentProxy.Tests
                 True(InstallTarget.Validate(built, null) != null, "folder with a stray AgentProxy.exe");
                 InstallFolder.Mark(built);
                 Equal<string>(null, InstallTarget.Validate(built, null), "folder marked by the installer");
+                string leftovers = Path.Combine(root, "leftovers");
+                Directory.CreateDirectory(leftovers);
+                File.WriteAllText(Path.Combine(leftovers, AppIdentity.UninstallerName), "x");
+                Equal<string>(null, InstallTarget.Validate(leftovers, null), "uninstaller left by an older build");
+                string fresh = Path.Combine(root, "fresh", "AgentProxy");
+                InstallFolder.Mark(fresh);
+                Equal(true, InstallFolder.IsOurs(fresh, null), "mark creates the folder before extraction");
                 Equal<string>(null, InstallTarget.Validate(installed, installed), "same installation");
                 True(InstallTarget.Validate(@"C:\", null) != null, "drive root");
                 True(InstallTarget.Validate(Path.Combine(installed, "inner"), installed) != null, "inside previous installation");

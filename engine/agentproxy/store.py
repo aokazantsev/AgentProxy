@@ -4,6 +4,8 @@ import threading
 from dataclasses import dataclass, field
 
 SCHEMA_VERSION = 1
+MAX_HISTORY_BYTES = 512 * 1024 * 1024
+PRUNE_EVERY_BYTES = 64 * 1024 * 1024
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -92,8 +94,9 @@ class FlowFilter:
 
 
 class FlowStore:
-    def __init__(self, path, max_flows):
+    def __init__(self, path, max_flows, max_bytes=MAX_HISTORY_BYTES):
         self.max_flows = max_flows
+        self.max_bytes = max_bytes
         self._lock = threading.Lock()
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
@@ -102,8 +105,12 @@ class FlowStore:
         self._migrate()
         self._listeners = []
         self._inserted_since_prune = 0
+        self._bytes_since_prune = 0
 
     def _migrate(self):
+        if self._db.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+            self._db.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            self._db.execute("VACUUM")
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             self._db.execute("DROP TABLE IF EXISTS flows")
@@ -136,7 +143,8 @@ class FlowStore:
                 "INSERT OR REPLACE INTO flows ({0}) VALUES ({1})".format(names, marks), row)
             seq = cursor.lastrowid
             self._inserted_since_prune += 1
-            if self._inserted_since_prune >= 100:
+            self._bytes_since_prune += len(record.request_body or b"") + len(record.response_body or b"")
+            if self._inserted_since_prune >= 100 or self._bytes_since_prune >= PRUNE_EVERY_BYTES:
                 self._prune()
         summary = self.summary(seq)
         for listener in list(self._listeners):
@@ -145,8 +153,18 @@ class FlowStore:
 
     def _prune(self):
         self._inserted_since_prune = 0
+        self._bytes_since_prune = 0
         self._db.execute(
             "DELETE FROM flows WHERE seq <= (SELECT MAX(seq) FROM flows) - ?", (self.max_flows,))
+        while self._stored_bytes() > self.max_bytes:
+            self._db.execute(
+                "DELETE FROM flows WHERE seq IN (SELECT seq FROM flows ORDER BY seq LIMIT "
+                "(SELECT MAX(COUNT(*) / 10, 1) FROM flows))")
+        self._db.execute("PRAGMA incremental_vacuum").fetchall()
+
+    def _stored_bytes(self):
+        return self._db.execute(
+            "SELECT COALESCE(SUM(LENGTH(request_body) + LENGTH(response_body)), 0) FROM flows").fetchone()[0]
 
     def summary(self, seq):
         with self._lock:
@@ -206,6 +224,7 @@ class FlowStore:
     def clear(self):
         with self._lock:
             removed = self._db.execute("DELETE FROM flows").rowcount
+            self._db.execute("PRAGMA incremental_vacuum").fetchall()
         return removed
 
     def close(self):

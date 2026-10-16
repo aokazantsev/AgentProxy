@@ -5,6 +5,8 @@ namespace AgentProxy
 {
     internal static class InstallFolder
     {
+        public static readonly string[] LeftoverNames = { AppIdentity.UninstallerName, AppIdentity.InstallMarkerName };
+
         public static bool IsOurs(string directory, string registered)
         {
             if (File.Exists(Path.Combine(directory, AppIdentity.InstallMarkerName))) return true;
@@ -13,6 +15,7 @@ namespace AgentProxy
 
         public static void Mark(string directory)
         {
+            Directory.CreateDirectory(directory);
             File.WriteAllText(Path.Combine(directory, AppIdentity.InstallMarkerName), AppIdentity.Name + " " + AppIdentity.Version);
         }
 
@@ -27,11 +30,18 @@ namespace AgentProxy
             if (!Directory.Exists(directory)) return false;
             foreach (string entry in Directory.GetFileSystemEntries(directory))
             {
-                string name = Path.GetFileName(entry);
-                if (!string.Equals(name, AppIdentity.UninstallerName, StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(name, AppIdentity.InstallMarkerName, StringComparison.OrdinalIgnoreCase)) return false;
+                if (!IsLeftoverName(Path.GetFileName(entry))) return false;
             }
             return true;
+        }
+
+        private static bool IsLeftoverName(string name)
+        {
+            foreach (string leftover in LeftoverNames)
+            {
+                if (string.Equals(name, leftover, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
         }
 
         private static bool SamePath(string first, string second)

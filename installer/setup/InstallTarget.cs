@@ -42,7 +42,7 @@ namespace AgentProxy
                 return "Папка пересекается с папкой данных " + AppIdentity.DataDirectory + ". Выбери другую папку.";
             }
             if (!Directory.Exists(fullPath)) return null;
-            if (InstallFolder.IsOurs(fullPath, installed)) return null;
+            if (InstallFolder.IsOurs(fullPath, installed) || InstallFolder.HoldsOnlyLeftovers(fullPath)) return null;
             if (Directory.GetFileSystemEntries(fullPath).Length == 0) return null;
             return "Папка не пустая и в ней нет " + AppIdentity.Name + ". Удаление стирает папку установки целиком, поэтому выбери пустую или новую папку.";
         }

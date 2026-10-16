@@ -17,6 +17,7 @@ CLI_MODULE = "agentproxy.cli"
 HOOK_PATH = "/claude/hooks/user-prompt-submit"
 WHATS_NEW_DAYS = 3
 CLI_TIMEOUT_SECONDS = 25
+TASKKILL = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
 CLI_TIMED_OUT = -2
 SHELL_SAFE_PATH = re.compile(r"^[A-Za-z0-9_./:~+-]+$")
 SKILL_TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SKILL.md")
@@ -191,7 +192,7 @@ def _run_cli(env, args):
     try:
         output, _ = process.communicate(timeout=CLI_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], stdout=subprocess.DEVNULL,
+        subprocess.run([TASKKILL, "/T", "/F", "/PID", str(process.pid)], stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         process.kill()
         return CLI_TIMED_OUT, "claude {0} timed out after {1} s".format(" ".join(args), CLI_TIMEOUT_SECONDS)
