@@ -194,14 +194,19 @@ def zstd_streamed(raw):
     ("gzip", gzip.compress), ("br", brotli.compress), ("zstd", zstd_bytes), ("zstd", zstd_streamed)])
 def test_unfinished_compressed_body_is_marked_cut(encoding, encode):
     raw = os.urandom(300000) + b"a" * 2000
-    body, size = whole(10000, encoding, encode(raw)[:-30])
-    assert body and body == raw[:len(body)] and size > len(body)
+    body, size = whole(10 ** 6, encoding, encode(raw)[:-30])
+    assert body and body == raw[:len(body)] and size == len(body) + 1
 
 
 @pytest.mark.parametrize("encoding,encode", [
     ("gzip", gzip.compress), ("br", brotli.compress), ("zstd", zstd_bytes)])
 def test_compressed_empty_body_is_empty(encoding, encode):
     assert whole(1000, encoding, encode(b"")) == (b"", 0)
+
+
+def test_junk_after_zstd_frame_is_ignored():
+    raw = os.urandom(4000)
+    assert whole(100000, "zstd", zstd_bytes(raw) + b"\n") == (raw, 4000)
 
 
 def test_second_zstd_frame_cut_keeps_the_first():

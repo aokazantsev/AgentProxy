@@ -12,6 +12,8 @@ ZSTD_INPUT_STEP = 256
 MAX_MEMBERS = 1000
 ZSTD_MAX_WINDOW = 8 * 1024 * 1024
 GZIP_MAGIC = b"\x1f\x8b"
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+ZSTD_SKIPPABLE_MAGIC = b"\x2a\x4d\x18"
 
 
 def _zlib_pieces(data, raw_deflate_fallback):
@@ -78,6 +80,8 @@ def _zstd_pieces(data):
     context = zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW)
     position = 0
     while position < len(data):
+        if position and not _starts_zstd_frame(data[position:position + 4]):
+            return
         decompressor = context.decompressobj()
         while position < len(data) and not decompressor.eof:
             pending = data[position:position + ZSTD_INPUT_STEP]
@@ -88,6 +92,12 @@ def _zstd_pieces(data):
         if not decompressor.eof:
             raise Unfinished()
         position -= len(decompressor.unused_data)
+
+
+def _starts_zstd_frame(head):
+    if head == ZSTD_MAGIC:
+        return True
+    return len(head) == 4 and head[0] & 0xF0 == 0x50 and head[1:] == ZSTD_SKIPPABLE_MAGIC
 
 
 def _pieces(encoding, data):

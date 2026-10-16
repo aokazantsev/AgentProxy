@@ -100,6 +100,14 @@ def _storable(text):
     return text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
+def _text_lower(text):
+    return text.lower() if isinstance(text, str) else text
+
+
+def _storable_headers(headers):
+    return json.dumps([[_storable(name), _storable(value)] for name, value in headers or []])
+
+
 class FlowStore:
     def __init__(self, path, max_flows, max_bytes=MAX_HISTORY_BYTES):
         self.max_flows = max_flows
@@ -107,6 +115,7 @@ class FlowStore:
         self._lock = threading.Lock()
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
+        self._db.create_function("text_lower", 1, _text_lower, deterministic=True)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.execute("PRAGMA journal_size_limit={0}".format(WAL_LIMIT_BYTES))
@@ -136,9 +145,9 @@ class FlowStore:
             "method": record.method, "scheme": record.scheme, "host": record.host, "port": record.port,
             "path": record.path, "url": record.url, "http_version": record.http_version,
             "status": record.status, "reason": record.reason, "error": record.error,
-            "request_headers": json.dumps(record.request_headers), "request_body": record.request_body,
+            "request_headers": _storable_headers(record.request_headers), "request_body": record.request_body,
             "request_body_size": record.request_body_size, "request_content_type": record.request_content_type,
-            "response_headers": json.dumps(record.response_headers), "response_body": record.response_body,
+            "response_headers": _storable_headers(record.response_headers), "response_body": record.response_body,
             "response_body_size": record.response_body_size,
             "response_content_type": record.response_content_type, "client": record.client,
         }
@@ -186,7 +195,7 @@ class FlowStore:
         clauses = []
         params = []
         if flow_filter.host:
-            clauses.append("instr(lower(host), ?) > 0")
+            clauses.append("instr(text_lower(host), ?) > 0")
             params.append(flow_filter.host.lower())
         if flow_filter.path:
             clauses.append("instr(path, ?) > 0")
@@ -203,7 +212,7 @@ class FlowStore:
             clauses.append("seq > ?")
             params.append(flow_filter.since_seq)
         if flow_filter.text:
-            clauses.append("instr(lower(url), ?) > 0")
+            clauses.append("instr(text_lower(url), ?) > 0")
             params.append(flow_filter.text.lower())
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = "SELECT {0} FROM flows{1} ORDER BY seq DESC LIMIT ?".format(", ".join(SUMMARY_COLUMNS), where)

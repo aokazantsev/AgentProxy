@@ -4,6 +4,7 @@ import json
 import logging
 import os
 
+import tornado.log
 import tornado.web
 
 from . import mcp
@@ -23,6 +24,17 @@ def allowed_hosts(port):
 
 def allowed_origins(port):
     return {"http://{0}:{1}".format(host, port) for host in LOCAL_HOSTS}
+
+
+def log_request(handler):
+    status = handler.get_status()
+    if status < 400 or status == 503:
+        write = tornado.log.access_log.info
+    elif status < 500:
+        write = tornado.log.access_log.warning
+    else:
+        write = tornado.log.access_log.error
+    write("%d %s %.2fms", status, handler._request_summary(), 1000.0 * handler.request.request_time())
 
 
 class BaseHandler(tornado.web.RequestHandler):
@@ -182,4 +194,5 @@ def make_app(context):
         (r"/mcp", McpHandler),
         (r"/claude/hooks/user-prompt-submit", PromptHookHandler),
     ]
-    return tornado.web.Application([(pattern, handler, {"context": context}) for pattern, handler in routes])
+    return tornado.web.Application(
+        [(pattern, handler, {"context": context}) for pattern, handler in routes], log_function=log_request)

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from agentproxy import store as store_module
@@ -11,6 +13,21 @@ def test_text_with_raw_bytes_is_stored(store):
     store.insert(make_record(1, path=raw, url="http://h" + raw, response_content_type=raw))
     flow = store.get("flow-1")
     assert flow["path"] == "/search?q=\\xcf\\xf0" and flow["response_content_type"] == flow["path"]
+
+
+def test_header_with_raw_bytes_can_be_served(store):
+    raw = b"\xcf\xf0".decode("utf-8", "surrogateescape")
+    store.insert(make_record(1, request_headers=[["x-" + raw, raw]], response_headers=[["content-disposition", raw]]))
+    flow = store.get("flow-1")
+    json.dumps(flow["request_headers"] + flow["response_headers"], ensure_ascii=False).encode("utf-8")
+    assert flow["request_headers"] == [["x-\\xcf\\xf0", "\\xcf\\xf0"]]
+    assert flow["response_headers"] == [["content-disposition", "\\xcf\\xf0"]]
+
+
+def test_search_ignores_case_of_cyrillic(store):
+    store.insert(make_record(1, host="Пример.рф", url="http://Пример.рф/Поиск"))
+    assert len(store.query(FlowFilter(host="пример"), 10)) == 1
+    assert len(store.query(FlowFilter(text="ПОИСК"), 10)) == 1
 
 
 def test_insert_and_get_round_trip(store):
