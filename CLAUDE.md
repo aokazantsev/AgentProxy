@@ -100,9 +100,10 @@
   `src\{AboutForm, CrashReportConsent, CrashUploader, CrashReport, AppLog, UserDataPaths, Autostart}.cs`,
   `installer\make-payload.ps1`.
 - **Осознанные отличия:** установка без прав (папка пользователя, `UninstallRegistration` пишет в HKCU, манифесты
-  `asInvoker`); тихий режим установщика и деинсталлятора (`SilentSetup`, `CommandLine`); `UpdateChecker` сверяет
-  sha256 с полем `digest` релиза, `UpdateForm` ставит скачанную версию кнопкой «Установить сейчас». Последние два —
-  кандидаты на перенос в остальные проекты.
+  `asInvoker`); тихий режим установщика и деинсталлятора (`SilentSetup`, `CommandLine`); `Update{Checker,Form,Release}.cs` —
+  общие с AgentVpnGuard (сверка sha256 по `digest` релиза, установщик в `Загрузки\AgentProxy-<версия>\`,
+  «Установить сейчас»), своё — `AppIdentity.UpdateSetupArguments` (`/silent /notify`) и `UpdateKeeps`. В DevMonitor и
+  AgentGlow их переносят треды цикла техобновлений.
 - Папку установки установщик и деинсталлятор считают своей только по маркеру `AgentProxy.install`, который пишет
   установщик, или по совпадению с записью в «Приложениях» — голого `AgentProxy.exe` мало: в репозитории он есть после
   `build.cmd`. Системные программы (`cmd`, `ping`, `taskkill`, `explorer`) запускаются по полному пути (`SystemTools`):

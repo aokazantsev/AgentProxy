@@ -23,6 +23,8 @@ namespace AgentProxy.Tests
             Run("github release without digest", ReleaseWithoutDigest);
             Run("github release without asset fails", ReleaseWithoutAsset);
             Run("sha256 of file", Sha256OfFile);
+            Run("installer downloads into its own folder", InstallerPathInOwnFolder);
+            Run("install status text follows setup mode", InstallStartedText);
             Run("silent setup defaults", SilentDefaults);
             Run("silent setup overrides", SilentOverrides);
             Run("silent setup rejects unknown", SilentRejectsUnknown);
@@ -165,7 +167,7 @@ namespace AgentProxy.Tests
 
         private static string ReleaseJson(bool withDigest, string assetName)
         {
-            return "{\"tag_name\":\"v0.2\",\"assets\":[{\"name\":\"notes.txt\",\"size\":5,\"browser_download_url\":\"https://x/notes.txt\"},"
+            return "{\"tag_name\":\"v0.2\",\"assets\":[{\"name\":\"notes.txt\",\"size\":5,\"digest\":\"sha256:" + new string('b', 64) + "\",\"browser_download_url\":\"https://x/notes.txt\"},"
                 + "{\"url\":\"u\",\"name\":\"" + assetName + "\",\"uploader\":{\"login\":\"a\"},\"size\":123456,"
                 + (withDigest ? "\"digest\":\"sha256:" + Digest.ToUpperInvariant() + "\"," : "")
                 + "\"download_count\":0,\"browser_download_url\":\"https://github.com/aokazantsev/AgentProxy/releases/download/v0.2/" + assetName + "\"}]}";
@@ -183,7 +185,7 @@ namespace AgentProxy.Tests
         private static void ReleaseWithoutDigest()
         {
             UpdateRelease release = UpdateChecker.ParseLatest(ReleaseJson(false, "AgentProxySetup.exe"));
-            Equal<string>(null, release.Sha256, "no digest");
+            Equal<string>(null, release.Sha256, "no digest, other asset digest not taken");
             Equal(123456L, release.Size, "size");
         }
 
@@ -191,6 +193,17 @@ namespace AgentProxy.Tests
         {
             Throws<InvalidDataException>(() => UpdateChecker.ParseLatest(ReleaseJson(true, "OtherSetup.exe")), "missing asset");
             Throws<InvalidDataException>(() => UpdateChecker.ParseLatest("{}"), "missing tag");
+        }
+
+        private static void InstallerPathInOwnFolder()
+        {
+            Equal(@"C:\D\AgentProxy-0.2\AgentProxySetup.exe", UpdateChecker.InstallerPath(@"C:\D", "0.2"), "path");
+        }
+
+        private static void InstallStartedText()
+        {
+            True(UpdateForm.InstallStartedText("/silent /notify").StartsWith("Устанавливаю"), "silent setup");
+            True(UpdateForm.InstallStartedText("").Contains("«Установить»"), "setup window");
         }
 
         private static void Sha256OfFile()

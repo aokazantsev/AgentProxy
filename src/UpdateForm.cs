@@ -9,7 +9,6 @@ namespace AgentProxy
     internal sealed class UpdateForm : Form
     {
         private const int ContentWidth = 420;
-        private const string SetupArguments = "/silent /notify";
 
         private static UpdateForm openForm;
 
@@ -18,6 +17,7 @@ namespace AgentProxy
         private readonly FlowLayoutPanel fileButtons = new FlowLayoutPanel();
         private readonly Button installNow = new Button();
         private string downloadedPath;
+        private UpdateRelease downloadedRelease;
 
         public static void ShowSingle()
         {
@@ -69,7 +69,7 @@ namespace AgentProxy
             var openFolder = new Button { Text = "Открыть папку", AutoSize = true };
             openFolder.Click += (sender, e) => ShowInExplorer(downloadedPath);
             var copyPath = new Button { Text = "Скопировать путь", AutoSize = true };
-            copyPath.Click += (sender, e) => Clipboard.SetText(downloadedPath);
+            copyPath.Click += (sender, e) => CopyPath();
             fileButtons.Controls.Add(openFolder);
             fileButtons.Controls.Add(copyPath);
             layout.Controls.Add(fileButtons);
@@ -100,10 +100,12 @@ namespace AgentProxy
                 }
                 Report("Есть версия " + release.VersionText + ", скачиваю установщик (" + (release.Size / 1024 / 1024.0).ToString("0.0") + " МБ)…", null);
                 string path = UpdateChecker.Download(release);
-                AppLog.Append("update downloaded: " + path);
-                Report("Скачана версия " + release.VersionText + (release.Sha256 != null ? ", контрольная сумма сверена с GitHub" : ", в релизе нет контрольной суммы — файл не сверен")
-                    + ". «Установить сейчас» поставит её "
-                    + "поверх текущей: программа перезапустится, настройки, история запросов и сертификат сохранятся.", path);
+                downloadedRelease = release;
+                AppLog.Append("update downloaded: " + path + (release.Sha256 != null ? ", sha256 verified" : ", no sha256 in release"));
+                Report("Скачана версия " + release.VersionText
+                    + (release.Sha256 != null ? ", контрольная сумма сверена с GitHub" : ", в релизе нет контрольной суммы — файл не сверен")
+                    + ". «Установить сейчас» запустит установщик: он поставит её поверх текущей и запустит программу заново, "
+                    + AppIdentity.UpdateKeeps + ".", path);
             }
             catch (Exception error)
             {
@@ -134,20 +136,65 @@ namespace AgentProxy
             fileButtons.Visible = true;
         }
 
+        public static string InstallStartedText(string setupArguments)
+        {
+            return setupArguments.Length > 0
+                ? "Устанавливаю… Программа закроется и запустится заново."
+                : "Установщик запущен: нажми в нём «Установить». Он закроет программу и запустит новую версию.";
+        }
+
         private void InstallNow()
         {
             installNow.Enabled = false;
             try
             {
+                UpdateChecker.Verify(downloadedPath, downloadedRelease);
                 AppLog.Append("update install started: " + downloadedPath);
-                Process.Start(new ProcessStartInfo(downloadedPath, SetupArguments) { UseShellExecute = false });
-                status.Text = "Устанавливаю… Программа закроется и запустится заново.";
+                Process setup = Process.Start(new ProcessStartInfo(downloadedPath, AppIdentity.UpdateSetupArguments) { UseShellExecute = false });
+                setup.EnableRaisingEvents = true;
+                setup.Exited += (sender, e) => SetupExited(setup);
+                status.Text = InstallStartedText(AppIdentity.UpdateSetupArguments);
+            }
+            catch (System.IO.IOException error)
+            {
+                AppLog.Append("update install refused: " + error.Message);
+                status.Text = "Установщик не запущен: " + error.Message + ". Закрой это окно и проверь обновление заново.";
             }
             catch (System.ComponentModel.Win32Exception error)
             {
                 AppLog.Append("update install failed: " + error.Message);
                 status.Text = "Не удалось запустить установщик: " + error.Message;
                 installNow.Enabled = true;
+            }
+        }
+
+        private void SetupExited(Process setup)
+        {
+            int code = setup.ExitCode;
+            setup.Dispose();
+            AppLog.Append("update installer exited without restarting the program, code " + code);
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    status.Text = "Установщик закрылся, обновление не установлено (код " + code + "). Можно запустить его снова.";
+                    installNow.Enabled = true;
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
+        private void CopyPath()
+        {
+            try
+            {
+                Clipboard.SetText(downloadedPath);
+            }
+            catch (System.Runtime.InteropServices.ExternalException error)
+            {
+                AppLog.Append("clipboard failed: " + error.Message);
             }
         }
 

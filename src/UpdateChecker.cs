@@ -74,11 +74,15 @@ namespace AgentProxy
             }
         }
 
+        public static string InstallerPath(string downloadsDirectory, string versionText)
+        {
+            return Path.Combine(Path.Combine(downloadsDirectory, AppIdentity.Name + "-" + versionText), AppIdentity.Name + "Setup.exe");
+        }
+
         public static string Download(UpdateRelease release)
         {
-            string folder = DownloadsDirectory();
-            Directory.CreateDirectory(folder);
-            string target = Path.Combine(folder, AppIdentity.Name + "Setup-" + release.VersionText + ".exe");
+            string target = InstallerPath(DownloadsDirectory(), release.VersionText);
+            Directory.CreateDirectory(Path.GetDirectoryName(target));
             string partial = target + ".part";
             HttpWebRequest request = CreateRequest(release.DownloadUrl, DownloadTimeoutMs);
             using (var response = (HttpWebResponse)request.GetResponse())
