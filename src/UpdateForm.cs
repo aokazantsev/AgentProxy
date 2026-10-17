@@ -150,9 +150,12 @@ namespace AgentProxy
             {
                 UpdateChecker.Verify(downloadedPath, downloadedRelease);
                 AppLog.Append("update install started: " + downloadedPath);
-                Process setup = Process.Start(new ProcessStartInfo(downloadedPath, AppIdentity.UpdateSetupArguments) { UseShellExecute = false });
-                setup.EnableRaisingEvents = true;
-                setup.Exited += (sender, e) => SetupExited(setup);
+                Process setup = Process.Start(new ProcessStartInfo(downloadedPath, AppIdentity.UpdateSetupArguments) { UseShellExecute = true });
+                if (setup != null)
+                {
+                    setup.EnableRaisingEvents = true;
+                    setup.Exited += (sender, e) => SetupExited(setup);
+                }
                 status.Text = InstallStartedText(AppIdentity.UpdateSetupArguments);
             }
             catch (System.IO.IOException error)
