@@ -7,6 +7,7 @@ log = logging.getLogger("agentproxy.guard")
 
 BLOCKED_MESSAGE = "AgentProxy: its own ports are not reachable through the proxy"
 OWN_PORT_MARK = "agentproxy_own_port"
+PROXIED_HEADER = "X-AgentProxy-Proxied"
 
 
 def is_loopback_address(address):
@@ -25,7 +26,18 @@ class OwnPortsGuard:
         self.ports = {proxy_port, api_port}
 
     async def requestheaders(self, flow):
+        if flow.request.port in self.ports:
+            flow.request.headers[PROXIED_HEADER] = "1"
         await self.mark(flow)
+
+    def tcp_message(self, flow):
+        peer = flow.server_conn.peername
+        if not (peer and peer[1] in self.ports and is_loopback_address(peer[0]) and flow.messages[-1].from_client):
+            return
+        if not flow.metadata.get(OWN_PORT_MARK):
+            flow.metadata[OWN_PORT_MARK] = True
+            log.warning("silenced raw TCP through the proxy to its own port %s", peer[1])
+        flow.messages[-1].content = b""
 
     async def http_connect(self, flow):
         await self.mark(flow)

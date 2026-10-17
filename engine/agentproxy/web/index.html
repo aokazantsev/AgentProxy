@@ -35,13 +35,14 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px/1.45 C
   <span class="stat"><span id="dot" class="dot"></span><span id="state">…</span></span>
   <span class="stat">прокси <b id="proxy">—</b></span>
   <span class="stat">запросов <b id="count">—</b></span>
+  <span class="stat">правил подмены <b id="rules">—</b></span>
   <span class="stat">версия <b id="version">—</b></span>
 </header>
 <main>
   <section id="list">
     <table>
-      <colgroup><col style="width:56px"><col style="width:64px"><col style="width:52px"><col style="width:26%"><col><col style="width:60px"></colgroup>
-      <thead><tr><th>#</th><th>метод</th><th>код</th><th>хост</th><th>путь</th><th>мс</th></tr></thead>
+      <colgroup><col style="width:56px"><col style="width:64px"><col style="width:52px"><col style="width:26%"><col><col style="width:60px"><col style="width:64px"></colgroup>
+      <thead><tr><th>#</th><th>метод</th><th>код</th><th>хост</th><th>путь</th><th>мс</th><th>правила</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
     <div id="none" class="empty" hidden>Запросов пока нет. Направь трафик устройства на прокси — инструкция в скилле agentproxy.</div>
@@ -61,6 +62,8 @@ async function refreshStatus() {
     document.getElementById("state").textContent = status.proxy.running ? "работает" : "прокси не слушает порт";
     document.getElementById("proxy").textContent = status.proxy.host + ":" + status.proxy.port;
     document.getElementById("count").textContent = status.flows;
+    document.getElementById("rules").textContent = status.rules ? status.rules.active + (status.rules.problem ? " ⚠" : "") : "—";
+    document.getElementById("rules").title = status.rules && status.rules.problem ? status.rules.problem : "";
     document.getElementById("version").textContent = status.version;
   } catch (error) {
     document.getElementById("dot").className = "dot off";
@@ -82,8 +85,16 @@ async function refreshFlows() {
     cell(row, flow.host);
     cell(row, flow.path);
     cell(row, flow.duration_ms);
+    cell(row, ruleIds(flow.rules));
   }
   document.getElementById("none").hidden = data.flows.length > 0;
+}
+function ruleIds(rules) { return (rules || []).map((rule) => rule.id).join(" "); }
+function rulesText(rules) {
+  return (rules || []).map((rule) => rule.id + " " + rule.action + (rule.name ? " — " + rule.name : "") +
+    (rule.error ? ", ошибка: " + rule.error : "") + (rule.skipped ? ", " + rule.skipped : "") +
+    (rule.replaced !== undefined ? ", замен: " + rule.replaced : "") +
+    (rule.not_found ? ", не найдено: " + rule.not_found.join(" | ") : "")).join("\n");
 }
 function headersText(headers) { return (headers || []).map((pair) => pair[0] + ": " + pair[1]).join("\n"); }
 function section(parent, title, content) {
@@ -102,6 +113,7 @@ async function showFlow(id) {
   const detail = document.getElementById("detail");
   detail.textContent = "";
   section(detail, "Запрос", flow.method + " " + flow.url);
+  if (flow.rules && flow.rules.length) section(detail, "Правила подмены", rulesText(flow.rules));
   section(detail, "Ответ", flow.error ? "Ошибка: " + flow.error : text(flow.status) + " " + text(flow.reason) + (flow.duration_ms !== null ? ", " + flow.duration_ms + " мс" : ""));
   section(detail, "Заголовки запроса", headersText(flow.request_headers));
   section(detail, "Тело запроса", bodyText(flow.request_body));

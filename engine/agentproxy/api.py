@@ -9,7 +9,8 @@ import tornado.web
 
 from . import mcp
 from .claude import hooks as claude_hooks
-from .service import ToolError, call_tool
+from .guard import PROXIED_HEADER
+from .service import NotFound, ToolError, call_tool
 
 log = logging.getLogger("agentproxy.api")
 
@@ -53,6 +54,9 @@ class BaseHandler(tornado.web.RequestHandler):
         origin = self.request.headers.get("Origin")
         if origin and origin not in allowed_origins(port):
             self._deny("origin not allowed")
+            return
+        if PROXIED_HEADER in self.request.headers:
+            self._deny("requests through the proxy are not allowed")
 
     def _deny(self, reason):
         log.warning("rejected %s %s: %s", self.request.method, self.request.path, reason)
@@ -63,14 +67,14 @@ class BaseHandler(tornado.web.RequestHandler):
         self.set_status(status)
         self.set_header("Content-Type", "application/json; charset=utf-8")
         self.set_header("Cache-Control", "no-store")
-        self.finish(json.dumps(data, ensure_ascii=False))
+        self.finish(json.dumps(data, ensure_ascii=False).encode("utf-8", "backslashreplace"))
 
     def json_body(self):
         if not self.request.body:
             return {}
         try:
-            data = json.loads(self.request.body.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+            data = json.loads(self.request.body.decode("utf-8-sig"))
+        except (ValueError, UnicodeDecodeError, RecursionError):
             raise ToolError("body is not valid JSON")
         if not isinstance(data, dict):
             raise ToolError("body must be a JSON object")
@@ -85,8 +89,15 @@ class BaseHandler(tornado.web.RequestHandler):
         except asyncio.CancelledError:
             self.write_json({"error": mcp.STOPPING_MESSAGE}, 503)
         except ToolError as error:
-            status = 404 if "not found" in str(error) else 400
-            self.write_json({"error": str(error)}, status)
+            self.write_json({"error": str(error)}, 404 if isinstance(error, NotFound) else 400)
+
+    async def run_body_tool(self, name, **extra):
+        try:
+            arguments = dict(self.json_body(), **extra)
+        except ToolError as error:
+            self.write_json({"error": str(error)}, 400)
+            return
+        await self.run_tool(name, arguments)
 
     def write_error(self, status_code, **kwargs):
         self.write_json({"error": self._reason}, status_code)
@@ -115,6 +126,29 @@ class FlowHandler(BaseHandler):
         arguments = self.query_arguments()
         arguments["id"] = flow_id
         await self.run_tool("get_flow", arguments)
+
+
+class RulesHandler(BaseHandler):
+    async def get(self):
+        await self.run_tool("list_rules", self.query_arguments())
+
+    async def post(self):
+        await self.run_body_tool("add_rule")
+
+    async def delete(self):
+        if self.request.query_arguments or self.request.body:
+            self.write_json({"error": "DELETE /api/rules deletes every rule and takes no parameters; delete one rule "
+                                      "with DELETE /api/rules/<id>"}, 400)
+            return
+        await self.run_tool("delete_rule", {"all": True})
+
+
+class RuleHandler(BaseHandler):
+    async def patch(self, rule_id):
+        await self.run_body_tool("update_rule", id=rule_id)
+
+    async def delete(self, rule_id):
+        await self.run_tool("delete_rule", {"id": rule_id})
 
 
 class CertificateHandler(BaseHandler):
@@ -189,6 +223,8 @@ def make_app(context):
         (r"/api/flows", FlowsHandler),
         (r"/api/flows/wait", WaitHandler),
         (r"/api/flows/([^/]+)", FlowHandler),
+        (r"/api/rules", RulesHandler),
+        (r"/api/rules/([^/]+)", RuleHandler),
         (r"/api/ca\.(pem|cer)", CertificateHandler),
         (r"/api/shutdown", ShutdownHandler),
         (r"/mcp", McpHandler),

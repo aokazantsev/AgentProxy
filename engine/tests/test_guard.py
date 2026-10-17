@@ -78,3 +78,29 @@ def test_other_ports_skip_the_resolver(monkeypatch):
     calls = fake_resolver(monkeypatch, {})
     assert connect("anything.example", 443).error is None
     assert calls == []
+
+
+@pytest.mark.parametrize("port,labelled", [(API_PORT, True), (PROXY_PORT, True), (443, False)])
+def test_requests_to_own_port_numbers_are_labelled_for_the_api(monkeypatch, port, labelled):
+    from mitmproxy.test import tflow
+    from agentproxy.guard import PROXIED_HEADER
+    fake_resolver(monkeypatch, {"rebind.example": ["93.184.216.34"]})
+    flow = tflow.tflow()
+    flow.request.host = "rebind.example"
+    flow.request.port = port
+    asyncio.run(OwnPortsGuard(PROXY_PORT, API_PORT).requestheaders(flow))
+    assert (PROXIED_HEADER in flow.request.headers) is labelled
+
+
+@pytest.mark.parametrize("peer,port,from_client,silenced", [
+    ("127.0.0.1", API_PORT, True, True), ("::1", PROXY_PORT, True, True), ("127.0.0.1", API_PORT, False, False),
+    ("127.0.0.1", 443, True, False), ("93.184.216.34", API_PORT, True, False)])
+def test_raw_tcp_reaching_own_ports_is_silenced(peer, port, from_client, silenced):
+    from mitmproxy.test import tflow
+    flow = tflow.ttcpflow()
+    flow.server_conn.address = ("rebind.example", port)
+    flow.server_conn.peername = (peer, port)
+    flow.messages[-1].from_client = from_client
+    flow.messages[-1].content = b"\r\nGET /api/rules HTTP/1.1\r\n\r\n"
+    OwnPortsGuard(PROXY_PORT, API_PORT).tcp_message(flow)
+    assert (flow.messages[-1].content == b"") is silenced

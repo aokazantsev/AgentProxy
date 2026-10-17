@@ -20,7 +20,9 @@ INSTRUCTIONS = (
     "AgentProxy is a local HTTP(S) debugging proxy (Charles replacement) controlled by you. "
     "Devices and browsers send traffic through it; every finished request is recorded. "
     "Start with proxy_status. Use list_flows/get_flow to inspect traffic and wait_for_flow to wait for a "
-    "request the user is about to trigger. The agentproxy skill explains device setup (adb reverse, "
+    "request the user is about to trigger. add_rule answers or changes requests (map local, rewrite, error, "
+    "delay, drop); list_rules shows the rules, delete them when done. "
+    "The agentproxy skill explains device setup (adb reverse, "
     "device proxy, CA certificate) and troubleshooting. " + UNTRUSTED_NOTE
 )
 
@@ -100,7 +102,7 @@ async def _dispatch(service, message):
 async def handle_body(service, body):
     try:
         payload = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return _error(None, PARSE_ERROR, "parse error")
     if isinstance(payload, list):
         if not payload:

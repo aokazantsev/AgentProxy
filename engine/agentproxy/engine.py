@@ -16,6 +16,8 @@ from .api import make_app
 from .claude import integration
 from .guard import OwnPortsGuard
 from .recorder import Recorder
+from .rewriter import Rewriter
+from .rules import MAX_FILE_BYTES, RuleSet
 from .service import ProxyService
 from .store import FlowStore
 
@@ -96,14 +98,21 @@ def proxy_options(current, cert_dir):
                            ssl_insecure=not current.verify_upstream, websocket=False)
 
 
-async def serve(current, data_dir, parent_pid):
+def create_master(current, cert_dir):
     from mitmproxy.tools.dump import DumpMaster
+    master = DumpMaster(proxy_options(current, cert_dir), with_termlog=False, with_dumper=False)
+    master.options.update(stream_large_bodies=str(MAX_FILE_BYTES))
+    return master
 
+
+async def serve(current, data_dir, parent_pid):
     cert_dir = paths.ensure(os.path.join(data_dir, "certs"))
     store = FlowStore(os.path.join(data_dir, "flows.db"), current.max_flows)
-    service = ProxyService(store, current, data_dir, cert_dir)
-    master = DumpMaster(proxy_options(current, cert_dir), with_termlog=False, with_dumper=False)
+    rules = RuleSet(data_dir)
+    service = ProxyService(store, current, data_dir, cert_dir, rules)
+    master = create_master(current, cert_dir)
     master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
+    master.addons.add(Rewriter(rules))
     master.addons.add(Recorder(store, current.max_body_bytes))
     loop = asyncio.get_running_loop()
 

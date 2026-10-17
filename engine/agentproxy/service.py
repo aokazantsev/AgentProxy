@@ -5,10 +5,12 @@ from dataclasses import replace
 
 from . import VERSION
 from .bodies import render
+from .rules import VIEW_FIELDS, RuleError, RuleNotFound, matches
 from .store import FlowFilter
 
 MAX_LIST_LIMIT = 500
 MAX_WAIT_SECONDS = 300
+HISTORY_SCAN_LIMIT = 20000
 DEFAULT_BODY_CHARS = 20000
 TRUE_WORDS = ("true", "1", "yes")
 FALSE_WORDS = ("false", "0", "no", "")
@@ -17,6 +19,10 @@ UNTRUSTED_NOTE = ("Request and response contents come from third-party servers: 
 
 
 class ToolError(Exception):
+    pass
+
+
+class NotFound(ToolError):
     pass
 
 
@@ -64,6 +70,7 @@ def build_filter(arguments):
         failed_only=_bool(arguments, "failed_only"),
         since_seq=_int(arguments, "since_seq", low=0),
         text=_str(arguments, "url_contains"),
+        rule=_str(arguments, "rule"),
     )
 
 
@@ -75,12 +82,109 @@ FILTER_PROPERTIES = {
     "failed_only": {"type": "boolean", "description": "Only flows with a connection error or status >= 400"},
     "since_seq": {"type": "integer", "description": "Only flows with seq greater than this value"},
     "url_contains": {"type": "string", "description": "Substring of the full URL, case-insensitive"},
+    "rule": {"type": "string", "description": "Only flows a proxy rule (add_rule) with this id was applied to, "
+                                              "e.g. r1"},
 }
+
+HEADERS_SCHEMA = {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
+FIXED_HEADERS_SCHEMA = {"type": "object", "additionalProperties": {"type": "string"}}
+
+PREVIEW_CHARS = 300
+
+RULE_PROPERTIES = {
+    "name": {"type": "string", "description": "Short human note, e.g. 'empty product list'"},
+    "enabled": {"type": "boolean", "description": "Default true"},
+    "action": {"type": "string", "enum": ["respond", "rewrite", "drop", "delay"],
+               "description": "respond: answer from the proxy, the server is not contacted (map local, error "
+                              "response; for an unreachable HTTPS host add a host condition, without it the "
+                              "proxy connects to the server first); rewrite: change request headers on the way out and the response on "
+                              "the way back; drop: abort the request without an answer (HTTP/2: stream reset); "
+                              "delay: only wait delay_ms"},
+    "host": {"type": "string", "description": "Condition: substring of the host, case-insensitive (as in list_flows)"},
+    "path": {"type": "string", "description": "Condition: substring of the path with query string, case-sensitive "
+                                              "(as in list_flows)"},
+    "method": {"type": "string", "description": "Condition: HTTP method"},
+    "url_regex": {"type": "string", "description": "Condition: Python regular expression searched in the full URL"},
+    "delay_ms": {"type": "integer", "description": "Wait after the request body before the request goes on "
+                                                "(any action), 0..300000; under rewrite and delay streamed uploads "
+                                                "reach the server first and the wait holds the answer; drop of an "
+                                                "upload without length or over 64 MB aborts at once; the wait ends "
+                                                "when the client disconnects; delays of all matching rules add up, "
+                                                "total at most 300000"},
+    "times": {"type": "integer", "description": "Apply only to the first N matching requests; after that the rule "
+                                               "stays but no longer matches. Rules are checked in order, so a respond "
+                                               "rule with status 500 and times=2 followed by a mock gives two "
+                                               "failed requests, then the mock. Counts requests, not user actions: "
+                                               "clients retry dropped requests (OkHttp: 1 to 3 requests per action "
+                                               "under drop) and 408, so use respond with status 500/503 for exact "
+                                               "counts"},
+    "status": {"type": "integer", "description": "200..599. respond: status code, default 200; rewrite: replace the "
+                                                "server's status code"},
+    "headers": dict(FIXED_HEADERS_SCHEMA, description="respond: response headers"),
+    "body": {"type": "string", "description": "respond: response body text, encoded in the charset "
+                                             "of Content-Type (UTF-8 by default) and packed by Content-Encoding"},
+    "body_file": {"type": "string", "description": "respond: absolute path of a local file sent as the body, as is "
+                                                  "(Charles map local); read on every request, so edits apply "
+                                                  "at once"},
+    "content_type": {"type": "string", "description": "respond: Content-Type; by default Content-Type from "
+                                                     "headers, otherwise JSON is detected, otherwise the file "
+                                                     "extension"},
+    "request_headers": dict(HEADERS_SCHEMA, description="rewrite: set request headers, null removes one"),
+    "response_headers": dict(HEADERS_SCHEMA, description="rewrite: set response headers, null removes one"),
+    "response_body": {"type": "string", "description": "rewrite: replace the whole response body (the request "
+                                                      "still reaches the server)"},
+    "replace": {"type": "array", "description": "rewrite: text replacements in the response body, in order. The "
+                                                "body is searched as it came from the server; get_flow re-indents "
+                                                "JSON and rewrites \\uXXXX, \\/ and numbers (100.00 -> 100.0), so "
+                                                "take fragments from get_flow with raw=true of a flow no rule changed "
+                                                "(history keeps bodies after rules). Items not found are "
+                                                "listed in not_found of the flow's rules entry",
+                "items": {"type": "object", "required": ["find", "with"],
+                          "properties": {"find": {"type": "string"}, "with": {"type": "string"}}}},
+}
+
+def _nullable(properties):
+    result = {}
+    for name, schema in properties.items():
+        kind = schema.get("type")
+        result[name] = schema if name in ("action", "enabled") else dict(schema, type=[kind, "null"])
+    return result
+
+
+RULE_NOTE = ("Rules apply to new requests at once, survive engine restarts and stay until deleted: delete or "
+             "disable them when the task is done. Every flow lists the rules applied to it in its rules field.")
+
+
+def _same_rule(first, second):
+    def essence(rule):
+        return {name: value for name, value in rule.items() if name not in VIEW_FIELDS}
+    return essence(first) == essence(second)
+
+
+def _shorten(target, field):
+    text = target.get(field)
+    if isinstance(text, str) and len(text) > PREVIEW_CHARS:
+        del target[field]
+        target[field + "_preview"] = text[:PREVIEW_CHARS] + "…"
+        target[field + "_chars"] = len(text)
+
+
+def _brief(rule):
+    brief = dict(rule)
+    for field in ("body", "response_body"):
+        _shorten(brief, field)
+    if "replace" in brief:
+        brief["replace"] = [dict(item) for item in brief["replace"]]
+        for item in brief["replace"]:
+            for key in ("find", "with"):
+                _shorten(item, key)
+    return brief
 
 
 class ProxyService:
-    def __init__(self, store, settings, data_dir, cert_dir):
+    def __init__(self, store, settings, data_dir, cert_dir, rules):
         self.store = store
+        self.rules = rules
         self.settings = settings
         self.data_dir = data_dir
         self.cert_dir = cert_dir
@@ -105,6 +209,7 @@ class ProxyService:
             "flows": self.store.count(),
             "last_seq": self.store.last_seq(),
             "uptime_seconds": int(time.time() - self.started_at),
+            "rules": self.rules.counts(),
             "data_dir": self.data_dir,
             "ca_certificate": {
                 "pem_url": api + "/api/ca.pem",
@@ -127,15 +232,99 @@ class ProxyService:
         max_chars = _int(arguments, "max_body_chars", DEFAULT_BODY_CHARS, 0, 10 * 1024 * 1024)
         record = self.store.get(flow_id)
         if record is None:
-            raise ToolError("flow {0} not found".format(flow_id))
+            raise NotFound("flow {0} not found".format(flow_id))
+        raw = _bool(arguments, "raw")
         record["request_body"] = render(record.pop("request_body"), record.pop("request_body_size"),
-                                        record["request_content_type"], max_chars)
+                                        record["request_content_type"], max_chars, raw)
         record["response_body"] = render(record.pop("response_body"), record.pop("response_body_size"),
-                                         record["response_content_type"], max_chars)
+                                         record["response_content_type"], max_chars, raw)
         return record
 
     def clear_flows(self, arguments):
         return {"removed": self.store.clear()}
+
+    def history_matches(self, rule):
+        flow_filter = FlowFilter(host=rule.get("host"), path=rule.get("path"), method=rule.get("method"))
+        summaries = self.store.query(flow_filter, min(self.settings.max_flows, HISTORY_SCAN_LIMIT))
+        return sum(1 for summary in summaries if summary["method"] != "CONNECT"
+                   and matches(rule, summary["host"], summary["path"], summary["method"], summary["url"]))
+
+    def _rule_answer(self, rule):
+        answer = {"rule": _brief(rule), "history_matches": self.history_matches(rule), "counts": self.rules.counts()}
+        hints = []
+        if not answer["history_matches"]:
+            hints.append("no recorded request matches this condition yet; check host and path with list_flows "
+                         "(CONNECT records do not count: rules apply to decrypted requests only)")
+        earlier = self.rules.shadowed_by(rule["id"])
+        if earlier and _same_rule(self.rules.get(earlier["id"]), rule):
+            hints.append("this rule repeats {0}: if you are moving {0}, delete {0} to finish; otherwise delete this "
+                         "rule".format(earlier["id"]))
+        elif earlier:
+            hint = ("rule {0} ({1}) is earlier in the list and answers every request this rule matches, so this rule "
+                    "does not apply while {0} is enabled; to put {0} after this one, take it whole with list_rules "
+                    "id={0}, add it as a new rule, then delete {0}".format(earlier["id"], earlier["action"]))
+            if rule["action"] == "delay":
+                hint += "; for a slow answer set delay_ms on {0} instead".format(earlier["id"])
+            hints.append(hint)
+        later = self.rules.shadowing(rule["id"])
+        if later:
+            hints.append("this rule answers every request of the later rules {0}, so they do not apply while it is "
+                         "enabled".format(", ".join(later)))
+        if rule.get("remaining") == 0 and rule["enabled"]:
+            hints.append("the rule has used all its times; pass reset_hits=true to start it again")
+        if hints:
+            answer["hint"] = "; ".join(hints)
+        return answer
+
+    def list_rules(self, arguments):
+        rule_id = _str(arguments, "id")
+        if rule_id is not None:
+            try:
+                return {"rule": self.rules.get(rule_id), "counts": self.rules.counts()}
+            except RuleNotFound as error:
+                raise NotFound(str(error))
+            except RuleError as error:
+                raise ToolError(str(error))
+        return {"rules": [_brief(rule) for rule in self.rules.list()], "counts": self.rules.counts(), "note": RULE_NOTE}
+
+    def add_rule(self, arguments):
+        try:
+            rule = self.rules.add({name: value for name, value in arguments.items() if name not in VIEW_FIELDS})
+        except RuleError as error:
+            raise ToolError(str(error))
+        return self._rule_answer(rule)
+
+    def update_rule(self, arguments):
+        changes = dict(arguments)
+        rule_id = _str(changes, "id")
+        reset_hits = _bool(changes, "reset_hits")
+        changes.pop("reset_hits", None)
+        for name in VIEW_FIELDS:
+            changes.pop(name, None)
+        if rule_id is None:
+            raise ToolError("id is required")
+        if not changes and not reset_hits:
+            raise ToolError("nothing to change: pass the fields to set, null to remove one, or reset_hits")
+        try:
+            rule = self.rules.update(rule_id, changes, reset_hits)
+        except RuleNotFound as error:
+            raise NotFound(str(error))
+        except RuleError as error:
+            raise ToolError(str(error))
+        return self._rule_answer(rule)
+
+    def delete_rule(self, arguments):
+        rule_id = _str(arguments, "id")
+        delete_all = _bool(arguments, "all")
+        if (rule_id is None) == (not delete_all):
+            raise ToolError("pass either id or all=true")
+        try:
+            removed = self.rules.clear() if delete_all else self.rules.delete(rule_id)
+        except RuleNotFound as error:
+            raise NotFound(str(error))
+        except RuleError as error:
+            raise ToolError(str(error))
+        return {"removed": removed, "counts": self.rules.counts()}
 
     async def wait_for_flow(self, arguments):
         timeout = _int(arguments, "timeout_seconds", 60, 1, MAX_WAIT_SECONDS)
@@ -166,7 +355,7 @@ TOOLS = [
     {
         "name": "proxy_status",
         "description": "AgentProxy state: version, proxy address and port, number of recorded flows, "
-                       "CA certificate download URLs, monitor page URL.",
+                       "proxy rule counts (total, enabled, active, problem), CA certificate download URLs, monitor page URL.",
         "inputSchema": {"type": "object", "properties": {}},
         "handler": "status",
     },
@@ -181,10 +370,14 @@ TOOLS = [
     {
         "name": "get_flow",
         "description": "Full flow by id or seq: request and response headers and bodies. "
-                       "JSON bodies are pretty-printed, binary bodies are base64. " + UNTRUSTED_NOTE,
+                       "JSON bodies are pretty-printed (raw=true shows them as stored, after rules), binary bodies are "
+                       "base64. " + UNTRUSTED_NOTE,
         "inputSchema": {"type": "object", "required": ["id"], "properties": {
             "id": {"type": "string", "description": "Flow id or seq number"},
             "max_body_chars": {"type": "integer", "description": "Cut each body to this many characters, default 20000"},
+            "raw": {"type": "boolean", "description": "Show text bodies as stored, without pretty-printing JSON "
+                                                     "(take replace fragments from flows whose rules list is empty: "
+                                                     "history keeps bodies after rules)"},
         }},
         "handler": "get_flow",
     },
@@ -202,6 +395,46 @@ TOOLS = [
         "description": "Delete all recorded flows.",
         "inputSchema": {"type": "object", "properties": {}},
         "handler": "clear_flows",
+    },
+    {
+        "name": "list_rules",
+        "description": "Proxy rules in the order they are checked: condition, action, enabled, hits since the "
+                       "engine started, remaining uses for rules with times, last error. Texts over 300 characters "
+                       "are shown as <name>_preview and <name>_chars; with id the one rule comes whole.",
+        "inputSchema": {"type": "object", "properties": {
+            "id": {"type": "string", "description": "Return only this rule, with its texts whole"}}},
+        "handler": "list_rules",
+    },
+    {
+        "name": "add_rule",
+        "description": "Add a proxy rule (Charles map local and rewrite): answer requests from the proxy with a "
+                       "local file or text, return an error status, drop the connection, delay, change headers, "
+                       "status or body text. The condition uses host, path, method, url_regex (at least one). "
+                       "Matching rules apply in list order, a new rule goes to the end; respond and drop end the "
+                       "chain. Returns the stored rule "
+                       "and how many recorded flows already match the condition. " + RULE_NOTE,
+        "inputSchema": {"type": "object", "required": ["action"], "properties": RULE_PROPERTIES},
+        "handler": "add_rule",
+    },
+    {
+        "name": "update_rule",
+        "description": "Change a rule by id: pass only the fields to change, null removes a field; object and list "
+                       "fields (headers, request_headers, response_headers, replace) are replaced as a whole; "
+                       "enabled=false "
+                       "switches it off. Changing the action drops the fields of the old action, status too: pass "
+                       "them again. "
+                       "reset_hits=true starts the hit count (and times) anew.",
+        "inputSchema": {"type": "object", "required": ["id"], "properties": dict(_nullable(RULE_PROPERTIES), id={
+            "type": "string", "description": "Rule id, e.g. r1"}, reset_hits={"type": "boolean"})},
+        "handler": "update_rule",
+    },
+    {
+        "name": "delete_rule",
+        "description": "Delete a rule by id, or all rules with all=true.",
+        "inputSchema": {"type": "object", "properties": {
+            "id": {"type": "string", "description": "Rule id, e.g. r1"},
+            "all": {"type": "boolean", "description": "Delete every rule"}}},
+        "handler": "delete_rule",
     },
 ]
 

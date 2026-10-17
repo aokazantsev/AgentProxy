@@ -319,3 +319,20 @@ def test_tcp_messages_are_not_kept():
     assert tcp.messages
     keeper.tcp_message(tcp)
     assert tcp.messages == []
+
+
+def test_unpacking_stops_after_too_many_zstd_frames():
+    from agentproxy.streamtap import TooManyMembers, decoded_pieces
+    frame = zstandard.ZstdCompressor().compress(b"x")
+    with pytest.raises(TooManyMembers):
+        list(decoded_pieces("zstd", frame * (MAX_MEMBERS + 5)))
+
+
+def test_endless_zstd_frames_stop_at_the_limit():
+    import zstandard
+    wire = zstandard.ZstdCompressor().compress(b"x") * (MAX_MEMBERS + 50)
+    tap = StreamTap(100000, "zstd", wire_limit=len(wire))
+    tap(wire)
+    tap(b"")
+    body, size = tap.body()
+    assert body == b"x" * MAX_MEMBERS and size > len(body)

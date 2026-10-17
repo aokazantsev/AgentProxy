@@ -4,6 +4,7 @@ import json
 import pytest
 
 from agentproxy import VERSION, mcp
+from agentproxy.rules import RuleSet
 from agentproxy.service import UNTRUSTED_NOTE, ProxyService, ToolError, call_tool, public_tools
 
 from conftest import make_record
@@ -11,7 +12,7 @@ from conftest import make_record
 
 @pytest.fixture
 def service(store, settings, tmp_path):
-    return ProxyService(store, settings, str(tmp_path), str(tmp_path / "certs"))
+    return ProxyService(store, settings, str(tmp_path), str(tmp_path / "certs"), RuleSet(str(tmp_path)))
 
 
 def run(coroutine):
@@ -198,3 +199,8 @@ def test_instructions_and_flow_tools_warn_about_untrusted_content():
     descriptions = {tool["name"]: tool["description"] for tool in public_tools()}
     for name in ("list_flows", "get_flow", "wait_for_flow"):
         assert UNTRUSTED_NOTE in descriptions[name]
+
+
+def test_mcp_deeply_nested_body_is_a_parse_error():
+    answer = asyncio.run(mcp.handle_body(None, b"[" * 100000 + b"]" * 100000))
+    assert answer["error"]["code"] == mcp.PARSE_ERROR

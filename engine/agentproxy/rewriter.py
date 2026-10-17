@@ -1,0 +1,500 @@
+import asyncio
+import codecs
+import json
+import logging
+import mimetypes
+import time
+
+from .bodies import CHARSET, SLOW_CHARSETS, TEXT_CHARSETS
+from .guard import OWN_PORT_MARK
+from .rules import (APPLIED_MARK, MAX_DELAY_MS, MAX_FILE_BYTES, NO_REQUEST_STREAM_MARK,
+                    NO_RESPONSE_STREAM_MARK, PLAN_MARK, TERMINAL_ACTIONS, changes_body)
+from .streamtap import IDENTITY_ENCODINGS, NO_BODY_STATUSES, decoded_pieces
+
+log = logging.getLogger("agentproxy.rewriter")
+
+EDITOR_MARK = "agentproxy_body_editor"
+LIMIT_TEXT = "larger than {0} MB".format(MAX_FILE_BYTES // (1024 * 1024))
+UPLOAD_TOO_LARGE = "request body is {0}; respond cannot buffer it"
+UPLOAD_GREW = "request body without length grew {0}; it went on to the server, the client got no answer"
+JSON_SNIFF_BYTES = 1024 * 1024
+PACK_NAMES = {"x-gzip": "gzip"}
+PLAIN_TYPES = ("text/plain", "application/octet-stream")
+RESPOND_ERROR_MARK = "agentproxy_respond_error"
+DELAY_MARK = "agentproxy_delay"
+MIME_TYPES = mimetypes.MimeTypes()
+ORDER_MARKED_CHARSETS = {"utf-16": (b"\xff\xfe", b"\xfe\xff"),
+                         "utf-32": (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")}
+PARALLEL_EDITS = 2
+WAIT_STEP = 0.5
+NOT_FOUND_CHARS = 100
+
+
+class BodySkipped(Exception):
+    pass
+
+
+def _entry(flow, rule):
+    return next(entry for entry in flow.metadata[APPLIED_MARK] if entry["id"] == rule["id"])
+
+
+def _set_headers(headers, changes):
+    for name, value in changes.items():
+        if value is None:
+            headers.pop(name, None)
+        else:
+            headers[name] = value
+
+
+def _read_file(path):
+    with open(path, "rb") as stream:
+        content = stream.read(MAX_FILE_BYTES + 1)
+    if len(content) > MAX_FILE_BYTES:
+        raise OSError("file is larger than {0} MB".format(MAX_FILE_BYTES // (1024 * 1024)))
+    return content
+
+
+def _looks_like_json(content):
+    if len(content) > JSON_SNIFF_BYTES:
+        trimmed = content[len(codecs.BOM_UTF8):] if content.startswith(codecs.BOM_UTF8) else content
+        edges = trimmed.lstrip()[:1] + trimmed.rstrip()[-1:]
+        return edges in (b"{}", b"[]") and _is_utf8(content)
+    try:
+        json.loads(content.decode("utf-8-sig"))
+        return True
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return False
+
+
+def _is_utf8(content):
+    try:
+        content.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def guess_content_type(content, path=None):
+    guessed = MIME_TYPES.guess_type(path)[0] if path else None
+    if guessed and guessed.startswith("text/") and _is_utf8(content):
+        guessed += "; charset=utf-8"
+    if guessed and guessed.split(";")[0] not in PLAIN_TYPES and len(content) > JSON_SNIFF_BYTES:
+        return guessed
+    if _looks_like_json(content):
+        return "application/json; charset=utf-8"
+    if guessed:
+        return guessed
+    if not content:
+        return None
+    if b"\x00" in content[:1024] or not _is_utf8(content):
+        return "application/octet-stream"
+    return "text/plain; charset=utf-8"
+
+
+def _response_headers(rule, content_type):
+    headers = dict(rule.get("headers", {}))
+    if not rule.get("content_type") and any(name.lower() == "content-type" for name in headers):
+        return headers
+    content_type = rule.get("content_type") or content_type
+    if content_type:
+        for name in list(headers):
+            if name.lower() == "content-type":
+                del headers[name]
+        headers["Content-Type"] = content_type
+    return headers
+
+
+def _declared_length(headers):
+    try:
+        return int(headers.get("content-length", "0"))
+    except ValueError:
+        return 0
+
+
+def _has_body(headers):
+    return "transfer-encoding" in headers or _declared_length(headers) > 0
+
+
+def _has_no_body(method, status):
+    return method == "HEAD" or status < 200 or status in NO_BODY_STATUSES
+
+
+def _unpack(raw, encoding):
+    if encoding in IDENTITY_ENCODINGS or not raw:
+        return raw
+    unpacked = bytearray()
+    try:
+        for piece in decoded_pieces(encoding, raw):
+            unpacked.extend(piece)
+            if len(unpacked) > MAX_FILE_BYTES:
+                raise BodySkipped(LIMIT_TEXT + " unpacked")
+    except BodySkipped:
+        raise
+    except Exception as error:
+        kind = error.__class__
+        name = kind.__name__ if kind.__module__ == "builtins" else kind.__module__ + "." + kind.__name__
+        raise BodySkipped("{0} body could not be unpacked ({1})".format(encoding, name))
+    return bytes(unpacked)
+
+
+def _text_charset(name):
+    try:
+        normalized = codecs.lookup(name).name
+    except (LookupError, ValueError):
+        return None
+    return normalized if normalized in TEXT_CHARSETS else None
+
+
+def _writable_charset(name):
+    try:
+        return codecs.lookup(name).name not in SLOW_CHARSETS
+    except (LookupError, ValueError):
+        return False
+
+
+def _pack(data, encoding):
+    if encoding in IDENTITY_ENCODINGS:
+        return data
+    from mitmproxy.net import encoding as content_codings
+    packer = content_codings.custom_encode.get(PACK_NAMES.get(encoding, encoding))
+    if packer is None:
+        raise ValueError("unsupported content-encoding " + encoding)
+    return packer(data)
+
+
+def _encode_body(flow, rule, content_type):
+    text = rule.get("body", "")
+    match = CHARSET.search(content_type)
+    charset = match.group(1) if match else "utf-8"
+    if not text:
+        return b""
+    try:
+        if not _writable_charset(charset):
+            raise LookupError(charset)
+        return text.encode(charset)
+    except (UnicodeError, LookupError):
+        _entry(flow, rule)["error"] = "body cannot be encoded as {0}; sent as utf-8".format(charset)
+        return text.encode("utf-8")
+
+
+async def _wait(flow, seconds):
+    from mitmproxy.connection import ConnectionState
+    left = seconds
+    while left > 0 and flow.client_conn.state != ConnectionState.CLOSED:
+        step = min(left, WAIT_STEP)
+        await asyncio.sleep(step)
+        left -= step
+
+
+class BodyDiscarder:
+    def __call__(self, chunk):
+        return []
+
+
+class BodyEditor:
+    def __init__(self, flow, rules):
+        response = flow.response
+        self.flow = flow
+        self.rules = rules
+        self.encoding = response.headers.get("content-encoding", "").strip().lower()
+        match = CHARSET.search(response.headers.get("content-type", ""))
+        self.charset = match.group(1) if match else "utf-8"
+
+    def skip(self, reason):
+        for rule in self.rules:
+            entry = _entry(self.flow, rule)
+            entry.pop("replaced", None)
+            entry.pop("not_found", None)
+            entry.setdefault("skipped", "body not changed: " + reason)
+
+    def _decode(self, raw, rule):
+        try:
+            charset = _text_charset(self.charset)
+            if charset is None:
+                raise BodySkipped("charset {0} is not supported for editing".format(self.charset))
+            unpacked = _unpack(raw, self.encoding)
+            marks = ORDER_MARKED_CHARSETS.get(charset)
+            if marks and unpacked and not unpacked.startswith(marks):
+                raise BodySkipped("{0} body has no byte order mark".format(charset))
+            return unpacked.decode(self.charset)
+        except BodySkipped as reason:
+            _entry(self.flow, rule)["skipped"] = "body not changed: {0}".format(reason)
+        except UnicodeDecodeError:
+            _entry(self.flow, rule)["skipped"] = "body not changed: body is not {0} text".format(self.charset)
+        return None
+
+    def edit(self, raw):
+        text = None
+        replaced_by = {}
+        changed = False
+        counts = {}
+        for position, rule in enumerate(self.rules):
+            if "response_body" in rule:
+                text = rule["response_body"]
+                changed = True
+                for earlier in self.rules[:position]:
+                    replaced_by[earlier["id"]] = rule["id"]
+            elif text is None:
+                text = self._decode(raw, rule)
+                if text is None:
+                    continue
+            if "replace" in rule:
+                replaced = 0
+                missing = []
+                for item in rule["replace"]:
+                    count = text.count(item["find"])
+                    if len(text) + count * (len(item["with"]) - len(item["find"])) > MAX_FILE_BYTES:
+                        self.skip(LIMIT_TEXT + " after replace")
+                        return raw
+                    replaced += count
+                    if not count:
+                        missing.append(item["find"][:NOT_FOUND_CHARS])
+                    text = text.replace(item["find"], item["with"])
+                counts[rule["id"]] = (replaced, missing)
+                changed = changed or replaced > 0
+        for rule in self.rules:
+            if rule["id"] in counts:
+                entry = _entry(self.flow, rule)
+                entry["replaced"], missing = counts[rule["id"]]
+                if missing:
+                    entry["not_found"] = missing
+        if not changed:
+            return raw
+        try:
+            if not _writable_charset(self.charset):
+                raise LookupError(self.charset)
+            encoded = text.encode(self.charset)
+            if len(encoded) > MAX_FILE_BYTES:
+                self.skip(LIMIT_TEXT + " after replace")
+                return raw
+            packed = _pack(encoded, self.encoding)
+        except (UnicodeEncodeError, LookupError, ValueError) as error:
+            self.skip("new body cannot be encoded as {0} ({1})".format(
+                " ".join(part for part in (self.charset, self.encoding) if part), error.__class__.__name__))
+            return raw
+        for rule in self.rules:
+            if rule["id"] in replaced_by:
+                entry = _entry(self.flow, rule)
+                entry.pop("replaced", None)
+                entry.pop("not_found", None)
+                entry.setdefault("skipped", "body not changed: replaced by response_body of rule {0}".format(
+                    replaced_by[rule["id"]]))
+        return packed
+
+
+class Rewriter:
+    def __init__(self, rule_set):
+        self.rules = rule_set
+        self.lazy_clients = set()
+        self.edits = asyncio.Semaphore(PARALLEL_EDITS)
+
+    def http_connect(self, flow):
+        if flow.metadata.get(OWN_PORT_MARK):
+            return
+        if self.rules.may_answer(flow.request.host):
+            from mitmproxy import http
+            now = time.time()
+            flow.response = http.Response(flow.request.data.http_version, 200, b"Connection established",
+                                          http.Headers(), b"", None, now, now)
+            self.lazy_clients.add(flow.client_conn.id)
+
+    def tls_clienthello(self, data):
+        if data.context.client.id not in self.lazy_clients:
+            return
+        self.lazy_clients.discard(data.context.client.id)
+        data.establish_server_tls_first = False
+
+    def client_disconnected(self, client):
+        self.lazy_clients.discard(client.id)
+
+    async def requestheaders(self, flow):
+        if flow.metadata.get(OWN_PORT_MARK):
+            return
+        request = flow.request
+        plan = self.rules.plan(request.pretty_host, request.path, request.method, request.pretty_url)
+        if not plan:
+            return
+        flow.metadata[PLAN_MARK] = plan
+        flow.metadata[APPLIED_MARK] = [dict({"id": rule["id"], "action": rule["action"]},
+                                            **({"name": rule["name"]} if "name" in rule else {})) for rule in plan]
+        for rule in plan:
+            if "request_headers" in rule:
+                _set_headers(request.headers, rule["request_headers"])
+        if plan[-1]["action"] in TERMINAL_ACTIONS:
+            flow.metadata[NO_REQUEST_STREAM_MARK] = True
+            if plan[-1]["action"] == "respond" and _declared_length(request.headers) > MAX_FILE_BYTES:
+                self._refuse_upload(flow, plan[-1], UPLOAD_TOO_LARGE)
+                return
+        delay = min(sum(rule.get("delay_ms", 0) for rule in plan), MAX_DELAY_MS) / 1000.0
+        if plan[-1]["action"] == "drop" and _has_body(request.headers):
+            if not delay:
+                flow.kill()
+            elif "transfer-encoding" in request.headers or _declared_length(request.headers) > MAX_FILE_BYTES:
+                _entry(flow, plan[-1])["skipped"] = "delay not applied: request body has no length or is larger than {0} MB".format(
+                    MAX_FILE_BYTES // (1024 * 1024))
+                flow.kill()
+            else:
+                flow.metadata[DELAY_MARK] = delay
+            return
+        if plan[-1]["action"] == "drop":
+            if delay:
+                await _wait(flow, delay)
+            flow.kill()
+        elif delay:
+            flow.metadata[DELAY_MARK] = delay
+
+    @staticmethod
+    def _refuse_upload(flow, rule, message):
+        _entry(flow, rule)["error"] = message.format(LIMIT_TEXT)
+        flow.kill()
+
+    async def request(self, flow):
+        plan = flow.metadata.get(PLAN_MARK)
+        if not plan or flow.error is not None:
+            return
+        delay = flow.metadata.pop(DELAY_MARK, 0)
+        if plan[-1]["action"] == "respond" and flow.request.stream:
+            self._refuse_upload(flow, plan[-1], UPLOAD_GREW)
+            return
+        if delay:
+            await _wait(flow, delay)
+        if plan[-1]["action"] == "drop":
+            flow.kill()
+        elif plan[-1]["action"] == "respond":
+            await self._respond(flow, plan[-1])
+
+    async def _respond(self, flow, rule):
+        from mitmproxy import http
+        status = rule.get("status", 200)
+        path = rule.get("body_file")
+        as_is = False
+        guessed = None
+        declared = next((value for name, value in _response_headers(rule, None).items()
+                         if name.lower() == "content-type"), "")
+        if path:
+            try:
+                async with self.edits:
+                    content = await asyncio.to_thread(_read_file, path)
+                    if not declared:
+                        guessed = await asyncio.to_thread(guess_content_type, content, path)
+                as_is = True
+            except OSError as error:
+                message = "body_file {0} unreadable: {1}".format(path, error)
+                log.warning("rule %s: %s", rule["id"], message)
+                self.rules.note_error(rule["id"], message)
+                _entry(flow, rule)["error"] = message
+                flow.metadata[RESPOND_ERROR_MARK] = True
+                status = 502
+                content = "AgentProxy rule {0}: body_file unreadable, see list_rules".format(rule["id"]).encode("utf-8")
+                rule = {"id": rule["id"], "content_type": "text/plain; charset=utf-8"}
+            else:
+                self.rules.clear_error(rule["id"])
+        else:
+            content = _encode_body(flow, rule, declared)
+            if not declared:
+                guessed = await asyncio.to_thread(guess_content_type, content, None)
+        headers = _response_headers(rule, guessed)
+        if not as_is and status not in NO_BODY_STATUSES:
+            content = await self._pack_body(flow, rule, headers, content)
+        response = http.Response.make(status, b"")
+        response.headers = http.Headers([(name.encode("utf-8"), value.encode("utf-8"))
+                                         for name, value in headers.items()])
+        response.raw_content = content
+        if status not in NO_BODY_STATUSES:
+            response.headers["content-length"] = str(len(content))
+        if flow.request.method == "HEAD":
+            response.raw_content = b""
+        flow.response = response
+        flow.metadata[NO_RESPONSE_STREAM_MARK] = True
+
+    async def _pack_body(self, flow, rule, headers, content):
+        names = [name for name in headers if name.lower() == "content-encoding"]
+        encoding = headers[names[0]].strip().lower() if names else ""
+        try:
+            async with self.edits:
+                return await asyncio.to_thread(_pack, content, encoding)
+        except ValueError:
+            for name in names:
+                del headers[name]
+            _entry(flow, rule)["error"] = "unsupported content-encoding {0}; body sent unpacked".format(encoding)
+            return content
+
+    def responseheaders(self, flow):
+        plan = flow.metadata.get(PLAN_MARK)
+        if not plan:
+            return
+        response = flow.response
+        method = flow.request.method
+        had_body = not _has_no_body(method, response.status_code)
+        event_stream = "text/event-stream" in response.headers.get("content-type", "").lower()
+        if flow.metadata.get(RESPOND_ERROR_MARK):
+            for rule in plan:
+                if rule["action"] == "rewrite" and ("status" in rule or "response_headers" in rule or changes_body(rule)):
+                    _entry(flow, rule)["skipped"] = "response changes not applied: the respond rule could not read its body_file"
+            return
+        for rule in plan:
+            if rule["action"] != "rewrite":
+                continue
+            if "status" in rule:
+                from mitmproxy.net.http import status_codes
+                response.status_code = rule["status"]
+                response.reason = status_codes.RESPONSES.get(rule["status"], "")
+            if "response_headers" in rule:
+                _set_headers(response.headers, rule["response_headers"])
+        has_body = not _has_no_body(method, response.status_code)
+        body_rules = [rule for rule in plan if changes_body(rule)]
+        if not has_body:
+            for rule in body_rules:
+                _entry(flow, rule)["skipped"] = "body not changed: response has no body"
+            if had_body:
+                self._discard_body(flow)
+            elif response.status_code < 200 or response.status_code == 204:
+                response.headers.pop("content-length", None)
+                response.headers.pop("transfer-encoding", None)
+            return
+        if not had_body:
+            response.headers.pop("transfer-encoding", None)
+            response.headers["content-length"] = "0"
+        if not body_rules:
+            return
+        if event_stream or "text/event-stream" in response.headers.get("content-type", "").lower():
+            for rule in body_rules:
+                _entry(flow, rule)["skipped"] = "body not changed: event stream"
+            return
+        self._start_editing(flow, body_rules)
+
+    @staticmethod
+    def _discard_body(flow):
+        response = flow.response
+        response.headers.pop("content-length", None)
+        response.headers.pop("transfer-encoding", None)
+        response.stream = BodyDiscarder()
+        flow.metadata[NO_RESPONSE_STREAM_MARK] = True
+
+    @staticmethod
+    def _start_editing(flow, rules):
+        editor = BodyEditor(flow, rules)
+        if _declared_length(flow.response.headers) > MAX_FILE_BYTES:
+            editor.skip(LIMIT_TEXT)
+            return
+        flow.metadata[NO_RESPONSE_STREAM_MARK] = True
+        flow.metadata[EDITOR_MARK] = editor
+
+    async def response(self, flow):
+        response = flow.response
+        if isinstance(response.stream, BodyDiscarder):
+            response.raw_content = b""
+            return
+        editor = flow.metadata.get(EDITOR_MARK)
+        if editor is None:
+            return
+        if response.stream:
+            editor.skip(LIMIT_TEXT + "; body and its size not recorded")
+            return
+        raw = response.raw_content or b""
+        async with self.edits:
+            new = await asyncio.to_thread(editor.edit, raw)
+        if new != raw:
+            response.raw_content = new
+        if "transfer-encoding" not in response.headers:
+            response.headers["content-length"] = str(len(response.raw_content or b""))

@@ -197,3 +197,11 @@ def test_reopen_keeps_data(tmp_path):
     second = FlowStore(path, 1000)
     assert second.get("flow-1") is not None
     second.close()
+
+
+@pytest.mark.parametrize("damaged", ["{broken", '{"id": "r1"}'])
+def test_damaged_rules_column_reads_as_empty(store, damaged):
+    store.insert(make_record(1))
+    store._db.execute("UPDATE flows SET rules = ? WHERE id = 'flow-1'", (damaged,))
+    assert store.get("flow-1")["rules"] == []
+    assert store.query(FlowFilter(), 10)[0]["rules"] == []

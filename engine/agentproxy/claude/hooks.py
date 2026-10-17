@@ -29,10 +29,21 @@ def describe(env, status):
     proxy = status.get("proxy") if isinstance(status.get("proxy"), dict) else {}
     state = "работает" if proxy.get("running") is True else "запущен, но прокси не слушает порт (см. engine.log)"
     flows = status.get("flows")
+    rules = status.get("rules") if isinstance(status.get("rules"), dict) else {}
+    enabled = rules.get("enabled")
+    active = rules.get("active")
+    rules_note = ""
+    if isinstance(enabled, int) and not isinstance(enabled, bool) and enabled > 0:
+        rules_note = " Включённых правил подмены: {0}".format(enabled)
+        if isinstance(active, int) and not isinstance(active, bool) and active < enabled:
+            rules_note += " (действуют {0}, исчерпавшие times оживут после перезапуска движка)".format(active)
+        rules_note += " — они меняют ответы приложению; list_rules покажет их, ненужные выключить или удалить."
+    if rules.get("problem"):
+        rules_note += " С файлом правил подмены проблема — причина в list_rules (counts.problem)."
     return ("AgentProxy {0} {1}: прокси 127.0.0.1:{2}, MCP-сервер agentproxy, монитор http://127.0.0.1:{3}/, "
             "записано запросов: {4}. Как работать — скилл agentproxy."
             .format(VERSION, state, env.proxy_port, env.api_port,
-                    flows if isinstance(flows, int) and not isinstance(flows, bool) else "?"))
+                    flows if isinstance(flows, int) and not isinstance(flows, bool) else "?")) + rules_note
 
 
 def session_start_context(env, hook_input, status=None, now=None):

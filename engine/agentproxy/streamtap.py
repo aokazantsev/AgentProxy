@@ -79,12 +79,16 @@ def _zstd_pieces(data):
     import zstandard
     context = zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW)
     position = 0
+    frames = 0
     while position < len(data):
         head = data[position:position + 4]
         if position and not _starts_zstd_frame(head):
             if len(head) < 4 and _may_start_zstd_frame(head):
                 raise Unfinished()
             return
+        if frames == MAX_MEMBERS:
+            raise TooManyMembers(len(data) - position)
+        frames += 1
         decompressor = context.decompressobj()
         while position < len(data) and not decompressor.eof:
             pending = data[position:position + ZSTD_INPUT_STEP]
@@ -109,7 +113,7 @@ def _may_start_zstd_frame(head):
     return head[0] & 0xF0 == 0x50 and ZSTD_SKIPPABLE_MAGIC.startswith(head[1:])
 
 
-def _pieces(encoding, data):
+def decoded_pieces(encoding, data):
     name = (encoding or "").strip().lower()
     if name in ("gzip", "x-gzip"):
         return _zlib_pieces(data, False)
@@ -168,7 +172,7 @@ class StreamTap:
         size = 0
         counted_limit = max(self.limit, COUNTED_BYTES_LIMIT)
         try:
-            for piece in _pieces(self.encoding, raw):
+            for piece in decoded_pieces(self.encoding, raw):
                 size += len(piece)
                 room = self.limit - len(captured)
                 if room > 0:

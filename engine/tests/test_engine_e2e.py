@@ -235,6 +235,8 @@ def test_foreign_host_and_origin_are_rejected(engine):
     assert status == 403
     status, _ = api_get(port, "/api/status", headers={"Origin": "http://127.0.0.1:{0}".format(port)})
     assert status == 200
+    status, _ = api_get(port, "/api/status", headers={"X-AgentProxy-Proxied": "1"})
+    assert status == 403
 
 
 def test_monitor_page_served(engine):

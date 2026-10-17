@@ -1,5 +1,7 @@
 import base64
 
+import pytest
+
 from agentproxy import bodies, changelog
 
 
@@ -79,3 +81,43 @@ def test_text_cut_inside_a_character_stays_text():
     body = ("привет" * 100).encode("utf-8")[:301]
     rendered = bodies.render(body, 1200, "", None)
     assert rendered["encoding"] == "text" and rendered["content"].startswith("привет")
+
+
+def test_body_is_shown_in_its_charset():
+    body = '{"title":"Вклад"}'.encode("cp1251")
+    shown = bodies.render(body, len(body), "application/json; charset=windows-1251", None)
+    assert '"title": "Вклад"' in shown["content"]
+    assert "Вклад" not in bodies.render(body, len(body), "application/json", None)["content"]
+    assert bodies.render(b"abc", 3, "text/plain; charset=base64", None)["content"] == "abc"
+
+
+@pytest.mark.parametrize("charset", ["punycode", "idna", "undefined", "utf-8\x00", "rot13"])
+def test_unsafe_charset_from_the_server_falls_back_to_utf8(charset):
+    import time
+    body = b"-" + b"a" * 400000
+    started = time.monotonic()
+    shown = bodies.render(body, len(body), "text/plain; charset=" + charset, None)
+    assert time.monotonic() - started < 1 and shown["content"] == body.decode("utf-8")
+
+
+@pytest.mark.parametrize("charset, text", [("shift_jis", "こんにちは"), ("gbk", "你好"), ("iso-8859-2", "zażółć")])
+def test_body_in_other_text_charsets_is_shown(charset, text):
+    body = text.encode(charset)
+    assert bodies.render(body, len(body), "text/plain; charset=" + charset, None)["content"] == text
+
+
+def test_cut_body_is_decoded_only_as_far_as_shown():
+    body = "Ж".encode("utf-8") * 100000
+    shown = bodies.render(body, len(body), "text/plain", 10)
+    assert shown["content"] == "Ж" * 10 and shown["truncated"] is True
+    latin2 = "zażółć".encode("iso-8859-2")
+    assert bodies.render(latin2, len(latin2), "text/plain; charset=iso-8859-2", 3)["content"] == "zaż"
+
+
+def test_cut_body_in_a_wide_charset_is_still_marked_truncated():
+    body = ("漢a" * 50).encode("iso-2022-jp")
+    shown = bodies.render(body, len(body), "text/plain; charset=iso-2022-jp", 40)
+    assert shown["content"] == ("漢a" * 20) and shown["truncated"] is True
+    wide = "abcdefghijklmn".encode("utf-32")
+    shown = bodies.render(wide, len(wide), "text/plain; charset=utf-32", 10)
+    assert shown["content"] == "abcdefghij" and shown["truncated"] is True

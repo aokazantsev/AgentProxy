@@ -38,12 +38,13 @@ CREATE TABLE IF NOT EXISTS flows (
     response_body BLOB,
     response_body_size INTEGER NOT NULL DEFAULT 0,
     response_content_type TEXT,
-    client TEXT
+    client TEXT,
+    rules TEXT
 );
 """
 
 SUMMARY_COLUMNS = ("seq", "id", "started", "duration_ms", "method", "scheme", "host", "port", "path", "url",
-                   "status", "error", "request_body_size", "response_body_size", "response_content_type")
+                   "status", "error", "request_body_size", "response_body_size", "response_content_type", "rules")
 
 
 @dataclass
@@ -70,6 +71,7 @@ class FlowRecord:
     response_body_size: int = 0
     response_content_type: str = ""
     client: str = ""
+    rules: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,7 @@ class FlowFilter:
     failed_only: bool = False
     since_seq: int = None
     text: str = None
+    rule: str = None
 
     def matches(self, record):
         if self.host and self.host.lower() not in record["host"].lower():
@@ -97,6 +100,8 @@ class FlowFilter:
             return False
         if self.text and self.text.lower() not in record["url"].lower():
             return False
+        if self.rule and not any(entry.get("id") == self.rule for entry in record["rules"]):
+            return False
         return True
 
 
@@ -106,6 +111,20 @@ def _storable(text):
 
 def _text_lower(text):
     return text.lower() if isinstance(text, str) else text
+
+
+def _rules(text):
+    try:
+        value = json.loads(text) if text else []
+    except ValueError:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _row(row):
+    result = dict(row)
+    result["rules"] = _rules(result["rules"])
+    return result
 
 
 def _storable_headers(headers):
@@ -144,6 +163,9 @@ class FlowStore:
             if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
                 db.execute("DROP TABLE IF EXISTS flows")
             db.executescript(SCHEMA)
+            columns = [row[1] for row in db.execute("PRAGMA table_info(flows)").fetchall()]
+            if "rules" not in columns:
+                db.execute("ALTER TABLE flows ADD COLUMN rules TEXT")
             db.execute("PRAGMA user_version={0}".format(SCHEMA_VERSION))
         except sqlite3.DatabaseError:
             db.close()
@@ -168,6 +190,7 @@ class FlowStore:
             "response_headers": _storable_headers(record.response_headers), "response_body": record.response_body,
             "response_body_size": record.response_body_size,
             "response_content_type": record.response_content_type, "client": record.client,
+            "rules": json.dumps(record.rules) if record.rules else None,
         }
         for name, value in row.items():
             if isinstance(value, str):
@@ -207,7 +230,7 @@ class FlowStore:
         with self._lock:
             row = self._db.execute(
                 "SELECT {0} FROM flows WHERE seq = ?".format(", ".join(SUMMARY_COLUMNS)), (seq,)).fetchone()
-        return dict(row) if row else None
+        return _row(row) if row else None
 
     def query(self, flow_filter, limit):
         clauses = []
@@ -232,11 +255,14 @@ class FlowStore:
         if flow_filter.text:
             clauses.append("instr(text_lower(url), ?) > 0")
             params.append(flow_filter.text.lower())
+        if flow_filter.rule:
+            clauses.append("instr(rules, ?) > 0")
+            params.append(json.dumps({"id": flow_filter.rule})[1:-1])
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = "SELECT {0} FROM flows{1} ORDER BY seq DESC LIMIT ?".format(", ".join(SUMMARY_COLUMNS), where)
         with self._lock:
             rows = self._db.execute(sql, params + [limit]).fetchall()
-        return [dict(row) for row in rows]
+        return [_row(row) for row in rows]
 
     def get(self, flow_id):
         with self._lock:
@@ -244,7 +270,7 @@ class FlowStore:
                                    (flow_id, flow_id)).fetchone()
         if row is None:
             return None
-        result = dict(row)
+        result = _row(row)
         del result["stored_bytes"]
         result["request_headers"] = json.loads(result["request_headers"])
         result["response_headers"] = json.loads(result["response_headers"] or "[]")

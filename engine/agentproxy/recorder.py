@@ -3,6 +3,7 @@ import time
 import uuid
 
 from .guard import OWN_PORT_MARK
+from .rules import APPLIED_MARK, NO_REQUEST_STREAM_MARK, NO_RESPONSE_STREAM_MARK
 from .store import FlowRecord
 from .streamtap import StreamTap, should_stream, should_stream_request
 
@@ -54,6 +55,7 @@ def build_record(flow, limit, tap=None, error=None, request_tap=None):
         request_body_size=request_size,
         request_content_type=request.headers.get("content-type", ""),
         client=flow.client_conn.peername[0] if flow.client_conn and flow.client_conn.peername else "",
+        rules=list(flow.metadata.get(APPLIED_MARK) or []),
     )
     response = flow.response
     if response is not None:
@@ -96,6 +98,8 @@ class Recorder:
         self.request_taps = {}
 
     def requestheaders(self, flow):
+        if flow.metadata.get(NO_REQUEST_STREAM_MARK):
+            return
         headers = flow.request.headers
         if should_stream_request(headers.get("content-length"), self.body_limit):
             tap = StreamTap(self.body_limit, headers.get("content-encoding"))
@@ -103,6 +107,8 @@ class Recorder:
             flow.request.stream = tap
 
     def responseheaders(self, flow):
+        if flow.metadata.get(NO_RESPONSE_STREAM_MARK):
+            return
         headers = flow.response.headers
         if should_stream(flow.request.method, flow.response.status_code, headers.get("content-type"),
                          headers.get("content-length"), self.body_limit):
