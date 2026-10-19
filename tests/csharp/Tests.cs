@@ -554,6 +554,7 @@ namespace AgentProxy.Tests
             string claudeDir = Path.Combine(root, ".claude");
             Directory.CreateDirectory(Path.Combine(claudeDir, "skills", "agentproxy"));
             File.WriteAllText(Path.Combine(claudeDir, "skills", "agentproxy", "SKILL.md"), "x");
+            File.WriteAllText(Path.Combine(claudeDir, "skills", "agentproxy", "rules.md"), "y");
             File.WriteAllText(Path.Combine(claudeDir, "settings.json"),
                 "{\"model\": \"opus\", \"hooks\": {\"SessionStart\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"mine.py\"}]},"
                 + " {\"hooks\": [{\"type\": \"command\", \"command\": \"C:/x/python.exe -I -m agentproxy.cli hook session-start\"}]}],"

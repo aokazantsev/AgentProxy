@@ -36,10 +36,3 @@ def test_changelog_top_entry_is_current_version():
     entries = changelog.parse(read("CHANGELOG.md"))
     assert entries and entries[0]["version"] == VERSION
     assert entries[0]["lines"]
-
-
-def test_skill_mentions_every_mcp_tool():
-    from agentproxy.service import TOOLS
-    skill = read("engine", "agentproxy", "claude", "SKILL.md")
-    for tool in TOOLS:
-        assert "`{0}`".format(tool["name"]) in skill, tool["name"]

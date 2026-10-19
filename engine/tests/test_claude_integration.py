@@ -63,9 +63,13 @@ def test_install_adds_everything_and_keeps_user_settings(env):
     assert claude_json["numStartups"] == 5
     assert claude_json["mcpServers"]["other"] == {"type": "stdio", "command": "x"}
     assert claude_json["mcpServers"]["agentproxy"] == {"type": "http", "url": "http://127.0.0.1:8891/mcp"}
-    skill = open(env.skill_file, encoding="utf-8").read()
+    skill = open(os.path.join(env.skill_dir, "SKILL.md"), encoding="utf-8").read()
     assert "AgentProxy " + VERSION in skill
     assert "{{" not in skill
+    rules = open(os.path.join(env.skill_dir, "rules.md"), encoding="utf-8").read()
+    assert "{{" not in rules
+    assert rules == integration.render_skill(env, "rules.md")
+    assert os.path.join(env.skill_dir, "rules.md") in skill
     assert state["version"] == VERSION
     assert integration.status(env) == {"installed": True, "version": VERSION, "mcp": True, "skill": True,
                                        "hooks": True, "claude_dir": env.claude_dir}
@@ -100,7 +104,7 @@ def test_uninstall_restores_user_hooks(env):
     assert removed == {"mcp": True, "skill": True, "hooks": True}
     assert read_json(env.settings_json) == USER_SETTINGS
     assert "agentproxy" not in read_json(env.claude_json)["mcpServers"]
-    assert not os.path.exists(os.path.dirname(env.skill_file))
+    assert not os.path.exists(env.skill_dir)
     assert integration.status(env)["installed"] is False
 
 
@@ -127,9 +131,81 @@ def test_refresh_states(env):
     assert integration.refresh(env) == "not installed"
     integration.install(env)
     assert integration.refresh(env) == "up to date"
-    os.remove(env.skill_file)
+    os.remove(os.path.join(env.skill_dir, "SKILL.md"))
     assert integration.refresh(env) == "refreshed"
-    assert os.path.exists(env.skill_file)
+    assert os.path.exists(os.path.join(env.skill_dir, "SKILL.md"))
+    os.remove(os.path.join(env.skill_dir, "rules.md"))
+    assert integration.status(env)["skill"] is False
+    assert integration.refresh(env) == "refreshed"
+    assert integration.status(env)["skill"] is True
+    with open(os.path.join(env.skill_dir, "rules.md"), "w", encoding="utf-8") as stream:
+        stream.write("old")
+    assert integration.status(env)["skill"] is False
+    assert integration.refresh(env) == "refreshed"
+    assert integration.status(env)["skill"] is True
+
+
+def test_render_skill_fills_every_placeholder(env, tmp_path, monkeypatch):
+    (tmp_path / "probe.md").write_text("{{VERSION}}|{{PROXY_PORT}}|{{API_PORT}}|{{DATA_DIR}}|{{INSTALL_DIR}}|{{SKILL_DIR}}",
+                                       encoding="utf-8")
+    monkeypatch.setattr(integration, "TEMPLATE_DIR", str(tmp_path))
+    assert integration.render_skill(env, "probe.md").split("|") == [
+        VERSION, "8890", "8891", env.data_dir, env.install_dir, env.skill_dir]
+
+
+def test_config_dir_moves_the_skill_as_tool_descriptions_say(tmp_path, monkeypatch):
+    from agentproxy.service import RULES_REFERENCE
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AGENTPROXY_DATA_DIR", str(tmp_path / "data"))
+    env = integration.detect(use_cli=False)
+    assert env.skill_dir == os.path.join(str(tmp_path / "config"), "skills", integration.SKILL_NAME)
+    assert "skills/{0} under CLAUDE_CONFIG_DIR".format(integration.SKILL_NAME) in RULES_REFERENCE
+
+
+def test_status_treats_unreadable_rules_reference_as_stale(env):
+    integration.install(env)
+    with open(os.path.join(env.skill_dir, "rules.md"), "wb") as stream:
+        stream.write("правила".encode("cp1251"))
+    assert integration.status(env)["skill"] is False
+    assert integration.refresh(env) == "refreshed"
+
+
+def test_install_skill_writes_reference_before_skill(env, monkeypatch):
+    written = []
+    monkeypatch.setattr(jsonfile, "save_text", lambda path, text: written.append(os.path.basename(path)))
+    integration.install_skill(env)
+    assert written == ["rules.md", "SKILL.md"]
+
+
+def test_install_skill_writes_nothing_when_a_template_fails(env, monkeypatch):
+    render = integration.render_skill
+
+    def failing(environment, name):
+        if name == "SKILL.md":
+            raise OSError("template missing")
+        return render(environment, name)
+
+    monkeypatch.setattr(integration, "render_skill", failing)
+    with pytest.raises(OSError):
+        integration.install_skill(env)
+    assert not os.path.exists(env.skill_dir)
+
+
+@pytest.mark.parametrize("error", [OSError("file is locked"), KeyboardInterrupt()])
+def test_save_text_removes_temporary_file_when_replace_fails(tmp_path, monkeypatch, error):
+    def failing_replace(source, target):
+        raise error
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(type(error)):
+        jsonfile.save_text(str(tmp_path / "SKILL.md"), "text")
+    assert os.listdir(str(tmp_path)) == []
+
+
+def test_save_text_removes_temporary_file_when_write_fails(tmp_path):
+    with pytest.raises(UnicodeEncodeError):
+        jsonfile.save_text(str(tmp_path / "SKILL.md"), "a\ud800")
+    assert os.listdir(str(tmp_path)) == []
 
 
 def test_refresh_after_version_change_records_previous(env):

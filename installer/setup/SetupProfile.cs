@@ -36,7 +36,7 @@ namespace AgentProxy
                         + "а после обновления — что нового. Чужие хуки, серверы и настройки не трогаются.",
                     DetailsTitle = "Что и куда пишется",
                     Details = "• ~/.claude.json — запись mcpServers.agentproxy (адрес http://127.0.0.1:<порт API>/mcp);\n"
-                        + "• ~/.claude/skills/agentproxy/SKILL.md — инструкция для Claude;\n"
+                        + "• ~/.claude/skills/agentproxy/ — SKILL.md и rules.md, инструкция для Claude;\n"
                         + "• ~/.claude/settings.json — хук SessionStart (запуск agentproxy из папки установки) и хук UserPromptSubmit "
                         + "(запрос к 127.0.0.1, без запуска процессов).\n"
                         + "Снять — пункт трея «Отключить от Claude Code» или удаление программы.",

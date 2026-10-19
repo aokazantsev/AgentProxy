@@ -29,14 +29,17 @@ def load(path, default):
 
 
 def save(path, data):
+    save_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def save_text(path, text):
     target = real_path(path)
     directory = os.path.dirname(target)
     os.makedirs(directory, exist_ok=True)
     handle, temporary = tempfile.mkstemp(prefix=".agentproxy-", suffix=".tmp", dir=directory)
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
+            stream.write(text)
         os.replace(temporary, target)
     except BaseException:
         if os.path.exists(temporary):

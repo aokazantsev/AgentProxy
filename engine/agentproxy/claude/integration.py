@@ -20,7 +20,8 @@ CLI_TIMEOUT_SECONDS = 25
 TASKKILL = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
 CLI_TIMED_OUT = -2
 SHELL_SAFE_PATH = re.compile(r"^[A-Za-z0-9_./:~+-]+$")
-SKILL_TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SKILL.md")
+SKILL_FILES = ("SKILL.md", "rules.md")
+TEMPLATE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 @dataclass(frozen=True)
@@ -39,8 +40,8 @@ class Environment:
         return os.path.join(self.claude_dir, "settings.json")
 
     @property
-    def skill_file(self):
-        return os.path.join(self.claude_dir, "skills", SKILL_NAME, "SKILL.md")
+    def skill_dir(self):
+        return os.path.join(self.claude_dir, "skills", SKILL_NAME)
 
     @property
     def state_file(self):
@@ -244,12 +245,12 @@ def mcp_installed(env):
     return isinstance(entry, dict) and entry.get("url") == env.mcp_url
 
 
-def render_skill(env):
-    with open(SKILL_TEMPLATE, encoding="utf-8") as stream:
+def render_skill(env, name):
+    with open(os.path.join(TEMPLATE_DIR, name), encoding="utf-8") as stream:
         text = stream.read()
     values = {
         "{{VERSION}}": VERSION, "{{PROXY_PORT}}": str(env.proxy_port), "{{API_PORT}}": str(env.api_port),
-        "{{DATA_DIR}}": env.data_dir, "{{INSTALL_DIR}}": env.install_dir,
+        "{{DATA_DIR}}": env.data_dir, "{{INSTALL_DIR}}": env.install_dir, "{{SKILL_DIR}}": env.skill_dir,
     }
     for key, value in values.items():
         text = text.replace(key, value)
@@ -257,25 +258,27 @@ def render_skill(env):
 
 
 def install_skill(env):
-    os.makedirs(os.path.dirname(env.skill_file), exist_ok=True)
-    with open(env.skill_file, "w", encoding="utf-8", newline="\n") as stream:
-        stream.write(render_skill(env))
+    texts = {name: render_skill(env, name) for name in SKILL_FILES}
+    for name in reversed(SKILL_FILES):
+        jsonfile.save_text(os.path.join(env.skill_dir, name), texts[name])
 
 
 def remove_skill(env):
-    folder = os.path.dirname(env.skill_file)
-    if os.path.isdir(folder):
-        shutil.rmtree(folder)
+    if os.path.isdir(env.skill_dir):
+        shutil.rmtree(env.skill_dir)
         return True
     return False
 
 
 def skill_current(env):
-    try:
-        with open(env.skill_file, encoding="utf-8") as stream:
-            return stream.read() == render_skill(env)
-    except OSError:
-        return False
+    for name in SKILL_FILES:
+        try:
+            with open(os.path.join(env.skill_dir, name), encoding="utf-8") as stream:
+                if stream.read() != render_skill(env, name):
+                    return False
+        except (OSError, ValueError):
+            return False
+    return True
 
 
 def read_state(env):

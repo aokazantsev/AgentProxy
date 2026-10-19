@@ -64,6 +64,13 @@ def test_status_counts_rules(service):
     assert service.status()["rules"] == {"total": 2, "enabled": 1, "active": 1}
 
 
+def test_list_rules_answer_has_counts_and_note(service):
+    service.add_rule({"action": "respond", "path": "/a", "body": "x"})
+    answer = service.list_rules({})
+    assert set(answer) == {"rules", "counts", "note"}
+    assert answer["counts"] == {"total": 1, "enabled": 1, "active": 1}
+
+
 def test_flows_filter_by_applied_rule(service, store):
     store.insert(make_record(1, rules=[{"id": "r1", "action": "respond"}]))
     store.insert(make_record(2, rules=[{"id": "r10", "action": "drop"}]))

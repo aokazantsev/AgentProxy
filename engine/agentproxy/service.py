@@ -96,19 +96,22 @@ RULE_PROPERTIES = {
     "enabled": {"type": "boolean", "description": "Default true"},
     "action": {"type": "string", "enum": ["respond", "rewrite", "drop", "delay"],
                "description": "respond: answer from the proxy, the server is not contacted (map local, error "
-                              "response; for an unreachable HTTPS host add a host condition, without it the "
-                              "proxy connects to the server first); rewrite: change request headers on the way out and the response on "
-                              "the way back; drop: abort the request without an answer (HTTP/2: stream reset); "
-                              "delay: only wait delay_ms"},
+                              "response); rewrite: change request headers on the way out and the response on "
+                              "the way back, the request body stays; drop: abort the request without an answer "
+                              "(HTTP/2: stream reset); delay: only wait delay_ms. For an unreachable HTTPS host "
+                              "respond and drop need a host condition, url_regex alone is not enough: without host "
+                              "the proxy connects to the server first and the request ends with CONNECT failed"},
     "host": {"type": "string", "description": "Condition: substring of the host, case-insensitive (as in list_flows)"},
     "path": {"type": "string", "description": "Condition: substring of the path with query string, case-sensitive "
                                               "(as in list_flows)"},
     "method": {"type": "string", "description": "Condition: HTTP method"},
     "url_regex": {"type": "string", "description": "Condition: Python regular expression searched in the full URL"},
     "delay_ms": {"type": "integer", "description": "Wait after the request body before the request goes on "
-                                                "(any action), 0..300000; under rewrite and delay streamed uploads "
-                                                "reach the server first and the wait holds the answer; drop of an "
-                                                "upload without length or over 64 MB aborts at once; the wait ends "
+                                                "(any action), 0..300000; under rewrite and delay an upload without "
+                                                "length or over max_body_bytes (2 MB by default) reaches the server "
+                                                "first and the wait holds the answer; drop of an upload without "
+                                                "length or over 64 MB aborts at once (skipped), a smaller one is "
+                                                "recorded with its body; the wait ends "
                                                 "when the client disconnects; delays of all matching rules add up, "
                                                 "total at most 300000"},
     "times": {"type": "integer", "description": "Apply only to the first N matching requests; after that the rule "
@@ -116,7 +119,8 @@ RULE_PROPERTIES = {
                                                "rule with status 500 and times=2 followed by a mock gives two "
                                                "failed requests, then the mock. Counts requests, not user actions: "
                                                "clients retry dropped requests (OkHttp: 1 to 3 requests per action "
-                                               "under drop) and 408, so use respond with status 500/503 for exact "
+                                               "under drop) and 408, and 503 with Retry-After: 0, so use respond with status 500/503 "
+                                               "without Retry-After for exact "
                                                "counts"},
     "status": {"type": "integer", "description": "200..599. respond: status code, default 200; rewrite: replace the "
                                                 "server's status code"},
@@ -150,6 +154,10 @@ def _nullable(properties):
         result[name] = schema if name in ("action", "enabled") else dict(schema, type=[kind, "null"])
     return result
 
+
+RULES_REFERENCE = ("Before the first add_rule or update_rule of a task and when a rule did not apply, read rules.md "
+                   "of the agentproxy skill (~/.claude/skills/agentproxy/rules.md, or skills/agentproxy under "
+                   "CLAUDE_CONFIG_DIR): conditions, encodings, CORS, limits, notes on flows.")
 
 RULE_NOTE = ("Rules apply to new requests at once, survive engine restarts and stay until deleted: delete or "
              "disable them when the task is done. Every flow lists the rules applied to it in its rules field.")
@@ -370,6 +378,7 @@ TOOLS = [
     {
         "name": "get_flow",
         "description": "Full flow by id or seq: request and response headers and bodies. "
+                       "Text bodies are decoded by the charset of their Content-Type (UTF-8 without it). "
                        "JSON bodies are pretty-printed (raw=true shows them as stored, after rules), binary bodies are "
                        "base64. " + UNTRUSTED_NOTE,
         "inputSchema": {"type": "object", "required": ["id"], "properties": {
@@ -411,7 +420,7 @@ TOOLS = [
                        "local file or text, return an error status, drop the connection, delay, change headers, "
                        "status or body text. The condition uses host, path, method, url_regex (at least one). "
                        "Matching rules apply in list order, a new rule goes to the end; respond and drop end the "
-                       "chain. Returns the stored rule "
+                       "chain. " + RULES_REFERENCE + " Returns the stored rule "
                        "and how many recorded flows already match the condition. " + RULE_NOTE,
         "inputSchema": {"type": "object", "required": ["action"], "properties": RULE_PROPERTIES},
         "handler": "add_rule",
@@ -423,7 +432,7 @@ TOOLS = [
                        "enabled=false "
                        "switches it off. Changing the action drops the fields of the old action, status too: pass "
                        "them again. "
-                       "reset_hits=true starts the hit count (and times) anew.",
+                       "reset_hits=true starts the hit count (and times) anew. " + RULES_REFERENCE,
         "inputSchema": {"type": "object", "required": ["id"], "properties": dict(_nullable(RULE_PROPERTIES), id={
             "type": "string", "description": "Rule id, e.g. r1"}, reset_hits={"type": "boolean"})},
         "handler": "update_rule",
