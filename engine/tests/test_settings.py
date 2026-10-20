@@ -68,13 +68,12 @@ def test_proxy_passes_websocket_through_as_raw_tcp(tmp_path):
 class FakeHandler:
     def __init__(self, status):
         self.status = status
-        self.request = type("Request", (), {"request_time": lambda self: 0.01})()
+        self.request = type("Request", (), {"request_time": lambda self: 0.01, "method": "GET",
+                                            "path": "/api/flows/wait", "uri": "/api/flows/wait?path=/x?code=secret",
+                                            "remote_ip": "127.0.0.1"})()
 
     def get_status(self):
         return self.status
-
-    def _request_summary(self):
-        return "GET /api/flows/wait"
 
 
 def test_stopping_answer_is_not_logged_as_error(caplog):
@@ -83,6 +82,8 @@ def test_stopping_answer_is_not_logged_as_error(caplog):
         api.log_request(FakeHandler(status))
     levels = {record.message.split()[0]: record.levelname for record in caplog.records}
     assert levels == {"200": "INFO", "404": "WARNING", "500": "ERROR", "503": "INFO"}
+    assert all("secret" not in record.getMessage() and "GET /api/flows/wait (127.0.0.1)" in record.getMessage()
+               for record in caplog.records)
 
 
 def test_log_keeps_lines_with_raw_bytes(tmp_path):

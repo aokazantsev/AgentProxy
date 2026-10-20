@@ -7,7 +7,7 @@ from agentproxy.service import RULE_PROPERTIES, RULES_REFERENCE, TOOLS
 
 ENGINE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agentproxy")
 CLAUDE_DIR = os.path.join(ENGINE_DIR, "claude")
-SKILL_MAX_CHARS = 7500
+SKILL_MAX_CHARS = 8500
 RULES_MAX_CHARS = 10000
 COPY_WINDOW_WORDS = 6
 ANSWER_FIELDS = {

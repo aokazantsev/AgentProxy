@@ -9,11 +9,13 @@ import secrets
 import socket
 import sys
 import threading
+import time
 
 from . import VERSION, logs, paths
 from . import settings as settings_module
 from .api import make_app
 from .claude import integration
+from .flowlog import FlowLog
 from .guard import OwnPortsGuard
 from .recorder import Recorder
 from .rewriter import Rewriter
@@ -113,7 +115,7 @@ async def serve(current, data_dir, parent_pid):
     master = create_master(current, cert_dir)
     master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
     master.addons.add(Rewriter(rules))
-    master.addons.add(Recorder(store, current.max_body_bytes))
+    master.addons.add(Recorder(store, current.max_body_bytes, FlowLog()))
     loop = asyncio.get_running_loop()
 
     def shutdown():
@@ -136,7 +138,7 @@ async def serve(current, data_dir, parent_pid):
         store.close()
         if os.path.exists(runtime_path):
             os.remove(runtime_path)
-        log.info("engine stopped")
+        log.info("engine stopped after %s s", int(time.time() - service.started_at))
 
 
 def main(argv=None):

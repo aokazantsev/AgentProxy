@@ -31,6 +31,20 @@ namespace AgentProxy
             failures = 0;
         }
 
+        public static string ExitMeaning(int exitCode)
+        {
+            switch (exitCode)
+            {
+                case 0: return "normal stop";
+                case 1: return "crash";
+                case ExitPortBusy: return "port busy";
+                case ExitDataDir: return "data folder unavailable";
+                case 1073807364: return "ended from outside";
+                case -1073741510: return "ended from outside";
+                default: return null;
+            }
+        }
+
         public static EngineState StateAfterExit(int exitCode)
         {
             if (exitCode == ExitPortBusy) return EngineState.PortBusy;

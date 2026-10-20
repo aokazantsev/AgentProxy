@@ -159,7 +159,8 @@ namespace AgentProxy
             TimeSpan ranFor = DateTime.UtcNow - startedAt;
             string stderr;
             lock (stderrTail) stderr = stderrTail.ToString().Trim();
-            AppLog.Append("engine exited: code " + code + " after " + (int)ranFor.TotalSeconds + " s" + (stderr.Length > 0 ? ", stderr: " + stderr : ""));
+            string meaning = RestartPolicy.ExitMeaning(code);
+            AppLog.Append("engine exited: code " + code + (meaning != null ? " (" + meaning + ")" : "") + " after " + (int)ranFor.TotalSeconds + " s" + (stderr.Length > 0 ? ", stderr: " + stderr : ""));
             if (stopping || disposed) return;
             EngineState next = RestartPolicy.StateAfterExit(code);
             if (next == EngineState.PortBusy)

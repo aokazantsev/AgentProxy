@@ -91,8 +91,9 @@ def tls_failure_record(data):
 
 
 class Recorder:
-    def __init__(self, store, body_limit):
+    def __init__(self, store, body_limit, flow_log=None):
         self.store = store
+        self.flow_log = flow_log
         self.body_limit = body_limit
         self.taps = {}
         self.request_taps = {}
@@ -136,10 +137,17 @@ class Recorder:
         server = data.context.server
         if not (server and server.address):
             return
+        record = tls_failure_record(data)
         try:
-            self.store.insert(tls_failure_record(data))
+            seq = self.store.insert(record)
         except Exception:
             log.exception("TLS failure not recorded")
+            return
+        if self.flow_log is not None:
+            try:
+                self.flow_log.tls_failed(record, seq)
+            except Exception:
+                log.exception("TLS failure not logged")
 
     def _save(self, flow, error=None):
         tap = self.taps.pop(flow.id, None)
@@ -147,6 +155,12 @@ class Recorder:
         if flow.metadata.get(OWN_PORT_MARK):
             return
         try:
-            self.store.insert(build_record(flow, self.body_limit, tap, error, request_tap))
+            seq = self.store.insert(build_record(flow, self.body_limit, tap, error, request_tap))
         except Exception:
             log.exception("flow %s not recorded", flow.id)
+            return
+        if self.flow_log is not None:
+            try:
+                self.flow_log.saved(flow, seq, error)
+            except Exception:
+                log.exception("flow %s not logged", flow.id)

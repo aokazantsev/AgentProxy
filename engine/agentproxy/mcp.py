@@ -22,6 +22,7 @@ INSTRUCTIONS = (
     "Start with proxy_status. Use list_flows/get_flow to inspect traffic and wait_for_flow to wait for a "
     "request the user is about to trigger. add_rule answers or changes requests (map local, rewrite, error, "
     "delay, drop); list_rules shows the rules, delete them when done. "
+    "When something does not go as planned, read_log first: it shows what AgentProxy itself did. "
     "The agentproxy skill explains device setup (adb reverse, "
     "device proxy, CA certificate) and troubleshooting. " + UNTRUSTED_NOTE
 )

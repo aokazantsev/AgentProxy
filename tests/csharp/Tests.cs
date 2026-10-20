@@ -112,6 +112,9 @@ namespace AgentProxy.Tests
             Equal(0, policy.Failures, "busy port is not a failure");
             Equal(EngineState.PortBusy, RestartPolicy.StateAfterExit(3), "state 3");
             Equal(EngineState.Crashed, RestartPolicy.StateAfterExit(1), "state 1");
+            Equal("port busy", RestartPolicy.ExitMeaning(3), "meaning 3");
+            Equal("ended from outside", RestartPolicy.ExitMeaning(1073807364), "meaning killed");
+            Equal(null, RestartPolicy.ExitMeaning(77), "meaning unknown");
         }
 
         private static void SettingsParse()

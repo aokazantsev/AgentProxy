@@ -35,7 +35,9 @@ def log_request(handler):
         write = tornado.log.access_log.warning
     else:
         write = tornado.log.access_log.error
-    write("%d %s %.2fms", status, handler._request_summary(), 1000.0 * handler.request.request_time())
+    request = handler.request
+    write("%d %s %s (%s) %.2fms", status, request.method, request.path, request.remote_ip,
+          1000.0 * request.request_time())
 
 
 class BaseHandler(tornado.web.RequestHandler):
@@ -126,6 +128,11 @@ class FlowHandler(BaseHandler):
         arguments = self.query_arguments()
         arguments["id"] = flow_id
         await self.run_tool("get_flow", arguments)
+
+
+class LogHandler(BaseHandler):
+    async def get(self):
+        await self.run_tool("read_log", self.query_arguments())
 
 
 class RulesHandler(BaseHandler):
@@ -223,6 +230,7 @@ def make_app(context):
         (r"/api/flows", FlowsHandler),
         (r"/api/flows/wait", WaitHandler),
         (r"/api/flows/([^/]+)", FlowHandler),
+        (r"/api/log", LogHandler),
         (r"/api/rules", RulesHandler),
         (r"/api/rules/([^/]+)", RuleHandler),
         (r"/api/ca\.(pem|cer)", CertificateHandler),
