@@ -10,6 +10,7 @@ import socket
 import sys
 import threading
 import time
+from dataclasses import replace
 
 from . import VERSION, logs, paths
 from . import settings as settings_module
@@ -159,7 +160,7 @@ def main(argv=None):
     current, problems = settings_module.load(data_dir)
     for problem in problems:
         log.warning("settings: %s", problem)
-    log.info("settings: %s", current)
+    log.info("settings: %s", replace(current, adb_path="(set)" if current.adb_path else ""))
     for name, port in (("proxy", current.proxy_port), ("api", current.api_port)):
         problem = port_problem(LOCAL_HOST, port)
         if problem:

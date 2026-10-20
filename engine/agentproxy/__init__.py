@@ -1,2 +1,2 @@
-VERSION = "0.5"
+VERSION = "0.6"
 APP_NAME = "AgentProxy"

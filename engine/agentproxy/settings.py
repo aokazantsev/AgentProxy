@@ -12,6 +12,7 @@ class Settings:
     max_flows: int = 5000
     max_body_bytes: int = 2 * 1024 * 1024
     verify_upstream: bool = True
+    adb_path: str = ""
 
 
 LIMITS = {
@@ -27,6 +28,10 @@ def _coerce(name, value, default):
         if isinstance(value, bool):
             return value
         raise ValueError("{0} must be true or false".format(name))
+    if isinstance(default, str):
+        if isinstance(value, str):
+            return value.strip()
+        raise ValueError("{0} must be a string".format(name))
     if isinstance(default, int):
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("{0} must be an integer".format(name))
@@ -49,7 +54,7 @@ def parse(raw):
         try:
             values[name] = _coerce(name, value, known[name])
         except ValueError as error:
-            problems.append("{0}; default {1} used".format(error, known[name]))
+            problems.append("{0}; default {1!r} used".format(error, known[name]))
     result = replace(defaults, **values)
     if result.proxy_port == result.api_port:
         problems.append("proxy_port equals api_port; default ports used")

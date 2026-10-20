@@ -23,8 +23,8 @@ INSTRUCTIONS = (
     "request the user is about to trigger. add_rule answers or changes requests (map local, rewrite, error, "
     "delay, drop); list_rules shows the rules, delete them when done. "
     "When something does not go as planned, read_log first: it shows what AgentProxy itself did. "
-    "The agentproxy skill explains device setup (adb reverse, "
-    "device proxy, CA certificate) and troubleshooting. " + UNTRUSTED_NOTE
+    "device_proxy routes an Android device through AgentProxy over adb (and takes it off). The agentproxy skill "
+    "explains device setup (CA certificate) and troubleshooting. " + UNTRUSTED_NOTE
 )
 
 

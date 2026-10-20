@@ -135,6 +135,14 @@ class LogHandler(BaseHandler):
         await self.run_tool("read_log", self.query_arguments())
 
 
+class DeviceHandler(BaseHandler):
+    async def get(self):
+        await self.run_tool("device_proxy", dict(self.query_arguments(), action="status"))
+
+    async def post(self):
+        await self.run_body_tool("device_proxy")
+
+
 class RulesHandler(BaseHandler):
     async def get(self):
         await self.run_tool("list_rules", self.query_arguments())
@@ -231,6 +239,7 @@ def make_app(context):
         (r"/api/flows/wait", WaitHandler),
         (r"/api/flows/([^/]+)", FlowHandler),
         (r"/api/log", LogHandler),
+        (r"/api/device", DeviceHandler),
         (r"/api/rules", RulesHandler),
         (r"/api/rules/([^/]+)", RuleHandler),
         (r"/api/ca\.(pem|cer)", CertificateHandler),

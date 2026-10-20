@@ -46,7 +46,8 @@ rewrite, ошибки, задержки) Claude тоже может сам — �
 ## Подключение устройства
 
 Прокси слушает только `127.0.0.1:8890`, устройство подключается через `adb reverse` — по USB или Wi-Fi-отладке,
-без открытия портов в брандмауэре.
+без открытия портов в брандмауэре. Claude включает и выключает прокси устройства сам инструментом `device_proxy`;
+команды ниже — то же руками.
 
 ```bash
 adb reverse tcp:8890 tcp:8890
@@ -77,11 +78,12 @@ adb reverse --remove tcp:8890
 | `list_rules` | правила по порядку проверки, сколько раз сработало каждое с запуска движка |
 | `update_rule` | меняет правило, включает и выключает его |
 | `delete_rule` | удаляет одно правило или все |
+| `device_proxy` | включает и выключает прокси на Android-устройстве через adb (`adb reverse` и `http_proxy`), показывает прежнее значение и состояние после вызова; устройство выбирается по `serial`, одно подключённое — само |
 | `read_log` | журналы самого AgentProxy (движок и трей): что применилось из правил и почему, отказы, ошибки, обрывы, перезапуски; фильтры по уровню, тексту и времени |
 
 То же доступно по HTTP: `GET /api/status`, `GET /api/flows?host=...`, `GET /api/flows/<id>`,
 `GET /api/flows/wait?path=...`, `DELETE /api/flows`, `GET`/`POST /api/rules` (`GET ?id=` — одно правило целиком), `DELETE /api/rules` (все правила),
-`PATCH`/`DELETE /api/rules/<id>`, `GET /api/log?source=engine&level=warning&lines=50`, сертификат — `/api/ca.pem`, `/api/ca.cer`. Монитор для человека —
+`PATCH`/`DELETE /api/rules/<id>`, `GET /api/log?source=engine&level=warning&lines=50`, `GET`/`POST /api/device` (прокси устройства; тело `POST` — `{"action": "enable"}`), сертификат — `/api/ca.pem`, `/api/ca.cer`. Монитор для человека —
 `http://127.0.0.1:8891/`.
 
 ## Журналы для самопроверки
@@ -152,7 +154,7 @@ AgentProxy рассчитан на ПК с одним пользователем
 | Файл | Что |
 |---|---|
 | `%LOCALAPPDATA%\Programs\AgentProxy` | программа, встроенный Python и движок |
-| `%LOCALAPPDATA%\AgentProxy\settings.json` | порты (`proxy_port`, `api_port`), `verify_upstream`, `max_flows`, `max_body_bytes` |
+| `%LOCALAPPDATA%\AgentProxy\settings.json` | порты (`proxy_port`, `api_port`), `verify_upstream`, `max_flows`, `max_body_bytes`, `adb_path` (путь к `adb.exe` через `/`, если его нет в PATH и в Android SDK; движок читает файл при запуске — после правки «Перезапустить движок») |
 | `%LOCALAPPDATA%\AgentProxy\log.txt` | журнал программы в трее: запуск движка, коды выхода, перезапуски, обновления |
 | `%LOCALAPPDATA%\AgentProxy\engine.log` | журнал движка: итог правил по каждому запросу (хост без пути и параметров, номер записи истории), изменения и отказы правил, запросы с ошибкой, ошибки аддонов, отказы TLS, старт и стоп; одинаковые строки прореживаются |
 | `%LOCALAPPDATA%\AgentProxy\cli.log` | журнал командной строки и хука старта сессии |

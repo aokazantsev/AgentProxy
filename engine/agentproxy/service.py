@@ -5,6 +5,7 @@ import time
 from dataclasses import replace
 
 from . import VERSION, logreader
+from .device import DeviceControl, DeviceError
 from .bodies import render
 from .flowlog import clean, describe_rule
 from .rules import VIEW_FIELDS, RuleError, RuleNotFound, matches
@@ -207,6 +208,7 @@ class ProxyService:
         self.cert_dir = cert_dir
         self.started_at = time.time()
         self.proxy_running = False
+        self.device = DeviceControl(lambda: self.settings, lambda: self.proxy_running)
 
     def ca_paths(self):
         return {
@@ -362,6 +364,15 @@ class ProxyService:
         since = _int(arguments, "since_minutes", low=0, high=60 * 24 * 365)
         return logreader.read(self.data_dir, source, lines, level, _str(arguments, "contains"), since)
 
+    async def device_proxy(self, arguments):
+        action = _str(arguments, "action")
+        if action is None:
+            raise ToolError("action is required: enable, disable or status")
+        try:
+            return await asyncio.to_thread(self.device.apply, action, _str(arguments, "serial"))
+        except DeviceError as error:
+            raise ToolError(str(error))
+
     async def wait_for_flow(self, arguments):
         timeout = _int(arguments, "timeout_seconds", 60, 1, MAX_WAIT_SECONDS)
         flow_filter = build_filter(arguments)
@@ -472,6 +483,22 @@ TOOLS = [
             "id": {"type": "string", "description": "Rule id, e.g. r1"},
             "all": {"type": "boolean", "description": "Delete every rule"}}},
         "handler": "delete_rule",
+    },
+    {
+        "name": "device_proxy",
+        "description": "Route an Android device (USB, Wi-Fi debugging or emulator, through adb) via AgentProxy or "
+                       "take it off: enable sets adb reverse and the device's global proxy to the AgentProxy port, "
+                       "disable clears the proxy and removes the reverse, status only reads. The answer holds the "
+                       "proxy the device had before (previous_proxy), the state after the call and a hint. One "
+                       "connected device is picked by itself, with several pass serial. A device left with the "
+                       "proxy set has no internet once AgentProxy stops: disable it when the task is done. If previous_proxy was "
+                       "another proxy, tell the user it was replaced. The "
+                       "AgentProxy certificate is still installed by the user.",
+        "inputSchema": {"type": "object", "required": ["action"], "properties": {
+            "action": {"type": "string", "enum": ["enable", "disable", "status"]},
+            "serial": {"type": "string", "description": "adb serial of the device (adb devices); needed only when "
+                                                        "several are connected"}}},
+        "handler": "device_proxy",
     },
     {
         "name": "read_log",
