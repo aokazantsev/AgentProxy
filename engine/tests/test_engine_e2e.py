@@ -242,6 +242,8 @@ def test_foreign_host_and_origin_are_rejected(engine):
 def test_monitor_page_served(engine):
     status, body = api_get(engine["api_port"], "/")
     assert status == 200 and b"AgentProxy" in body
+    for element in (b'id="fMethod"', b'id="fCode"', b'id="fGroup"', b'id="heads"', b'id="rows"', b'id="nomatch"'):
+        assert element in body
 
 
 def test_shutdown_requires_token(engine):

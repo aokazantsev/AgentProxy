@@ -20,13 +20,22 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); heig
 #list { overflow: auto; border-right: 1px solid var(--line); }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 5px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
-th { position: sticky; top: 0; background: var(--bg); color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); }
+th { position: sticky; top: var(--tools-height, 41px); background: var(--bg); color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); }
 tbody tr { cursor: pointer; } tbody tr:hover, tbody tr.sel { background: var(--row); }
 .s2 { color: var(--ok); } .s4, .s5, .err { color: var(--bad); }
 #detail { overflow: auto; padding: 14px 20px; }
 #detail h2 { font-size: 13px; margin: 18px 0 6px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .04em; }
 pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px/1.45 Consolas, monospace; background: var(--row); padding: 8px 10px; border-radius: 6px; }
 .empty { color: var(--muted); padding: 20px; }
+#tools { display: flex; gap: 14px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; position: sticky; top: 0; background: var(--bg); z-index: 2; }
+#tools label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
+#tools select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--fg); }
+tr.child td:first-child { padding-left: 22px; }
+tr.group td { font-weight: 500; }
+.caret { display: inline-block; width: 14px; color: var(--muted); }
+.count { color: var(--accent); margin-right: 4px; }
 </style>
 </head>
 <body>
@@ -40,12 +49,20 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px/1.45 C
 </header>
 <main>
   <section id="list">
+    <div id="tools">
+      <label>метод <select id="fMethod"><option value="">все</option></select></label>
+      <label>код <select id="fCode">
+        <option value="">все</option><option value="2">2xx</option><option value="3">3xx</option><option value="4">4xx</option><option value="5">5xx</option><option value="err">ошибка</option>
+      </select></label>
+      <label><input type="checkbox" id="fGroup"> группировать одинаковые запросы</label>
+    </div>
     <table>
       <colgroup><col style="width:56px"><col style="width:64px"><col style="width:52px"><col style="width:26%"><col><col style="width:60px"><col style="width:64px"></colgroup>
-      <thead><tr><th>#</th><th>метод</th><th>код</th><th>хост</th><th>путь</th><th>мс</th><th>правила</th></tr></thead>
+      <thead><tr id="heads"></tr></thead>
       <tbody id="rows"></tbody>
     </table>
     <div id="none" class="empty" hidden>Запросов пока нет. Направь трафик устройства на прокси — инструкция в скилле agentproxy.</div>
+    <div id="nomatch" class="empty" hidden>Под фильтры ничего не попало.</div>
   </section>
   <section id="detail"><div class="empty">Выбери запрос слева.</div></section>
 </main>
@@ -70,24 +87,124 @@ async function refreshStatus() {
     document.getElementById("state").textContent = "движок не отвечает";
   }
 }
+const COLUMNS = [["seq", "#"], ["method", "метод"], ["code", "код"], ["host", "хост"], ["path", "путь"], ["duration_ms", "мс"], ["rules", "правила"]];
+const view = { method: "", code: "", group: false, sortKey: "seq", sortDir: -1 };
+const expanded = new Set();
+let lastFlows = [];
+try { Object.assign(view, JSON.parse(localStorage.getItem("agentproxy.view") || "{}")); } catch (error) {}
+function saveView() { try { localStorage.setItem("agentproxy.view", JSON.stringify(view)); } catch (error) {} }
+function codeClass(flow) { return flow.error ? "err" : String(flow.status || "").charAt(0); }
+function sortValue(flow, key) {
+  if (key === "code") return flow.error ? 1000 : flow.status;
+  if (key === "rules") return ruleIds(flow.rules);
+  return flow[key];
+}
+function compareFlows(a, b) {
+  const x = sortValue(a, view.sortKey), y = sortValue(b, view.sortKey);
+  const missingX = x === null || x === undefined || x === "", missingY = y === null || y === undefined || y === "";
+  if (missingX !== missingY) return missingX ? 1 : -1;
+  if (missingX) return 0;
+  const result = typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y), "ru", { numeric: true });
+  return result * view.sortDir;
+}
+function groupKey(flow) { return flow.method + " " + flow.host + ":" + flow.port + flow.path.split("?")[0]; }
+function buildHeads() {
+  const heads = document.getElementById("heads");
+  heads.textContent = "";
+  for (const [key, title] of COLUMNS) {
+    const th = document.createElement("th");
+    th.className = "sortable";
+    th.textContent = title + (view.sortKey === key ? (view.sortDir > 0 ? " ▲" : " ▼") : "");
+    th.onclick = () => {
+      if (view.sortKey === key) view.sortDir = -view.sortDir; else { view.sortKey = key; view.sortDir = key === "seq" ? -1 : 1; }
+      saveView(); buildHeads(); render();
+    };
+    heads.appendChild(th);
+  }
+}
+function fillMethods() {
+  const select = document.getElementById("fMethod");
+  const methods = Array.from(new Set(lastFlows.map((flow) => flow.method))).sort();
+  if (view.method && methods.indexOf(view.method) < 0) methods.push(view.method);
+  const wanted = [""].concat(methods).join("|");
+  if (select.dataset.options !== wanted) {
+    select.dataset.options = wanted;
+    select.textContent = "";
+    for (const method of [""].concat(methods)) {
+      const option = document.createElement("option");
+      option.value = method; option.textContent = method || "все";
+      select.appendChild(option);
+    }
+  }
+  select.value = view.method;
+}
+function addRow(body, flow, cls, group) {
+  const row = body.insertRow();
+  row.className = ((cls || "") + (flow.id === selected ? " sel" : "")).trim();
+  cell(row, flow.seq);
+  cell(row, flow.method);
+  cell(row, flow.error ? "ошибка" : flow.status, flow.error ? "err" : "s" + codeClass(flow));
+  cell(row, flow.host);
+  cell(row, flow.path);
+  cell(row, flow.duration_ms);
+  cell(row, ruleIds(flow.rules));
+  if (group) {
+    const first = row.cells[0];
+    first.textContent = "";
+    const caret = document.createElement("span");
+    caret.className = "caret"; caret.textContent = expanded.has(group.key) ? "▾" : "▸";
+    first.appendChild(caret);
+    first.appendChild(document.createTextNode(text(flow.seq)));
+    const count = document.createElement("span");
+    count.className = "count"; count.textContent = "×" + group.items.length + " ";
+    row.cells[4].insertBefore(count, row.cells[4].firstChild);
+    row.className = "group" + (!expanded.has(group.key) && group.items.some((item) => item.id === selected) ? " sel" : "");
+    row.onclick = () => { if (expanded.has(group.key)) expanded.delete(group.key); else expanded.add(group.key); render(); };
+  } else {
+    row.onclick = () => showFlow(flow.id);
+  }
+}
+function fitHeads() { document.documentElement.style.setProperty("--tools-height", document.getElementById("tools").offsetHeight + "px"); }
+function render() {
+  fillMethods();
+  const flows = lastFlows.filter((flow) => (!view.method || flow.method === view.method) && (!view.code || codeClass(flow) === view.code));
+  const body = document.getElementById("rows");
+  body.textContent = "";
+  if (view.group) {
+    const groups = new Map();
+    for (const flow of flows) {
+      const key = groupKey(flow);
+      if (!groups.has(key)) groups.set(key, { key: key, items: [] });
+      groups.get(key).items.push(flow);
+    }
+    const entries = Array.from(groups.values());
+    for (const entry of entries) { entry.items.sort(compareFlows); entry.head = entry.items[0]; }
+    entries.sort((a, b) => compareFlows(a.head, b.head));
+    for (const entry of entries) {
+      if (entry.items.length === 1) { addRow(body, entry.head); continue; }
+      addRow(body, entry.head, "group", entry);
+      if (expanded.has(entry.key)) for (const flow of entry.items) addRow(body, flow, "child");
+    }
+  } else {
+    for (const flow of flows.slice().sort(compareFlows)) addRow(body, flow);
+  }
+  document.getElementById("none").hidden = lastFlows.length > 0;
+  document.getElementById("nomatch").hidden = lastFlows.length === 0 || flows.length > 0;
+  fitHeads();
+}
 async function refreshFlows() {
   let data;
   try { data = await getJson("/api/flows?limit=300"); } catch (error) { return; }
-  const body = document.getElementById("rows");
-  body.textContent = "";
-  for (const flow of data.flows) {
-    const row = body.insertRow();
-    if (flow.id === selected) row.className = "sel";
-    row.onclick = () => showFlow(flow.id);
-    cell(row, flow.seq);
-    cell(row, flow.method);
-    cell(row, flow.error ? "ошибка" : flow.status, flow.error ? "err" : "s" + String(flow.status || "").charAt(0));
-    cell(row, flow.host);
-    cell(row, flow.path);
-    cell(row, flow.duration_ms);
-    cell(row, ruleIds(flow.rules));
-  }
-  document.getElementById("none").hidden = data.flows.length > 0;
+  lastFlows = data.flows;
+  render();
+}
+function initTools() {
+  const method = document.getElementById("fMethod"), code = document.getElementById("fCode"), group = document.getElementById("fGroup");
+  code.value = view.code; group.checked = !!view.group;
+  method.onchange = () => { view.method = method.value; saveView(); render(); };
+  code.onchange = () => { view.code = code.value; saveView(); render(); };
+  group.onchange = () => { view.group = group.checked; saveView(); render(); };
+  window.addEventListener("resize", fitHeads);
 }
 function ruleIds(rules) { return (rules || []).map((rule) => rule.id).join(" "); }
 function rulesText(rules) {
@@ -121,7 +238,7 @@ async function showFlow(id) {
   section(detail, "Тело ответа", bodyText(flow.response_body));
   refreshFlows();
 }
-refreshStatus(); refreshFlows();
+initTools(); buildHeads(); refreshStatus(); refreshFlows();
 setInterval(refreshStatus, 3000);
 setInterval(refreshFlows, 2000);
 </script>
