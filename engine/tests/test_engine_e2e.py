@@ -242,8 +242,33 @@ def test_foreign_host_and_origin_are_rejected(engine):
 def test_monitor_page_served(engine):
     status, body = api_get(engine["api_port"], "/")
     assert status == 200 and b"AgentProxy" in body
-    for element in (b'id="fMethod"', b'id="fCode"', b'id="fGroup"', b'id="heads"', b'id="rows"', b'id="nomatch"'):
+    for element in (b'id="fMethod"', b'id="fCode"', b'id="fMode"', b'id="fPinned"', b'id="menu"', b'id="heads"', b'id="rows"', b'id="nomatch"'):
         assert element in body
+
+
+def test_monitor_pins_are_stored_in_data_directory(engine):
+    port = engine["api_port"]
+    assert api_get(port, "/api/monitor/pins") == (200, {"pinned_hosts": []})
+    assert api_post(port, "/api/monitor/pins", {"host": "api.example.com", "pinned": True}) == (200, {"pinned_hosts": ["api.example.com"]})
+    assert api_post(port, "/api/monitor/pins", {"host": "cdn.example.com", "pinned": True}) == (200, {"pinned_hosts": ["api.example.com", "cdn.example.com"]})
+    assert api_post(port, "/api/monitor/pins", {"host": "api.example.com", "pinned": False}) == (200, {"pinned_hosts": ["cdn.example.com"]})
+    with open(os.path.join(engine["data_dir"], "monitor.json"), encoding="utf-8") as stream:
+        assert json.load(stream) == {"pinned_hosts": ["cdn.example.com"]}
+    status, body = api_post(port, "/api/monitor/pins", {"host": "", "pinned": True})
+    assert status == 400 and "host" in body["error"]
+    status, body = api_post(port, "/api/monitor/pins", {"host": "a.example", "pinned": "yes"})
+    assert status == 400 and "pinned" in body["error"]
+    status, _ = api_post(port, "/api/monitor/pins", {"host": "x.example", "pinned": True}, headers={"Origin": "https://evil.example"})
+    assert status == 403
+    assert api_get(port, "/api/monitor/pins") == (200, {"pinned_hosts": ["cdn.example.com"]})
+
+
+def test_monitor_pins_unreadable_file_is_reported(engine):
+    os.makedirs(os.path.join(engine["data_dir"], "monitor.json"))
+    status, body = api_get(engine["api_port"], "/api/monitor/pins")
+    assert status == 500 and "monitor.json" in body["error"]
+    status, body = api_post(engine["api_port"], "/api/monitor/pins", {"host": "a.example", "pinned": True})
+    assert status == 500 and "monitor.json" in body["error"]
 
 
 def test_shutdown_requires_token(engine):

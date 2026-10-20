@@ -10,6 +10,7 @@ import tornado.web
 from . import mcp
 from .claude import hooks as claude_hooks
 from .guard import PROXIED_HEADER
+from .monitorpins import PinError, PinStorageError
 from .service import NotFound, ToolError, call_tool
 
 log = logging.getLogger("agentproxy.api")
@@ -158,6 +159,26 @@ class RulesHandler(BaseHandler):
         await self.run_tool("delete_rule", {"all": True})
 
 
+class MonitorPinsHandler(BaseHandler):
+    def get(self):
+        try:
+            self.write_json({"pinned_hosts": self.context["pins"].hosts()})
+        except PinError as error:
+            self.write_json({"error": str(error)}, 500)
+
+    def post(self):
+        try:
+            body = self.json_body()
+        except ToolError as error:
+            self.write_json({"error": str(error)}, 400)
+            return
+        try:
+            self.write_json({"pinned_hosts": self.context["pins"].set(body.get("host"), body.get("pinned"))})
+        except PinError as error:
+            log.warning("monitor pin refused: %s", error)
+            self.write_json({"error": str(error)}, 500 if isinstance(error, PinStorageError) else 400)
+
+
 class RuleHandler(BaseHandler):
     async def patch(self, rule_id):
         await self.run_body_tool("update_rule", id=rule_id)
@@ -242,6 +263,7 @@ def make_app(context):
         (r"/api/device", DeviceHandler),
         (r"/api/rules", RulesHandler),
         (r"/api/rules/([^/]+)", RuleHandler),
+        (r"/api/monitor/pins", MonitorPinsHandler),
         (r"/api/ca\.(pem|cer)", CertificateHandler),
         (r"/api/shutdown", ShutdownHandler),
         (r"/mcp", McpHandler),

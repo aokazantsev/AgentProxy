@@ -18,6 +18,7 @@ from .api import make_app
 from .claude import integration
 from .flowlog import FlowLog
 from .guard import OwnPortsGuard
+from .monitorpins import MonitorPins
 from .recorder import Recorder
 from .rewriter import Rewriter
 from .rules import MAX_FILE_BYTES, RuleSet
@@ -127,7 +128,7 @@ async def serve(current, data_dir, parent_pid):
         loop.call_soon_threadsafe(master.shutdown)
 
     token = secrets.token_hex(16)
-    context = {"service": service, "token": token, "shutdown": shutdown,
+    context = {"service": service, "token": token, "shutdown": shutdown, "pins": MonitorPins(data_dir),
                "claude_env": integration.detect(use_cli=False)}
     server = make_app(context).listen(current.api_port, address=LOCAL_HOST, xheaders=False)
     runtime_path = write_runtime(data_dir, {"token": token})

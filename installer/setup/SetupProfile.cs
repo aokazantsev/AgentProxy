@@ -46,7 +46,7 @@ namespace AgentProxy
                 {
                     Key = ResetSettingsKey,
                     Text = "Сбросить настройки",
-                    Hint = "Порты и параметры прокси вернутся к стандартным. Правила подмены, история запросов, корневой сертификат и журнал сохранятся.",
+                    Hint = "Порты и параметры прокси вернутся к стандартным, закреплённые в мониторе хосты открепятся. Правила подмены, история запросов, корневой сертификат и журнал сохранятся.",
                     Checked = false
                 },
                 new SetupOption
@@ -90,12 +90,6 @@ namespace AgentProxy
 
         public static void BeforeExtract(InstallRequest request, Action<int, string> report, List<string> notes)
         {
-            if (request.Has(ResetSettingsKey))
-            {
-                string settingsPath = Path.Combine(AppIdentity.DataDirectory, "settings.json");
-                if (File.Exists(settingsPath)) File.Delete(settingsPath);
-                SetupLog.Append("settings reset");
-            }
             InstallFolder.Mark(request.TargetDirectory);
             CrashReportConsent.Set(request.Has(CrashReportConsent.OptionKey));
             SetupLog.Append("crash reports: " + request.Has(CrashReportConsent.OptionKey));
@@ -107,6 +101,15 @@ namespace AgentProxy
                 if (problem != null) throw new InvalidOperationException("Не удалось заменить файлы движка (" + problem + "). Закрой программы, которые их держат, и повтори установку.");
             }
             SetupLog.Append("old engine and runtime removed");
+            if (request.Has(ResetSettingsKey))
+            {
+                foreach (string name in new[] { "settings.json", "monitor.json" })
+                {
+                    string path = Path.Combine(AppIdentity.DataDirectory, name);
+                    if (File.Exists(path)) File.Delete(path);
+                }
+                SetupLog.Append("settings reset");
+            }
         }
 
         public static bool IsDifferentLocation(string previous, string target)

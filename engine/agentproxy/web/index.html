@@ -36,6 +36,10 @@ tr.child td:first-child { padding-left: 22px; }
 tr.group td { font-weight: 500; }
 .caret { display: inline-block; width: 14px; color: var(--muted); }
 .count { color: var(--accent); margin-right: 4px; }
+tr.node td { max-width: none; font-weight: 500; }
+#menu { position: fixed; z-index: 10; max-width: calc(100vw - 8px); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, .25); padding: 4px 0; }
+#menu div { padding: 5px 14px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#menu div:hover { background: var(--row); }
 </style>
 </head>
 <body>
@@ -54,7 +58,10 @@ tr.group td { font-weight: 500; }
       <label>код <select id="fCode">
         <option value="">все</option><option value="2">2xx</option><option value="3">3xx</option><option value="4">4xx</option><option value="5">5xx</option><option value="err">ошибка</option>
       </select></label>
-      <label><input type="checkbox" id="fGroup"> группировать одинаковые запросы</label>
+      <label>вид <select id="fMode">
+        <option value="list">список</option><option value="group">группы одинаковых</option><option value="tree">дерево</option>
+      </select></label>
+      <label title="Закрепить хост — правая кнопка мыши по хосту"><input type="checkbox" id="fPinned"> только закреплённые</label>
     </div>
     <table>
       <colgroup><col style="width:56px"><col style="width:64px"><col style="width:52px"><col style="width:26%"><col><col style="width:60px"><col style="width:64px"></colgroup>
@@ -66,6 +73,7 @@ tr.group td { font-weight: 500; }
   </section>
   <section id="detail"><div class="empty">Выбери запрос слева.</div></section>
 </main>
+<div id="menu" hidden></div>
 <script>
 "use strict";
 let selected = null;
@@ -88,10 +96,47 @@ async function refreshStatus() {
   }
 }
 const COLUMNS = [["seq", "#"], ["method", "метод"], ["code", "код"], ["host", "хост"], ["path", "путь"], ["duration_ms", "мс"], ["rules", "правила"]];
-const view = { method: "", code: "", group: false, sortKey: "seq", sortDir: -1 };
+const view = { method: "", code: "", pinnedOnly: false, sortKey: "seq", sortDir: -1 };
+const MODES = ["list", "group", "tree"];
 const expanded = new Set();
+const treeOpen = new Set();
 let lastFlows = [];
 try { Object.assign(view, JSON.parse(localStorage.getItem("agentproxy.view") || "{}")); } catch (error) {}
+if (MODES.indexOf(view.mode) < 0) view.mode = view.group === true ? "group" : "list";
+delete view.group;
+let pinnedHosts = [];
+let pinsChanged = 0;
+const PIN = "📌 ";
+function isPinned(host) { return pinnedHosts.indexOf(host) >= 0; }
+async function togglePin(host, pin) {
+  try {
+    const response = await fetch("/api/monitor/pins", { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: host, pinned: pin }) });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || response.status);
+    pinnedHosts = data.pinned_hosts;
+    pinsChanged += 1;
+  } catch (error) {
+    window.alert("Не удалось сохранить закрепление: " + error.message);
+    return;
+  }
+  render();
+}
+function hideMenu() { document.getElementById("menu").hidden = true; }
+function showMenu(event, host) {
+  event.preventDefault();
+  const menu = document.getElementById("menu");
+  menu.textContent = "";
+  const item = document.createElement("div");
+  item.textContent = (isPinned(host) ? "Открепить " : "Закрепить ") + host;
+  item.title = item.textContent;
+  const pin = !isPinned(host);
+  item.onclick = () => { hideMenu(); togglePin(host, pin); };
+  menu.appendChild(item);
+  menu.hidden = false;
+  menu.style.left = Math.max(0, Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 4)) + "px";
+  menu.style.top = Math.max(0, Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 4)) + "px";
+}
 function saveView() { try { localStorage.setItem("agentproxy.view", JSON.stringify(view)); } catch (error) {} }
 function codeClass(flow) { return flow.error ? "err" : String(flow.status || "").charAt(0); }
 function sortValue(flow, key) {
@@ -108,6 +153,49 @@ function compareFlows(a, b) {
   return result * view.sortDir;
 }
 function groupKey(flow) { return flow.method + " " + flow.host + ":" + flow.port + flow.path.split("?")[0]; }
+function treeRoot(flow) {
+  const scheme = flow.scheme || (flow.port === 80 ? "http" : "https");
+  const standard = flow.port === (scheme === "http" ? 80 : 443);
+  return scheme + "://" + flow.host + (standard ? "" : ":" + flow.port);
+}
+function buildTree(flows) {
+  const root = { key: "", children: new Map(), flows: [] };
+  for (const flow of flows) {
+    let node = root;
+    const parts = [treeRoot(flow)].concat(flow.path.split("?")[0].split("/").filter((part) => part));
+    for (const part of parts) {
+      if (!node.children.has(part)) node.children.set(part, { key: node.key + "\n" + part, name: part, host: flow.host, children: new Map(), flows: [], count: 0, selected: false });
+      node = node.children.get(part);
+      node.count += 1;
+      if (flow.id === selected) node.selected = true;
+    }
+    node.flows.push(flow);
+  }
+  return root;
+}
+function renderTree(body, node, depth) {
+  const pinRank = (child) => depth === 0 && isPinned(child.host) ? 0 : 1;
+  const byName = (a, b) => a.localeCompare(b, "ru", { numeric: true });
+  const children = Array.from(node.children.values()).sort((a, b) => pinRank(a) - pinRank(b) || (depth === 0 ? byName(a.host, b.host) : 0) || byName(a.name, b.name));
+  for (const child of children) {
+    const open = treeOpen.has(child.key);
+    const row = body.insertRow();
+    row.className = "node" + (!open && child.selected ? " sel" : "");
+    const td = row.insertCell();
+    td.colSpan = COLUMNS.length;
+    td.style.paddingLeft = 10 + depth * 16 + "px";
+    td.title = child.name;
+    const caret = document.createElement("span");
+    caret.className = "caret"; caret.textContent = open ? "▾" : "▸";
+    const count = document.createElement("span");
+    count.className = "count"; count.textContent = " ×" + child.count;
+    td.appendChild(caret); td.appendChild(document.createTextNode((pinRank(child) ? "" : PIN) + child.name)); td.appendChild(count);
+    if (depth === 0) td.oncontextmenu = (event) => showMenu(event, child.host);
+    row.onclick = () => { if (open) treeOpen.delete(child.key); else treeOpen.add(child.key); render(); };
+    if (open) renderTree(body, child, depth + 1);
+  }
+  for (const flow of node.flows.slice().sort(compareFlows)) addRow(body, flow, "child");
+}
 function buildHeads() {
   const heads = document.getElementById("heads");
   heads.textContent = "";
@@ -144,7 +232,8 @@ function addRow(body, flow, cls, group) {
   cell(row, flow.seq);
   cell(row, flow.method);
   cell(row, flow.error ? "ошибка" : flow.status, flow.error ? "err" : "s" + codeClass(flow));
-  cell(row, flow.host);
+  cell(row, (isPinned(flow.host) ? PIN : "") + flow.host);
+  row.cells[3].oncontextmenu = (event) => showMenu(event, flow.host);
   cell(row, flow.path);
   cell(row, flow.duration_ms);
   cell(row, ruleIds(flow.rules));
@@ -167,10 +256,12 @@ function addRow(body, flow, cls, group) {
 function fitHeads() { document.documentElement.style.setProperty("--tools-height", document.getElementById("tools").offsetHeight + "px"); }
 function render() {
   fillMethods();
-  const flows = lastFlows.filter((flow) => (!view.method || flow.method === view.method) && (!view.code || codeClass(flow) === view.code));
+  const flows = lastFlows.filter((flow) => (!view.method || flow.method === view.method) && (!view.code || codeClass(flow) === view.code) && (!view.pinnedOnly || isPinned(flow.host)));
   const body = document.getElementById("rows");
   body.textContent = "";
-  if (view.group) {
+  if (view.mode === "tree") {
+    renderTree(body, buildTree(flows), 0);
+  } else if (view.mode === "group") {
     const groups = new Map();
     for (const flow of flows) {
       const key = groupKey(flow);
@@ -196,14 +287,21 @@ async function refreshFlows() {
   let data;
   try { data = await getJson("/api/flows?limit=300"); } catch (error) { return; }
   lastFlows = data.flows;
+  const changes = pinsChanged;
+  try { const pins = await getJson("/api/monitor/pins"); if (changes === pinsChanged) pinnedHosts = pins.pinned_hosts; } catch (error) {}
   render();
 }
 function initTools() {
-  const method = document.getElementById("fMethod"), code = document.getElementById("fCode"), group = document.getElementById("fGroup");
-  code.value = view.code; group.checked = !!view.group;
+  const method = document.getElementById("fMethod"), code = document.getElementById("fCode"), mode = document.getElementById("fMode"), pinned = document.getElementById("fPinned");
+  code.value = view.code; mode.value = view.mode; pinned.checked = !!view.pinnedOnly;
   method.onchange = () => { view.method = method.value; saveView(); render(); };
   code.onchange = () => { view.code = code.value; saveView(); render(); };
-  group.onchange = () => { view.group = group.checked; saveView(); render(); };
+  mode.onchange = () => { view.mode = mode.value; expanded.clear(); treeOpen.clear(); saveView(); render(); };
+  pinned.onchange = () => { view.pinnedOnly = pinned.checked; saveView(); render(); };
+  document.addEventListener("click", hideMenu);
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") hideMenu(); });
+  window.addEventListener("scroll", hideMenu, true);
+  window.addEventListener("blur", hideMenu);
   window.addEventListener("resize", fitHeads);
 }
 function ruleIds(rules) { return (rules || []).map((rule) => rule.id).join(" "); }

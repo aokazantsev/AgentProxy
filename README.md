@@ -84,7 +84,8 @@ adb reverse --remove tcp:8890
 То же доступно по HTTP: `GET /api/status`, `GET /api/flows?host=...`, `GET /api/flows/<id>`,
 `GET /api/flows/wait?path=...`, `DELETE /api/flows`, `GET`/`POST /api/rules` (`GET ?id=` — одно правило целиком), `DELETE /api/rules` (все правила),
 `PATCH`/`DELETE /api/rules/<id>`, `GET /api/log?source=engine&level=warning&lines=50`, `GET`/`POST /api/device` (прокси устройства; тело `POST` — `{"action": "enable"}`), сертификат — `/api/ca.pem`, `/api/ca.cer`. Монитор для человека —
-`http://127.0.0.1:8891/`.
+`http://127.0.0.1:8891/`: список, группы одинаковых запросов или дерево хостов и путей, сортировка по столбцам,
+фильтры по методу и коду, закрепление хостов правой кнопкой мыши (`GET`/`POST /api/monitor/pins`).
 
 ## Журналы для самопроверки
 
@@ -156,10 +157,11 @@ AgentProxy рассчитан на ПК с одним пользователем
 | `%LOCALAPPDATA%\Programs\AgentProxy` | программа, встроенный Python и движок |
 | `%LOCALAPPDATA%\AgentProxy\settings.json` | порты (`proxy_port`, `api_port`), `verify_upstream`, `max_flows`, `max_body_bytes`, `adb_path` (путь к `adb.exe` через `/`, если его нет в PATH и в Android SDK; движок читает файл при запуске — после правки «Перезапустить движок») |
 | `%LOCALAPPDATA%\AgentProxy\log.txt` | журнал программы в трее: запуск движка, коды выхода, перезапуски, обновления |
-| `%LOCALAPPDATA%\AgentProxy\engine.log` | журнал движка: итог правил по каждому запросу (хост без пути и параметров, номер записи истории), изменения и отказы правил, запросы с ошибкой, ошибки аддонов, отказы TLS, старт и стоп; одинаковые строки прореживаются |
+| `%LOCALAPPDATA%\AgentProxy\engine.log` | журнал движка: итог правил по каждому запросу (хост без пути и параметров, номер записи истории), изменения и отказы правил, отказы закрепления хостов в мониторе (без имени хоста), запросы с ошибкой, ошибки аддонов, отказы TLS, старт и стоп; одинаковые строки прореживаются |
 | `%LOCALAPPDATA%\AgentProxy\cli.log` | журнал командной строки и хука старта сессии |
 | `%LOCALAPPDATA%\AgentProxy\flows.db` | история запросов (SQLite, последние 5000) |
 | `%LOCALAPPDATA%\AgentProxy\rules.json` | правила подмены (при работающем движке руками не править) |
+| `%LOCALAPPDATA%\AgentProxy\monitor.json` | хосты, закреплённые в мониторе; «Сбросить настройки» в установщике их снимает |
 | `%LOCALAPPDATA%\AgentProxy\certs` | корневой сертификат прокси |
 
 Удаление — «Приложения» Windows или `Uninstall.exe --silent` из папки программы: снимает интеграцию с Claude Code,
