@@ -21,7 +21,9 @@ ADB_PATH_HOWTO = ("write the path with forward slashes (C:/Android/platform-tool
 
 
 class DeviceError(Exception):
-    pass
+    def __init__(self, message, kind):
+        Exception.__init__(self, message)
+        self.kind = kind
 
 
 def adb_candidates(configured, environ):
@@ -50,10 +52,11 @@ def find_adb(configured="", environ=None):
     if configured:
         raise DeviceError("adb_path in settings.json points to a missing file ({0}): ask the user to fix the path "
                           "or remove the setting to search PATH and the Android SDK; {1}".format(
-                              clean(configured, ERROR_CHARS), ADB_PATH_HOWTO))
+                              clean(configured, ERROR_CHARS), ADB_PATH_HOWTO), "adb_path points to a missing file")
     raise DeviceError("adb not found: it is not on PATH and not in ANDROID_HOME, ANDROID_SDK_ROOT or "
                       "%LOCALAPPDATA%\\Android\\Sdk\\platform-tools. Install Android platform-tools, or ask the user "
-                      "to put the full path of adb.exe into adb_path in settings.json; " + ADB_PATH_HOWTO)
+                      "to put the full path of adb.exe into adb_path in settings.json; " + ADB_PATH_HOWTO,
+                      "adb not found")
 
 
 def run_command(command, timeout=ADB_TIMEOUT_SECONDS):
@@ -62,9 +65,9 @@ def run_command(command, timeout=ADB_TIMEOUT_SECONDS):
         done = subprocess.run(command, capture_output=True, timeout=timeout, creationflags=flags)
     except subprocess.TimeoutExpired:
         raise DeviceError("adb did not answer within {0} s: the device may be asleep or the connection is stuck; "
-                          "replug it, run adb kill-server, then repeat".format(timeout))
+                          "replug it, run adb kill-server, then repeat".format(timeout), "adb timed out")
     except OSError as error:
-        raise DeviceError("adb could not be started: {0}".format(clean(error, ERROR_CHARS)))
+        raise DeviceError("adb could not be started: {0}".format(clean(error, ERROR_CHARS)), "adb could not be started")
     text = (done.stdout + done.stderr).decode("utf-8", "replace")
     return done.returncode, text
 
@@ -92,9 +95,10 @@ class DeviceControl:
 
     def apply(self, action, serial):
         if action not in ACTIONS:
-            raise DeviceError("action must be one of {0}".format(", ".join(ACTIONS)))
+            raise DeviceError("action must be one of {0}".format(", ".join(ACTIONS)), "unknown action")
         if serial is not None and not SERIAL_PATTERN.fullmatch(serial):
-            raise DeviceError("serial has an unexpected form; take it from device_proxy status or adb devices")
+            raise DeviceError("serial has an unexpected form; take it from device_proxy status or adb devices",
+                              "bad serial")
         with self.lock:
             settings = self.get_settings()
             self.adb = self.finder(settings.adb_path)
@@ -107,7 +111,7 @@ class DeviceControl:
                 if not self.is_listening():
                     raise DeviceError("the AgentProxy proxy is not listening on port {0}, the device would lose its "
                                       "connection: check proxy_status and read_log, then repeat enable "
-                                      "once proxy_status reports running".format(port))
+                                      "once proxy_status reports running".format(port), "proxy not listening")
                 self._enable(serial, port, address, had_reverse)
             elif action == "disable":
                 self._disable(serial, port)
@@ -118,16 +122,18 @@ class DeviceControl:
                                                         or had_reverse != answer["reverse_active"])
             answer["hint"] = self._hint(action, answer)
             if action != "status":
-                log.info("device proxy %s on %s: proxy %s, reverse %s", action, clean(serial, 60),
-                         answer["device_proxy"] or "off", "on" if answer["reverse_active"] else "off")
+                log.info("device proxy %s: proxy %s, reverse %s", action, self._proxy_kind(answer),
+                         "on" if answer["reverse_active"] else "off")
             return answer
 
     def _adb(self, serial, *args, check=True):
         command = [self.adb] + (["-s", serial] if serial else []) + list(args)
         code, text = self.runner(command)
         if check and code != 0:
+            step = " ".join(args[:4])
             raise DeviceError("adb {0} failed: {1}. Check the device with adb devices and repeat".format(
-                " ".join(args[:4]), clean(text, ERROR_CHARS) or "exit code {0}".format(code)))
+                step, clean(text, ERROR_CHARS) or "exit code {0}".format(code)),
+                "adb {0} failed, exit code {1}".format(step, code))
         return code, text
 
     def _pick(self, serial):
@@ -138,18 +144,26 @@ class DeviceControl:
             states = dict(devices)
             if serial not in states:
                 raise DeviceError("device {0} is not connected: pass one of the connected devices ({1}) or reconnect it".format(
-                    serial, ", ".join(name for name, _ in devices) or "none"))
+                    serial, ", ".join(name for name, _ in devices) or "none"), "device not connected")
             if states[serial] != "device":
-                raise DeviceError(self._not_ready(serial, states[serial]))
+                raise DeviceError(self._not_ready(serial, states[serial]), "device " + states[serial])
             return serial
         if len(ready) == 1:
             return ready[0]
         if not ready:
             if devices:
-                raise DeviceError("; ".join(self._not_ready(name, state) for name, state in devices))
+                raise DeviceError("; ".join(self._not_ready(name, state) for name, state in devices),
+                                  "no ready device: " + ", ".join(sorted(set(state for _, state in devices))))
             raise DeviceError("no device: connect one by USB with debugging on, start an emulator, or adb connect "
-                              "to a device on Wi-Fi, then repeat")
-        raise DeviceError("several devices are connected ({0}): pass serial".format(", ".join(ready)))
+                              "to a device on Wi-Fi, then repeat", "no device")
+        raise DeviceError("several devices are connected ({0}): pass serial".format(", ".join(ready)),
+                          "several devices")
+
+    @staticmethod
+    def _proxy_kind(state):
+        if not state["device_proxy"]:
+            return "off"
+        return "agentproxy" if state["device_proxy"] == state["expected_proxy"] else "other"
 
     @staticmethod
     def _not_ready(serial, state):
@@ -182,7 +196,8 @@ class DeviceControl:
         code, text = self._adb(serial, "reverse", "--remove", "tcp:{0}".format(port), check=False)
         if code != 0 and not any(marker in text.lower() for marker in NO_REVERSE_MARKERS):
             raise DeviceError("the device proxy is off, but adb reverse --remove failed: {0}. Run adb reverse --list "
-                              "and remove the leftover by hand".format(clean(text, ERROR_CHARS)))
+                              "and remove the leftover by hand".format(clean(text, ERROR_CHARS)),
+                              "adb reverse --remove failed, exit code {0}".format(code))
 
     def _state(self, serial, port, address):
         value = self._proxy_value(serial)

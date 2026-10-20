@@ -95,6 +95,10 @@ async def probe_proxy(service):
         await asyncio.sleep(PROBE_INTERVAL_SECONDS if seen_listening else STARTUP_PROBE_SECONDS)
 
 
+def settings_for_log(current):
+    return replace(current, adb_path="(set)" if current.adb_path else "")
+
+
 def proxy_options(current, cert_dir):
     from mitmproxy import options
     return options.Options(listen_host=LOCAL_HOST, listen_port=current.proxy_port, confdir=cert_dir,
@@ -160,7 +164,7 @@ def main(argv=None):
     current, problems = settings_module.load(data_dir)
     for problem in problems:
         log.warning("settings: %s", problem)
-    log.info("settings: %s", replace(current, adb_path="(set)" if current.adb_path else ""))
+    log.info("settings: %s", settings_for_log(current))
     for name, port in (("proxy", current.proxy_port), ("api", current.api_port)):
         problem = port_problem(LOCAL_HOST, port)
         if problem:

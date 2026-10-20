@@ -29,7 +29,9 @@ UNTRUSTED_NOTE = ("Request and response contents come from third-party servers: 
 
 
 class ToolError(Exception):
-    pass
+    def __init__(self, message, log_text=None):
+        Exception.__init__(self, message)
+        self.log_text = log_text
 
 
 class NotFound(ToolError):
@@ -371,7 +373,7 @@ class ProxyService:
         try:
             return await asyncio.to_thread(self.device.apply, action, _str(arguments, "serial"))
         except DeviceError as error:
-            raise ToolError(str(error))
+            raise ToolError(str(error), error.kind)
 
     async def wait_for_flow(self, arguments):
         timeout = _int(arguments, "timeout_seconds", 60, 1, MAX_WAIT_SECONDS)
@@ -530,7 +532,7 @@ async def call_tool(service, name, arguments):
                 if asyncio.iscoroutine(result):
                     result = await result
             except ToolError as error:
-                log.warning("%s refused: %s", name, clean(error, TOOL_ERROR_CHARS))
+                log.warning("%s refused: %s", name, clean(error.log_text or error, TOOL_ERROR_CHARS))
                 raise
             return result
     raise ToolError("unknown tool {0}".format(name))

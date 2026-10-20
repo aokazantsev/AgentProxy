@@ -85,7 +85,7 @@
   JSON), движок читает настройки при запуске. `disable` всегда пишет `:0` (прежнее значение — в `previous_proxy`, чужой прокси тоже снимается) и убирает
   reverse; «listener not found» — не ошибка. После любой операции состояние читается заново. Вызовы adb — по одному
   (блокировка), по 15 с, без окна, в `asyncio.to_thread`; `serial` — только `[A-Za-z0-9._:-]`, без ведущего дефиса.
-  Журнал: `device proxy <действие> on <serial>: …`, тел нет, вывод adb — только в отказах (до 300 символов). В тестах `DeviceControl.runner` подменяется
+  Журнал: `device proxy <действие>: proxy agentproxy|other|off, reverse on|off`; отказ — `device_proxy refused: <вид>` (`DeviceError.kind`, `ToolError.log_text`): серийных номеров, вывода adb и пути `adb_path` в журнале нет — он уходит в отчёт о сбое, а «Что уходит в отчёте» их не называет. В ответе инструмента вывод adb — до 300 символов (`ERROR_CHARS`). В тестах `DeviceControl.runner` подменяется
   фейком.
 - `claude --no-cli` в CLI — правка `~/.claude.json` без вызова `claude mcp`; нужен тестам и для ручной починки.
 

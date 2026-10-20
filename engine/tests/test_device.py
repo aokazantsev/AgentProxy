@@ -271,7 +271,7 @@ def test_tool_runs_through_service_and_logs_without_secrets(service, caplog):
         answer = asyncio.run(call_tool(service, "device_proxy", {"action": "enable"}))
     assert answer["ready"] is True
     lines = [record.getMessage() for record in caplog.records if record.name == "agentproxy.device"]
-    assert lines == ["device proxy enable on emu-1: proxy 127.0.0.1:18890, reverse on"]
+    assert lines == ["device proxy enable: proxy agentproxy, reverse on"]
 
 
 def test_tool_errors_are_tool_errors_and_logged(service, caplog):
@@ -282,6 +282,75 @@ def test_tool_errors_are_tool_errors_and_logged(service, caplog):
         with pytest.raises(ToolError, match="action is required"):
             asyncio.run(call_tool(service, "device_proxy", {}))
     assert any("device_proxy refused: no device" in record.getMessage() for record in caplog.records)
+
+
+def test_journal_keeps_serials_adb_output_and_paths_out(service, caplog):
+    adb = FakeAdb({"SECRET-SERIAL": "unauthorized", "OTHER-SERIAL": "device"})
+    adb.fail["shell settings put"] = "SecurityException at com.android.secret"
+    service.device = control(adb, port=18890)
+    with caplog.at_level(logging.INFO):
+        for arguments in ({"action": "enable", "serial": "SECRET-SERIAL"}, {"action": "enable"},
+                          {"action": "enable", "serial": "MISSING-SERIAL"}):
+            with pytest.raises(ToolError) as refused:
+                asyncio.run(call_tool(service, "device_proxy", arguments))
+            assert "SERIAL" in str(refused.value) or "SecurityException" in str(refused.value)
+        service.device = DeviceControl(lambda: Settings(adb_path="C:/Users/someone/adb.exe"), lambda: True,
+                                       runner=adb)
+        with pytest.raises(ToolError, match="someone"):
+            asyncio.run(call_tool(service, "device_proxy", {"action": "status"}))
+    journal = "\n".join(record.getMessage() for record in caplog.records)
+    assert "device_proxy refused: device unauthorized" in journal
+    assert "device_proxy refused: adb shell settings put global failed, exit code 1" in journal
+    assert "device_proxy refused: device not connected" in journal
+    assert "device_proxy refused: adb_path points to a missing file" in journal
+    for leak in ("SERIAL", "SecurityException", "someone"):
+        assert leak not in journal
+
+
+def test_journal_keeps_serials_out_of_every_device_refusal(service, caplog):
+    two_ready = FakeAdb({"SERIAL-A": "device", "SERIAL-B": "device"})
+    two_waiting = FakeAdb({"SERIAL-A": "unauthorized", "SERIAL-B": "offline"})
+    stuck_reverse = FakeAdb({"SERIAL-A": "device"})
+    stuck_reverse.reverse["SERIAL-A"] = [18890]
+    stuck_reverse.fail["reverse --remove"] = "error: closed by SERIAL-A"
+    cases = [(two_ready, {"action": "enable"}, "several devices"),
+             (two_waiting, {"action": "status"}, "no ready device: offline, unauthorized"),
+             (stuck_reverse, {"action": "disable"}, "adb reverse --remove failed, exit code 1")]
+    with caplog.at_level(logging.INFO):
+        for adb, arguments, kind in cases:
+            service.device = control(adb, port=18890)
+            with pytest.raises(ToolError, match="SERIAL"):
+                asyncio.run(call_tool(service, "device_proxy", arguments))
+            assert "device_proxy refused: " + kind in "\n".join(record.getMessage() for record in caplog.records)
+        service.device = DeviceControl(lambda: Settings(), lambda: True,
+                                       finder=lambda path: "C:/Users/someone/missing/adb.exe")
+        with pytest.raises(ToolError, match="adb could not be started: .+"):
+            asyncio.run(call_tool(service, "device_proxy", {"action": "status"}))
+    journal = "\n".join(record.getMessage() for record in caplog.records)
+    assert "device_proxy refused: adb could not be started" in journal
+    assert "SERIAL" not in journal and "someone" not in journal
+
+
+def test_settings_line_hides_the_adb_path():
+    from agentproxy.engine import settings_for_log
+    assert "someone" not in str(settings_for_log(Settings(adb_path="C:/Users/someone/adb.exe")))
+    assert settings_for_log(Settings(adb_path="C:/x/adb.exe")).adb_path == "(set)"
+    assert settings_for_log(Settings()).adb_path == ""
+
+
+def test_journal_names_offline_device_and_foreign_proxy_without_ids(service, caplog):
+    service.device = control(FakeAdb({"S-1": "offline"}), port=18890)
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ToolError):
+            asyncio.run(call_tool(service, "device_proxy", {"action": "enable", "serial": "S-1"}))
+        stubborn = FakeAdb()
+        service.device = control(lambda command: (0, "") if "put" in command else stubborn(command), port=18890)
+        stubborn.proxy["emu-1"] = "10.0.0.5:3128"
+        asyncio.run(call_tool(service, "device_proxy", {"action": "enable"}))
+    journal = "\n".join(record.getMessage() for record in caplog.records)
+    assert "device_proxy refused: device offline" in journal
+    assert "device proxy enable: proxy other, reverse on" in journal
+    assert "S-1" not in journal and "10.0.0.5" not in journal
 
 
 def test_tool_is_listed_with_required_action():
@@ -348,7 +417,7 @@ def test_status_is_not_logged_and_disable_line_has_its_format(caplog):
         tool.apply("enable", None)
         tool.apply("disable", None)
     lines = [record.getMessage() for record in caplog.records if record.name == "agentproxy.device"]
-    assert lines[-1] == "device proxy disable on emu-1: proxy off, reverse off"
+    assert lines[-1] == "device proxy disable: proxy off, reverse off"
 
 
 def api_calls(service, adb, requests):
