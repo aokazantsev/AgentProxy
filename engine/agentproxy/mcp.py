@@ -18,9 +18,10 @@ STOPPING_MESSAGE = "engine is stopping"
 
 INSTRUCTIONS = (
     "AgentProxy is a local HTTP(S) debugging proxy (Charles replacement) controlled by you. "
-    "Devices and browsers send traffic through it; every finished request is recorded. "
+    "Devices and browsers send traffic through it; every finished request is recorded, SSE and WebSocket streams when they open. "
     "Start with proxy_status. Use list_flows/get_flow to inspect traffic and wait_for_flow to wait for a "
-    "request the user is about to trigger. add_rule answers or changes requests (map local, rewrite, error, "
+    "request the user is about to trigger. SSE and WebSocket streams are flows with events: list_events, "
+    "wait_for_event and, for WebSocket, send_event. add_rule answers or changes requests (map local, rewrite, error, "
     "delay, drop); list_rules shows the rules, delete them when done. "
     "When something does not go as planned, read_log first: it shows what AgentProxy itself did. "
     "device_proxy routes an Android device through AgentProxy over adb (and takes it off). The agentproxy skill "

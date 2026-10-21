@@ -18,6 +18,7 @@ from .api import make_app
 from .claude import integration
 from .flowlog import FlowLog
 from .guard import OwnPortsGuard
+from .injector import WebSocketInjector
 from .monitorpins import MonitorPins
 from .recorder import Recorder
 from .rewriter import Rewriter
@@ -103,7 +104,7 @@ def settings_for_log(current):
 def proxy_options(current, cert_dir):
     from mitmproxy import options
     return options.Options(listen_host=LOCAL_HOST, listen_port=current.proxy_port, confdir=cert_dir,
-                           ssl_insecure=not current.verify_upstream, websocket=False)
+                           ssl_insecure=not current.verify_upstream, websocket=True)
 
 
 def create_master(current, cert_dir):
@@ -121,7 +122,9 @@ async def serve(current, data_dir, parent_pid):
     master = create_master(current, cert_dir)
     master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
     master.addons.add(Rewriter(rules))
-    master.addons.add(Recorder(store, current.max_body_bytes, FlowLog()))
+    recorder = Recorder(store, current.max_body_bytes, FlowLog())
+    master.addons.add(recorder)
+    service.injector = WebSocketInjector(master, recorder)
     loop = asyncio.get_running_loop()
 
     def shutdown():

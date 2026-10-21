@@ -56,7 +56,7 @@ tr.node td { max-width: none; font-weight: 500; }
     <div id="tools">
       <label>метод <select id="fMethod"><option value="">все</option></select></label>
       <label>код <select id="fCode">
-        <option value="">все</option><option value="2">2xx</option><option value="3">3xx</option><option value="4">4xx</option><option value="5">5xx</option><option value="err">ошибка</option>
+        <option value="">все</option><option value="1">1xx</option><option value="2">2xx</option><option value="3">3xx</option><option value="4">4xx</option><option value="5">5xx</option><option value="err">ошибка</option>
       </select></label>
       <label>вид <select id="fMode">
         <option value="list">список</option><option value="group">группы одинаковых</option><option value="tree">дерево</option>
@@ -64,7 +64,7 @@ tr.node td { max-width: none; font-weight: 500; }
       <label title="Закрепить хост — правая кнопка мыши по хосту"><input type="checkbox" id="fPinned"> только закреплённые</label>
     </div>
     <table>
-      <colgroup><col style="width:56px"><col style="width:64px"><col style="width:52px"><col style="width:26%"><col><col style="width:60px"><col style="width:64px"></colgroup>
+      <colgroup><col style="width:56px"><col style="width:72px"><col style="width:52px"><col style="width:26%"><col><col style="width:76px"><col style="width:64px"><col style="width:64px"></colgroup>
       <thead><tr id="heads"></tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -77,6 +77,8 @@ tr.node td { max-width: none; font-weight: 500; }
 <script>
 "use strict";
 let selected = null;
+let stream = null;
+const EVENT_LINES = 5000;
 const text = (value) => value === null || value === undefined ? "" : String(value);
 function cell(row, value, cls) { const td = row.insertCell(); td.textContent = text(value); td.title = text(value); if (cls) td.className = cls; }
 async function getJson(url) { const response = await fetch(url, { cache: "no-store" }); if (!response.ok) throw new Error(response.status); return response.json(); }
@@ -95,7 +97,7 @@ async function refreshStatus() {
     document.getElementById("state").textContent = "движок не отвечает";
   }
 }
-const COLUMNS = [["seq", "#"], ["method", "метод"], ["code", "код"], ["host", "хост"], ["path", "путь"], ["duration_ms", "мс"], ["rules", "правила"]];
+const COLUMNS = [["seq", "#"], ["method", "метод"], ["code", "код"], ["host", "хост"], ["path", "путь"], ["duration_ms", "мс"], ["event_count", "соб."], ["rules", "правила"]];
 const view = { method: "", code: "", pinnedOnly: false, sortKey: "seq", sortDir: -1 };
 const MODES = ["list", "group", "tree"];
 const expanded = new Set();
@@ -136,6 +138,10 @@ function showMenu(event, host) {
   menu.hidden = false;
   menu.style.left = Math.max(0, Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 4)) + "px";
   menu.style.top = Math.max(0, Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 4)) + "px";
+}
+function kindLabel(flow) {
+  if (!flow.kind) return flow.method;
+  return (flow.kind === "sse" ? "SSE" : "WS") + (flow.open ? " ●" : "");
 }
 function saveView() { try { localStorage.setItem("agentproxy.view", JSON.stringify(view)); } catch (error) {} }
 function codeClass(flow) { return flow.error ? "err" : String(flow.status || "").charAt(0); }
@@ -230,12 +236,14 @@ function addRow(body, flow, cls, group) {
   const row = body.insertRow();
   row.className = ((cls || "") + (flow.id === selected ? " sel" : "")).trim();
   cell(row, flow.seq);
-  cell(row, flow.method);
-  cell(row, flow.error ? "ошибка" : flow.status, flow.error ? "err" : "s" + codeClass(flow));
+  cell(row, kindLabel(flow));
+  cell(row, flow.error && !(flow.kind && flow.status) ? "ошибка" : flow.status, flow.error ? "err" : "s" + codeClass(flow));
+  if (flow.error) row.cells[2].title = flow.error;
   cell(row, (isPinned(flow.host) ? PIN : "") + flow.host);
   row.cells[3].oncontextmenu = (event) => showMenu(event, flow.host);
   cell(row, flow.path);
-  cell(row, flow.duration_ms);
+  cell(row, flow.open ? "открыт" : flow.duration_ms);
+  cell(row, flow.event_count);
   cell(row, ruleIds(flow.rules));
   if (group) {
     const first = row.cells[0];
@@ -333,12 +341,58 @@ async function showFlow(id) {
   section(detail, "Заголовки запроса", headersText(flow.request_headers));
   section(detail, "Тело запроса", bodyText(flow.request_body));
   section(detail, "Заголовки ответа", headersText(flow.response_headers));
-  section(detail, "Тело ответа", bodyText(flow.response_body));
+  if (flow.kind) {
+    section(detail, "События", "");
+    stream = { id: flow.id, last: 0, box: detail.lastChild, open: true, busy: false };
+    stream.box.textContent = "";
+    stream.box.style.maxHeight = "60vh";
+    stream.box.style.overflow = "auto";
+    pollEvents();
+  } else {
+    stream = null;
+    section(detail, "Тело ответа", bodyText(flow.response_body));
+  }
   refreshFlows();
+}
+function eventLine(event) {
+  const head = "#" + event.n + " +" + (event.ms / 1000).toFixed(2) + "с " + (event.direction === "outgoing" ? "→" : "←") + " " + event.type +
+    (event.name ? " " + event.name : "") + (event.id ? " id=" + event.id : "") + (event.note ? " (" + event.note + ")" : "");
+  const data = event.data ? (event.encoding === "base64" ? "[base64] " : "") + event.data + (event.truncated ? " … обрезано, размер " + event.size : "") : "";
+  return data ? head + "\n" + data : head;
+}
+async function pollEvents() {
+  const current = stream;
+  if (!current || current.busy || !current.open) return;
+  current.busy = true;
+  try {
+    const answer = await getJson("/api/events?flow=" + encodeURIComponent(current.id) + "&since_n=" + current.last + "&limit=500&max_data_chars=4000");
+    if (stream !== current) return;
+    const box = current.box;
+    const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+    for (const event of answer.events) {
+      const line = document.createElement("div");
+      line.textContent = eventLine(event);
+      line.style.whiteSpace = "pre-wrap";
+      line.style.wordBreak = "break-all";
+      line.style.marginBottom = "6px";
+      line.style.color = event.direction === "outgoing" ? "var(--accent)" : "var(--fg)";
+      box.appendChild(line);
+      current.last = event.n;
+    }
+    while (box.childNodes.length > EVENT_LINES) box.removeChild(box.firstChild);
+    if (!box.firstChild && !answer.flow.open) box.textContent = "Событий не было.";
+    if (atEnd) box.scrollTop = box.scrollHeight;
+    if (!answer.flow.open && answer.events.length < 500) current.open = false;
+  } catch (error) {
+    if (error.message === "404" && stream === current) { current.open = false; current.box.appendChild(document.createTextNode("Запись удалена из истории.")); }
+  } finally {
+    current.busy = false;
+  }
 }
 initTools(); buildHeads(); refreshStatus(); refreshFlows();
 setInterval(refreshStatus, 3000);
 setInterval(refreshFlows, 2000);
+setInterval(pollEvents, 1000);
 </script>
 </body>
 </html>

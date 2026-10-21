@@ -4,12 +4,43 @@ import uuid
 
 from .guard import OWN_PORT_MARK
 from .rules import APPLIED_MARK, NO_REQUEST_STREAM_MARK, NO_RESPONSE_STREAM_MARK
-from .store import FlowRecord
-from .streamtap import StreamTap, should_stream, should_stream_request
+from .sse import MAX_EVENT_BYTES, SseTap
+from .store import ENGINE_STOPPED, FlowRecord
+from .streamtap import NO_BODY_STATUSES, StreamTap, should_stream, should_stream_request
 
 log = logging.getLogger("agentproxy.recorder")
 
 TLS_CLIENT_ERROR = "TLS handshake with the client failed: {0}"
+STREAM_DONE_MARK = "agentproxy_stream_done"
+INCOMING = "incoming"
+OUTGOING = "outgoing"
+MAX_EVENTS_PER_SECOND = 500
+MAX_BYTES_PER_SECOND = 4 * 1024 * 1024
+SKIPPED_NOTE = ("{0} events not recorded: the stream sent more than {1} events or {2} MB per second (they still reached "
+                "the other side)")
+LIMIT_NOTE = ("more than {0} events or {1} MB this second: the rest of the second is not recorded, a note with their count "
+              "follows")
+
+
+def is_event_stream(request, response):
+    if request.method == "HEAD" or response.status_code in NO_BODY_STATUSES:
+        return False
+    return "text/event-stream" in response.headers.get("content-type", "").lower()
+
+
+def is_websocket_handshake(flow):
+    return flow.response.status_code == 101 and getattr(flow, "websocket", None) is not None
+
+
+class LiveStream:
+    def __init__(self, seq, flow=None):
+        self.seq = seq
+        self.tap = None
+        self.flow = flow
+        self.window = float("-inf")
+        self.count = 0
+        self.bytes = 0
+        self.skipped = 0
 
 
 def _headers(headers):
@@ -97,6 +128,7 @@ class Recorder:
         self.body_limit = body_limit
         self.taps = {}
         self.request_taps = {}
+        self.streams = {}
 
     def requestheaders(self, flow):
         if flow.metadata.get(NO_REQUEST_STREAM_MARK):
@@ -110,6 +142,8 @@ class Recorder:
     def responseheaders(self, flow):
         if flow.metadata.get(NO_RESPONSE_STREAM_MARK):
             return
+        if is_event_stream(flow.request, flow.response) and self._open_event_stream(flow):
+            return
         headers = flow.response.headers
         if should_stream(flow.request.method, flow.response.status_code, headers.get("content-type"),
                          headers.get("content-length"), self.body_limit):
@@ -121,7 +155,40 @@ class Recorder:
         flow.messages.clear()
 
     def response(self, flow):
+        if is_websocket_handshake(flow) and self._open_stream(flow, "websocket") is not None:
+            return
         self._save(flow)
+
+    def websocket_message(self, flow):
+        messages = list(flow.websocket.messages)
+        flow.websocket.messages.clear()
+        live = self.streams.get(flow.id)
+        if live is None:
+            return
+        for message in messages:
+            if not self._admit(live, len(message.content)):
+                continue
+            notes = [name for name, active in (("injected", message.injected), ("dropped", message.dropped)) if active]
+            self._add_event(live, OUTGOING if message.from_client else INCOMING,
+                            "text" if message.is_text else "binary", message.content, note=", ".join(notes) or None,
+                            timestamp=message.timestamp)
+
+    def websocket_end(self, flow):
+        live = self.streams.get(flow.id)
+        if live is not None:
+            socket = flow.websocket
+            code = socket.close_code
+            self._report_skipped(live)
+            self._add_event(live, OUTGOING if socket.closed_by_client else INCOMING, "close",
+                            (socket.close_reason or "").encode("utf-8", "replace"),
+                            name=str(code) if code is not None else None, timestamp=socket.timestamp_end)
+        self._save(flow)
+
+    def done(self):
+        try:
+            self.store.finish_open(ENGINE_STOPPED)
+        except Exception:
+            log.exception("open streams not closed")
 
     def error(self, flow):
         if flow.request is not None:
@@ -149,16 +216,123 @@ class Recorder:
             except Exception:
                 log.exception("TLS failure not logged")
 
+    def _open_event_stream(self, flow):
+        live = self._open_stream(flow, "sse")
+        if live is None:
+            return False
+        live.tap = SseTap(flow.response.headers.get("content-encoding"),
+                          lambda event: self._sse_event(live, event),
+                          lambda reason: self._add_event(live, INCOMING, "note", b"", note=reason))
+        flow.response.stream = live.tap
+        return True
+
+    def _open_stream(self, flow, kind):
+        if flow.metadata.get(OWN_PORT_MARK):
+            return None
+        try:
+            record = build_record(flow, self.body_limit, request_tap=self.request_taps.get(flow.id))
+            record.kind = kind
+            record.open = True
+            record.duration_ms = None
+            record.response_body = b""
+            record.response_body_size = 0
+            seq = self.store.insert(record)
+        except Exception:
+            log.exception("flow %s not recorded", flow.id)
+            return None
+        if seq is None:
+            return None
+        live = LiveStream(seq, flow if kind == "websocket" else None)
+        self.streams[flow.id] = live
+        return live
+
+    def live_websocket(self, seq):
+        for live in self.streams.values():
+            if live.seq == seq and live.flow is not None:
+                return live.flow
+        return None
+
+    def _admit(self, live, size):
+        now = time.monotonic()
+        if now - live.window >= 1:
+            self._report_skipped(live)
+            live.window = now
+            live.count = 0
+            live.bytes = 0
+        stored = min(size, MAX_EVENT_BYTES)
+        if live.count >= MAX_EVENTS_PER_SECOND or (live.count and live.bytes + stored > MAX_BYTES_PER_SECOND):
+            if not live.skipped:
+                self._add_event(live, INCOMING, "note", b"", note=LIMIT_NOTE.format(
+                    MAX_EVENTS_PER_SECOND, MAX_BYTES_PER_SECOND // (1024 * 1024)))
+            live.skipped += 1
+            return False
+        live.count += 1
+        live.bytes += stored
+        return True
+
+    def _report_skipped(self, live):
+        if live.skipped:
+            self._add_event(live, INCOMING, "note", b"", note=SKIPPED_NOTE.format(
+                live.skipped, MAX_EVENTS_PER_SECOND, MAX_BYTES_PER_SECOND // (1024 * 1024)))
+            live.skipped = 0
+
+    def _add_event(self, live, direction, kind, data, **fields):
+        try:
+            self.store.add_event(live.seq, direction, kind, data, limit=MAX_EVENT_BYTES, **fields)
+        except Exception:
+            log.exception("event of stream %s not recorded", live.seq)
+
+    def _sse_event(self, live, event):
+        if not self._admit(live, len(event.data)):
+            return
+        notes = []
+        if event.retry is not None:
+            notes.append("retry {0}".format(event.retry))
+        if event.incomplete:
+            notes.append("incomplete at the end of the stream")
+        self._add_event(live, INCOMING, event.kind, event.data, size=event.size, name=event.name,
+                        event_id=event.event_id, truncated=event.truncated, note=", ".join(notes) or None)
+
+    def _finish_stream(self, flow, live, error, request_tap):
+        if live.tap is not None:
+            try:
+                live.tap.finish()
+            except Exception:
+                log.exception("stream %s not closed cleanly", flow.id)
+        self._report_skipped(live)
+        record = build_record(flow, self.body_limit, error=error, request_tap=request_tap)
+        record.open = False
+        record.response_body = b""
+        record.response_body_size = live.tap.wire_size if live.tap is not None else 0
+        socket = getattr(flow, "websocket", None)
+        ended = socket.timestamp_end if socket is not None and socket.timestamp_end else time.time()
+        if flow.request.timestamp_start:
+            record.duration_ms = int((ended - flow.request.timestamp_start) * 1000)
+        flow.metadata[STREAM_DONE_MARK] = True
+        return self.store.finish(record)
+
     def _save(self, flow, error=None):
         tap = self.taps.pop(flow.id, None)
         request_tap = self.request_taps.pop(flow.id, None)
-        if flow.metadata.get(OWN_PORT_MARK):
+        live = self.streams.pop(flow.id, None)
+        if flow.metadata.get(OWN_PORT_MARK) or flow.metadata.get(STREAM_DONE_MARK):
+            return
+        if live is not None:
+            try:
+                seq = self._finish_stream(flow, live, error, request_tap)
+            except Exception:
+                log.exception("flow %s not recorded", flow.id)
+                return
+            self._log_saved(flow, seq, error)
             return
         try:
             seq = self.store.insert(build_record(flow, self.body_limit, tap, error, request_tap))
         except Exception:
             log.exception("flow %s not recorded", flow.id)
             return
+        self._log_saved(flow, seq, error)
+
+    def _log_saved(self, flow, seq, error):
         if self.flow_log is not None:
             try:
                 self.flow_log.saved(flow, seq, error)

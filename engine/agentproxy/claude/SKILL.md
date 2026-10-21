@@ -19,17 +19,28 @@ description: Работа с AgentProxy — локальным HTTP(S)-прок�
 
 ## Инструменты MCP
 
-`proxy_status`, `list_flows`, `get_flow`, `wait_for_flow`, `clear_flows` — история запросов; `add_rule`, `list_rules`,
+`proxy_status`, `list_flows`, `get_flow`, `wait_for_flow`, `clear_flows` — история запросов; `list_events`, `wait_for_event`,
+`send_event` — потоки, раздел ниже; `add_rule`, `list_rules`,
 `update_rule`, `delete_rule` — правила подмены, раздел ниже; `read_log` — журналы AgentProxy, раздел «Сначала журнал»; `device_proxy` — прокси устройства. Назначение, параметры и фильтры — в схемах инструментов.
 
 MCP недоступен (сессия началась до установки) — те же данные отдаёт HTTP API. В PowerShell — `curl.exe`;
-адрес с `&` — в двойных кавычках; тело `POST`/`PATCH` для `/api/rules` — файлом в UTF-8 через
+адрес с `&` — в двойных кавычках; тело `POST`/`PATCH` для `/api/rules` и `/api/events/send` — файлом в UTF-8 через
 `--data-binary "@rule.json"` (в Git Bash `-d` портит кириллицу, в PowerShell `-d` портит любой JSON). `curl -s http://127.0.0.1:{{API_PORT}}/api/status`, `"/api/flows?host=...&limit=20"`, `/api/flows/<id>` (`?raw=true` — как `raw` у `get_flow`), `/api/flows/wait?...` — как `wait_for_flow`,
-`DELETE /api/flows` — как `clear_flows`; правила —
+`DELETE /api/flows` — как `clear_flows`; потоки — `/api/events?flow=...` и `/api/events/wait` как `list_events` и `wait_for_event`, `POST /api/events/send` как `send_event`; правила —
 `GET`/`POST /api/rules` (`GET ?id=<id>` — как `list_rules` с `id`; тело `POST` — те же поля, что у `add_rule`), `DELETE /api/rules` — удалить **все**, `GET /api/log?source=engine&level=warning&lines=50` — как `read_log`,
 `PATCH`/`DELETE /api/rules/<id>` — одно. Схемы инструментов с описанием полей — метод MCP `tools/list`: в Git Bash
 `curl -s -X POST http://127.0.0.1:{{API_PORT}}/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`, в PowerShell
 `(Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://127.0.0.1:{{API_PORT}}/mcp -Body '{"jsonrpc":"2.0","id":1,"method":"tools/list"}').Content`.
+
+## Потоки: SSE и WebSocket
+
+Поток — запись истории с момента открытия (`list_flows`: `kind` `sse` или `websocket`, `open`), тела у него нет, сообщения —
+события. Читать `list_events`, ждать `wait_for_event` (без `flow` — любой поток под фильтры, и открывшийся позже), слать в
+открытый WebSocket `send_event`; реакцию ждать `wait_for_event` с `since_n` = `events_before` и обратным `direction`. Ответ ожидания
+с `closed` — поток закончился. У SSE, закрытого приложением, тоже бывает `error` (HTTP/1 — «Client disconnected.»): кто
+закрыл, не говорят ни ошибка, ни события; «incomplete…» в `note` — событие оборвано. После `note` «events not read…»
+события потока не пишутся.
+Правила подмены на события не действуют; ответ правила `respond` с `text/event-stream` — обычный запрос с телом, без событий.
 
 ## Правила подмены (вместо map local и rewrite в Charles)
 
@@ -59,7 +70,7 @@ MCP недоступен (сессия началась до установки)
 Строки прореживаются (20, затем каждая 50-я), успешный запрос без правил строки не даёт: по запросу смотреть
 историю. Запрос есть, а правила в его `rules` нет — условие, `times` или порядок. Запроса нет (`list_flows` по хосту,
 с `CONNECT`) и нет `not recorded`: соседние запросы приложения видны — кэш клиента, пиннинг хоста или запрос
-ещё не закончен (поток, долгий ответ) — `{{SKILL_DIR}}\rules.md`, «Почему правило не
+ещё не закончен (долгий ответ) — `{{SKILL_DIR}}\rules.md`, «Почему правило не
 сработало»; не видно ничего — таблица ниже.
 
 ## Подключить Android-устройство (USB, Wi-Fi-отладка, эмулятор)

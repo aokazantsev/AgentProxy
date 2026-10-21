@@ -441,16 +441,24 @@ def start_streaming_server():
     return server
 
 
-def test_server_sent_events_pass_through_while_open_and_are_recorded(engine):
+def test_server_sent_events_are_recorded_as_events_while_the_stream_is_open(engine):
     target = start_streaming_server()
     response = proxied_opener(engine).open("http://127.0.0.1:{0}/events".format(target.server_port), timeout=10)
     assert response.readline() == b"data: first\n"
+
+    def opened():
+        flows = api_get(engine["api_port"], "/api/flows?path=/events")[1]["flows"]
+        return flows[0] if flows and flows[0].get("event_count") else None
+
+    flow = wait_until(opened, 10)
+    assert flow["kind"] == "sse" and flow["open"] is True and flow["status"] == 200
     StreamingHandler.release.set()
-    rest = response.read()
-    assert b"data: second" in rest
-    status, listing = api_get(engine["api_port"], "/api/flows?path=/events")
-    flow = api_get(engine["api_port"], "/api/flows/" + listing["flows"][0]["id"])[1]
-    assert "data: first" in flow["response_body"]["content"] and "data: second" in flow["response_body"]["content"]
+    assert b"data: second" in response.read()
+    closed = wait_until(lambda: not api_get(engine["api_port"], "/api/flows/" + flow["id"])[1]["open"], 10)
+    assert closed
+    events = api_get(engine["api_port"], "/api/events?flow=" + flow["id"])[1]["events"]
+    assert [event["data"] for event in events] == ["first", "second"]
+    assert all(event["direction"] == "incoming" and event["type"] == "event" for event in events)
     target.shutdown()
 
 
@@ -695,7 +703,8 @@ def test_compressed_stream_is_recorded_decoded(engine):
     proxied_opener(engine).open(request, timeout=10).read()
     listing = api_get(engine["api_port"], "/api/flows?path=/gzip-events")[1]
     flow = api_get(engine["api_port"], "/api/flows/" + listing["flows"][0]["id"])[1]
-    assert flow["response_body"]["content"] == "data: packed\n\n"
+    events = api_get(engine["api_port"], "/api/events?flow=" + flow["id"])[1]["events"]
+    assert [event["data"] for event in events] == ["packed"]
     target.shutdown()
 
 

@@ -81,14 +81,16 @@ def test_odd_next_id_in_file_numbers_rules_from_one(tmp_path, next_id):
 @pytest.mark.parametrize("rule", [{"status": 500}, {"response_headers": {"X-Debug": "1"}}])
 @pytest.mark.parametrize("headers, limit", [({"Content-Type": "text/event-stream"}, 1024),
                                             ({"Content-Length": "5000"}, 10)])
-def test_rewrite_without_body_changes_keeps_the_response_streaming(rules, rule, headers, limit):
+def test_rewrite_without_body_changes_keeps_the_response_streaming(rules, store, rule, headers, limit):
     from agentproxy.recorder import Recorder
     from agentproxy.rules import NO_REQUEST_STREAM_MARK, NO_RESPONSE_STREAM_MARK
+    from agentproxy.sse import SseTap
+    from agentproxy.store import FlowFilter
     from agentproxy.streamtap import StreamTap
     from test_rewriter import run, server_response
     rules.add(dict({"action": "rewrite", "path": "/path"}, **rule))
     flow = tflow.tflow()
-    recorder = Recorder(store=None, body_limit=limit)
+    recorder = Recorder(store=store, body_limit=limit)
     rewriter = Rewriter(rules)
     run(rewriter.requestheaders(flow))
     recorder.requestheaders(flow)
@@ -98,7 +100,11 @@ def test_rewrite_without_body_changes_keeps_the_response_streaming(rules, rule, 
     flow.response = response
     rewriter.responseheaders(flow)
     recorder.responseheaders(flow)
-    assert isinstance(flow.response.stream, StreamTap)
+    event_stream = "Content-Type" in headers
+    assert isinstance(flow.response.stream, SseTap if event_stream else StreamTap)
+    if event_stream:
+        opened = store.query(FlowFilter(kind="sse"), 1)[0]
+        assert opened["open"] is True and [entry["id"] for entry in opened["rules"]] == ["r1"]
     assert NO_RESPONSE_STREAM_MARK not in flow.metadata and NO_REQUEST_STREAM_MARK not in flow.metadata
     assert [entry["id"] for entry in flow.metadata[APPLIED_MARK]] == ["r1"]
 

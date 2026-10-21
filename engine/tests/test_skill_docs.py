@@ -3,16 +3,16 @@ import re
 
 from agentproxy import rules, settings
 from agentproxy.claude import integration
-from agentproxy.service import RULE_PROPERTIES, RULES_REFERENCE, TOOLS
+from agentproxy.service import FLOW_KINDS, RULE_PROPERTIES, RULES_REFERENCE, TOOLS
 
 ENGINE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agentproxy")
 CLAUDE_DIR = os.path.join(ENGINE_DIR, "claude")
-SKILL_MAX_CHARS = 8500
+SKILL_MAX_CHARS = 9500
 RULES_MAX_CHARS = 10000
 COPY_WINDOW_WORDS = 6
 ANSWER_FIELDS = {
     "rewriter.py": ("skipped", "replaced", "not_found", "error"),
-    "service.py": ("history_matches", "hint", "counts"),
+    "service.py": ("history_matches", "hint", "counts", "events_before", "closed", "note"),
     "rules.py": ("problem",),
     "bodies.py": ("truncated",),
     "settings.py": ("max_body_bytes",),
@@ -32,7 +32,7 @@ def documents():
 
 
 def schema_names():
-    names = {tool["name"] for tool in TOOLS} | set(RULE_PROPERTIES["action"]["enum"])
+    names = {tool["name"] for tool in TOOLS} | set(RULE_PROPERTIES["action"]["enum"]) | set(FLOW_KINDS)
     for tool in TOOLS:
         names |= set(tool["inputSchema"]["properties"])
     return names

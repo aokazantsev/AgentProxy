@@ -54,11 +54,11 @@ def test_bom_is_accepted(tmp_path):
     assert current.proxy_port == 9001
 
 
-def test_proxy_passes_websocket_through_as_raw_tcp(tmp_path):
+def test_proxy_reads_websocket_messages_and_passes_other_tcp_raw(tmp_path):
     from agentproxy.engine import proxy_options
     from agentproxy.settings import Settings
     opts = proxy_options(Settings(), str(tmp_path))
-    assert opts.websocket is False
+    assert opts.websocket is True
     assert opts.rawtcp is True
     assert opts.listen_host == "127.0.0.1"
     assert opts.ssl_insecure is False

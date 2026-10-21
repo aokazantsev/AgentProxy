@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
 
 log = logging.getLogger("agentproxy.store")
@@ -12,6 +13,16 @@ MAX_HISTORY_BYTES = 512 * 1024 * 1024
 PRUNE_EVERY_BYTES = 64 * 1024 * 1024
 WAL_LIMIT_BYTES = 16 * 1024 * 1024
 COUNTED_FIELDS = ("url", "path", "request_headers", "response_headers", "request_body", "response_body")
+ENGINE_STOPPED = "engine stopped while the stream was open"
+MAX_EVENTS_PER_FLOW = 5000
+EVENTS_BEFORE_TRIM = MAX_EVENTS_PER_FLOW + MAX_EVENTS_PER_FLOW // 10
+MAX_STREAM_EVENT_BYTES = 64 * 1024 * 1024
+DELETE_CHUNK = 500
+EVENT_OVERHEAD_BYTES = 64
+STREAM_COLUMNS = ("kind", "open", "event_count")
+FINISH_COLUMNS = ("duration_ms", "status", "reason", "error", "response_headers", "response_body",
+                  "response_body_size", "response_content_type", "rules", "stored_bytes", "http_version", "open")
+EVENT_COLUMNS = ("n", "ts", "direction", "type", "name", "event_id", "size", "truncated", "note", "data")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -39,12 +50,41 @@ CREATE TABLE IF NOT EXISTS flows (
     response_body_size INTEGER NOT NULL DEFAULT 0,
     response_content_type TEXT,
     client TEXT,
-    rules TEXT
+    rules TEXT,
+    kind TEXT NOT NULL DEFAULT 'http',
+    open INTEGER NOT NULL DEFAULT 0,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    events_bytes INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    flow_seq INTEGER NOT NULL,
+    n INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    direction TEXT NOT NULL,
+    type TEXT NOT NULL,
+    name TEXT,
+    event_id TEXT,
+    size INTEGER NOT NULL DEFAULT 0,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    data BLOB,
+    stored INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS events_by_flow ON events (flow_seq, n);
 """
 
+ADDED_COLUMNS = (
+    ("rules", "TEXT"),
+    ("kind", "TEXT NOT NULL DEFAULT 'http'"),
+    ("open", "INTEGER NOT NULL DEFAULT 0"),
+    ("event_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("events_bytes", "INTEGER NOT NULL DEFAULT 0"),
+)
+
 SUMMARY_COLUMNS = ("seq", "id", "started", "duration_ms", "method", "scheme", "host", "port", "path", "url",
-                   "status", "error", "request_body_size", "response_body_size", "response_content_type", "rules")
+                   "status", "error", "request_body_size", "response_body_size", "response_content_type", "rules",
+                   "kind", "open", "event_count")
 
 
 @dataclass
@@ -72,6 +112,8 @@ class FlowRecord:
     response_content_type: str = ""
     client: str = ""
     rules: list = field(default_factory=list)
+    kind: str = "http"
+    open: bool = False
 
 
 @dataclass(frozen=True)
@@ -84,6 +126,8 @@ class FlowFilter:
     since_seq: int = None
     text: str = None
     rule: str = None
+    kind: str = None
+    open_only: bool = False
 
     def matches(self, record):
         if self.host and self.host.lower() not in record["host"].lower():
@@ -102,7 +146,31 @@ class FlowFilter:
             return False
         if self.rule and not any(entry.get("id") == self.rule for entry in record["rules"]):
             return False
+        if self.kind and self.kind != record.get("kind", "http"):
+            return False
+        if self.open_only and not record.get("open"):
+            return False
         return True
+
+
+@dataclass(frozen=True)
+class EventFilter:
+    direction: str = None
+    type: str = None
+    name: str = None
+    contains: str = None
+    since_n: int = None
+
+    def matches(self, event):
+        if self.direction and self.direction != event["direction"]:
+            return False
+        if self.type and self.type != event["type"]:
+            return False
+        if self.name and self.name != event["name"]:
+            return False
+        if self.since_n is not None and event["n"] <= self.since_n:
+            return False
+        return not self.contains or _has_text(event["data"], self.contains.lower())
 
 
 def _storable(text):
@@ -111,6 +179,10 @@ def _storable(text):
 
 def _text_lower(text):
     return text.lower() if isinstance(text, str) else text
+
+
+def _has_text(data, needle):
+    return needle in (data or b"").decode("utf-8", "replace").lower()
 
 
 def _rules(text):
@@ -124,6 +196,18 @@ def _rules(text):
 def _row(row):
     result = dict(row)
     result["rules"] = _rules(result["rules"])
+    result.pop("events_bytes", None)
+    if result["kind"] == "http":
+        for name in STREAM_COLUMNS:
+            del result[name]
+    else:
+        result["open"] = bool(result["open"])
+    return result
+
+
+def _event(row):
+    result = {name: row[name] for name in EVENT_COLUMNS}
+    result["truncated"] = bool(result["truncated"])
     return result
 
 
@@ -148,6 +232,7 @@ class FlowStore:
             self._db = self._open(path)
         self._closed = False
         self._listeners = []
+        self._event_listeners = []
         self._inserted_since_prune = 0
         self._bytes_since_prune = 0
 
@@ -157,6 +242,7 @@ class FlowStore:
         try:
             db.row_factory = sqlite3.Row
             db.create_function("text_lower", 1, _text_lower, deterministic=True)
+            db.create_function("has_text", 2, _has_text, deterministic=True)
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
             db.execute("PRAGMA journal_size_limit={0}".format(WAL_LIMIT_BYTES))
@@ -164,8 +250,11 @@ class FlowStore:
                 db.execute("DROP TABLE IF EXISTS flows")
             db.executescript(SCHEMA)
             columns = [row[1] for row in db.execute("PRAGMA table_info(flows)").fetchall()]
-            if "rules" not in columns:
-                db.execute("ALTER TABLE flows ADD COLUMN rules TEXT")
+            for name, definition in ADDED_COLUMNS:
+                if name not in columns:
+                    db.execute("ALTER TABLE flows ADD COLUMN {0} {1}".format(name, definition))
+            db.execute("DELETE FROM events WHERE flow_seq NOT IN (SELECT seq FROM flows)")
+            db.execute("UPDATE flows SET open = 0, error = COALESCE(error, ?) WHERE open = 1", (ENGINE_STOPPED,))
             db.execute("PRAGMA user_version={0}".format(SCHEMA_VERSION))
         except sqlite3.DatabaseError:
             db.close()
@@ -179,7 +268,15 @@ class FlowStore:
         if listener in self._listeners:
             self._listeners.remove(listener)
 
-    def insert(self, record):
+    def add_event_listener(self, listener):
+        self._event_listeners.append(listener)
+
+    def remove_event_listener(self, listener):
+        if listener in self._event_listeners:
+            self._event_listeners.remove(listener)
+
+    @staticmethod
+    def _flow_row(record):
         row = {
             "id": record.id, "started": record.started, "duration_ms": record.duration_ms,
             "method": record.method, "scheme": record.scheme, "host": record.host, "port": record.port,
@@ -191,11 +288,16 @@ class FlowStore:
             "response_body_size": record.response_body_size,
             "response_content_type": record.response_content_type, "client": record.client,
             "rules": json.dumps(record.rules) if record.rules else None,
+            "kind": record.kind, "open": 1 if record.open else 0,
         }
         for name, value in row.items():
             if isinstance(value, str):
                 row[name] = _storable(value)
         row["stored_bytes"] = sum(len(row[name] or b"") for name in COUNTED_FIELDS)
+        return row
+
+    def insert(self, record):
+        row = self._flow_row(record)
         names = ", ".join(row)
         marks = ", ".join(":" + name for name in row)
         with self._lock:
@@ -216,20 +318,149 @@ class FlowStore:
     def _prune(self):
         self._inserted_since_prune = 0
         self._bytes_since_prune = 0
-        self._db.execute(
-            "DELETE FROM flows WHERE seq <= (SELECT MAX(seq) FROM flows) - ?", (self.max_flows,))
+        self._delete_flows("open = 0 AND seq <= (SELECT MAX(seq) FROM flows) - ?", (self.max_flows,))
         while self._stored_bytes() > self.max_bytes:
-            self._db.execute(
-                "DELETE FROM flows WHERE seq IN (SELECT seq FROM flows ORDER BY seq LIMIT "
-                "(SELECT MAX(COUNT(*) / 10, 1) FROM flows))")
+            largest = self._db.execute(
+                "SELECT seq, event_count, events_bytes, (SELECT COALESCE(SUM(events_bytes), 0) FROM flows WHERE open = 1) "
+                "FROM flows WHERE open = 1 ORDER BY events_bytes DESC LIMIT 1").fetchone()
+            if largest is not None and largest[3] > self.max_bytes // 2 and largest[2] > 0:
+                self._trim_events(largest[0], largest[1], largest[2] - max(largest[2] // 10, 1))
+                left = self._db.execute("SELECT events_bytes FROM flows WHERE seq = ?", (largest[0],)).fetchone()[0]
+                if left < largest[2]:
+                    continue
+            removed = self._delete_flows(
+                "seq IN (SELECT seq FROM flows WHERE open = 0 ORDER BY seq LIMIT "
+                "(SELECT MAX(COUNT(*) / 10, 1) FROM flows WHERE open = 0))", ())
+            if not removed:
+                break
+
+    def _delete_flows(self, condition, params):
+        seqs = [row[0] for row in self._db.execute("SELECT seq FROM flows WHERE " + condition, params).fetchall()]
+        for start in range(0, len(seqs), DELETE_CHUNK):
+            chunk = seqs[start:start + DELETE_CHUNK]
+            marks = ", ".join("?" * len(chunk))
+            self._db.execute("DELETE FROM events WHERE flow_seq IN ({0})".format(marks), chunk)
+            self._db.execute("DELETE FROM flows WHERE seq IN ({0})".format(marks), chunk)
+        return len(seqs)
 
     def _stored_bytes(self):
-        return self._db.execute("SELECT COALESCE(SUM(stored_bytes), 0) FROM flows").fetchone()[0]
+        return self._db.execute(
+            "SELECT COALESCE(SUM(stored_bytes + events_bytes), 0) FROM flows").fetchone()[0]
+
+    def finish(self, record):
+        row = self._flow_row(record)
+        row["open"] = 0
+        assignments = ", ".join("{0} = :{0}".format(name) for name in FINISH_COLUMNS)
+        with self._lock:
+            if self._closed:
+                return None
+            self._db.execute("UPDATE flows SET {0} WHERE id = :id".format(assignments),
+                             dict({name: row[name] for name in FINISH_COLUMNS}, id=record.id))
+            found = self._db.execute("SELECT seq FROM flows WHERE id = ?", (record.id,)).fetchone()
+        if found is None:
+            return None
+        for listener in list(self._event_listeners):
+            listener(found["seq"], None)
+        return found["seq"]
+
+    def finish_open(self, reason):
+        with self._lock:
+            if not self._closed:
+                self._db.execute("UPDATE flows SET open = 0, error = COALESCE(error, ?) WHERE open = 1", (reason,))
+
+    def add_event(self, seq, direction, kind, data=b"", size=None, name=None, event_id=None, truncated=False,
+                  note=None, timestamp=None, limit=None):
+        stored_data = data if limit is None else data[:limit]
+        row = {
+            "flow_seq": seq, "ts": time.time() if timestamp is None else timestamp, "direction": direction, "type": kind,
+            "name": _storable(name) if name is not None else None,
+            "event_id": _storable(event_id) if event_id is not None else None,
+            "size": len(data) if size is None else size,
+            "truncated": 1 if truncated or len(stored_data) < len(data) else 0,
+            "note": _storable(note) if note is not None else None,
+            "data": stored_data,
+        }
+        row["stored"] = len(stored_data) + len(row["name"] or "") + len(row["event_id"] or "") + EVENT_OVERHEAD_BYTES
+        with self._lock:
+            if self._closed:
+                return None
+            flow = self._db.execute("SELECT event_count, events_bytes FROM flows WHERE seq = ?", (seq,)).fetchone()
+            if flow is None:
+                return None
+            row["n"] = flow["event_count"] + 1
+            names = ", ".join(row)
+            marks = ", ".join(":" + name for name in row)
+            self._db.execute("INSERT INTO events ({0}) VALUES ({1})".format(names, marks), row)
+            self._db.execute("UPDATE flows SET event_count = ?, events_bytes = events_bytes + ? WHERE seq = ?",
+                             (row["n"], row["stored"], seq))
+            stream_bytes = flow["events_bytes"] + row["stored"]
+            too_many = False
+            if row["n"] > EVENTS_BEFORE_TRIM:
+                first = self._db.execute("SELECT MIN(n) FROM events WHERE flow_seq = ?", (seq,)).fetchone()[0]
+                too_many = row["n"] - first + 1 > EVENTS_BEFORE_TRIM
+            if too_many or stream_bytes > MAX_STREAM_EVENT_BYTES:
+                self._trim_events(seq, row["n"], MAX_STREAM_EVENT_BYTES)
+            self._bytes_since_prune += row["stored"]
+            if self._bytes_since_prune >= PRUNE_EVERY_BYTES:
+                self._prune()
+        event = _event(row)
+        for listener in list(self._event_listeners):
+            listener(seq, event)
+        return event
+
+    def _trim_events(self, seq, last_n, byte_cap):
+        cutoff = last_n - MAX_EVENTS_PER_FLOW
+        while True:
+            first, count = self._db.execute("SELECT MIN(n), COUNT(*) FROM events WHERE flow_seq = ?", (seq,)).fetchone()
+            size = self._db.execute("SELECT events_bytes FROM flows WHERE seq = ?", (seq,)).fetchone()[0]
+            if count <= 1 or (first > cutoff and size <= byte_cap):
+                return
+            if size > byte_cap:
+                cutoff = max(cutoff, first + max(count // 10, 1) - 1)
+            freed = self._db.execute("SELECT COALESCE(SUM(stored), 0) FROM events WHERE flow_seq = ? AND n <= ?",
+                                     (seq, cutoff)).fetchone()[0]
+            self._db.execute("DELETE FROM events WHERE flow_seq = ? AND n <= ?", (seq, cutoff))
+            self._db.execute("UPDATE flows SET events_bytes = events_bytes - ? WHERE seq = ?", (freed, seq))
+
+    def events(self, seq, event_filter, limit, tail=False, data_bytes=None):
+        clauses = ["flow_seq = ?"]
+        params = [seq]
+        if event_filter.direction:
+            clauses.append("direction = ?")
+            params.append(event_filter.direction)
+        if event_filter.type:
+            clauses.append("type = ?")
+            params.append(event_filter.type)
+        if event_filter.name:
+            clauses.append("name = ?")
+            params.append(event_filter.name)
+        if event_filter.since_n is not None:
+            clauses.append("n > ?")
+            params.append(event_filter.since_n)
+        if event_filter.contains:
+            clauses.append("has_text(data, ?)")
+            params.append(event_filter.contains.lower())
+        columns = [name for name in EVENT_COLUMNS if name != "data"]
+        columns.append("data" if data_bytes is None else "substr(data, 1, ?) AS data")
+        sql = "SELECT {0} FROM events WHERE {1} ORDER BY n {2} LIMIT ?".format(
+            ", ".join(columns), " AND ".join(clauses), "DESC" if tail else "ASC")
+        head = [] if data_bytes is None else [data_bytes]
+        with self._lock:
+            rows = self._db.execute(sql, head + params + [limit]).fetchall()
+        events = [_event(row) for row in rows]
+        return events[::-1] if tail else events
 
     def summary(self, seq):
         with self._lock:
             row = self._db.execute(
                 "SELECT {0} FROM flows WHERE seq = ?".format(", ".join(SUMMARY_COLUMNS)), (seq,)).fetchone()
+        return _row(row) if row else None
+
+    def find_summary(self, flow_id):
+        with self._lock:
+            row = self._db.execute(
+                "SELECT {0} FROM flows WHERE id = ? OR CAST(seq AS TEXT) = ?".format(", ".join(SUMMARY_COLUMNS)),
+                (flow_id, flow_id)).fetchone()
         return _row(row) if row else None
 
     def query(self, flow_filter, limit):
@@ -258,6 +489,11 @@ class FlowStore:
         if flow_filter.rule:
             clauses.append("instr(rules, ?) > 0")
             params.append(json.dumps({"id": flow_filter.rule})[1:-1])
+        if flow_filter.kind:
+            clauses.append("kind = ?")
+            params.append(flow_filter.kind)
+        if flow_filter.open_only:
+            clauses.append("open = 1")
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = "SELECT {0} FROM flows{1} ORDER BY seq DESC LIMIT ?".format(", ".join(SUMMARY_COLUMNS), where)
         with self._lock:
@@ -287,7 +523,7 @@ class FlowStore:
 
     def clear(self):
         with self._lock:
-            removed = self._db.execute("DELETE FROM flows").rowcount
+            removed = self._delete_flows("open = 0", ())
             self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
         return removed
 

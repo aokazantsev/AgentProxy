@@ -124,6 +124,21 @@ class WaitHandler(BaseHandler):
         await self.run_tool("wait_for_flow", self.query_arguments())
 
 
+class EventsHandler(BaseHandler):
+    async def get(self):
+        await self.run_tool("list_events", self.query_arguments())
+
+
+class EventsSendHandler(BaseHandler):
+    async def post(self):
+        await self.run_body_tool("send_event")
+
+
+class EventsWaitHandler(BaseHandler):
+    async def get(self):
+        await self.run_tool("wait_for_event", self.query_arguments())
+
+
 class FlowHandler(BaseHandler):
     async def get(self, flow_id):
         arguments = self.query_arguments()
@@ -259,6 +274,9 @@ def make_app(context):
         (r"/api/flows", FlowsHandler),
         (r"/api/flows/wait", WaitHandler),
         (r"/api/flows/([^/]+)", FlowHandler),
+        (r"/api/events", EventsHandler),
+        (r"/api/events/wait", EventsWaitHandler),
+        (r"/api/events/send", EventsSendHandler),
         (r"/api/log", LogHandler),
         (r"/api/device", DeviceHandler),
         (r"/api/rules", RulesHandler),
