@@ -17,6 +17,8 @@ namespace AgentProxy
         private readonly CheckBox autostartBox = new CheckBox();
         private readonly List<KeyValuePair<SetupOption, CheckBox>> optionBoxes = new List<KeyValuePair<SetupOption, CheckBox>>();
         private readonly List<KeyValuePair<SetupField, ComboBox>> fieldBoxes = new List<KeyValuePair<SetupField, ComboBox>>();
+        private readonly Panel scroller = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty };
+        private readonly TableLayoutPanel content = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Margin = Padding.Empty };
         private readonly ProgressBar progress = new ProgressBar();
         private readonly Label status = new Label();
         private readonly Button installButton = new Button();
@@ -34,15 +36,22 @@ namespace AgentProxy
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
 
-            var layout = new TableLayoutPanel { AutoSize = true, Padding = new Padding(16), ColumnCount = 1 };
+            var layout = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(16), ColumnCount = 1 };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             Controls.Add(layout);
+            content.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            content.SizeChanged += (sender, e) =>
+            {
+                if (IsHandleCreated) BeginInvoke(new Action(FitToScreen));
+            };
+            scroller.Controls.Add(content);
+            layout.Controls.Add(scroller);
 
-            layout.Controls.Add(Wrapped(SetupProfile.Intro, new Padding(0, 0, 0, 4)));
+            content.Controls.Add(Wrapped(SetupProfile.Intro, new Padding(0, 0, 0, 4)));
             string notice = SetupProfile.Notice();
-            if (notice != null) layout.Controls.Add(Wrapped(notice, new Padding(0, 8, 0, 0)));
+            if (notice != null) content.Controls.Add(Wrapped(notice, new Padding(0, 8, 0, 0)));
 
-            layout.Controls.Add(Section("Папка установки"));
+            content.Controls.Add(Section("Папка установки"));
             var folderRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
             folderBox.Width = ContentWidth - 44;
             folderBox.Text = InstallTarget.DefaultDirectory();
@@ -52,23 +61,23 @@ namespace AgentProxy
             browseButton.Click += (sender, e) => BrowseFolder();
             folderRow.Controls.Add(folderBox);
             folderRow.Controls.Add(browseButton);
-            layout.Controls.Add(folderRow);
-            layout.Controls.Add(Hint("Удаление стирает эту папку целиком, поэтому подойдёт пустая папка или папка прежней установки."));
+            content.Controls.Add(folderRow);
+            content.Controls.Add(Hint("Удаление стирает эту папку целиком, поэтому подойдёт пустая папка или папка прежней установки."));
 
             List<SetupField> fields = SetupProfile.Fields();
-            if (fields.Count > 0) layout.Controls.Add(Section("Настройки"));
+            if (fields.Count > 0) content.Controls.Add(Section("Настройки"));
             foreach (SetupField field in fields)
             {
-                layout.Controls.Add(new Label { Text = field.Label, AutoSize = true, Margin = new Padding(0, 6, 0, 2) });
+                content.Controls.Add(new Label { Text = field.Label, AutoSize = true, Margin = new Padding(0, 6, 0, 2) });
                 var box = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Width = ContentWidth, Text = field.Value };
                 foreach (string suggestion in field.Suggestions) box.Items.Add(suggestion);
                 box.Text = field.Value;
                 fieldBoxes.Add(new KeyValuePair<SetupField, ComboBox>(field, box));
-                layout.Controls.Add(box);
-                if (field.Hint != null) layout.Controls.Add(Hint(field.Hint));
+                content.Controls.Add(box);
+                if (field.Hint != null) content.Controls.Add(Hint(field.Hint));
             }
 
-            layout.Controls.Add(Section("Что сделать"));
+            content.Controls.Add(Section("Что сделать"));
             foreach (SetupOption option in SetupProfile.Options())
             {
                 var box = new CheckBox
@@ -81,15 +90,15 @@ namespace AgentProxy
                     Margin = new Padding(0, 4, 0, 0)
                 };
                 optionBoxes.Add(new KeyValuePair<SetupOption, CheckBox>(option, box));
-                layout.Controls.Add(box);
-                if (option.Hint != null) layout.Controls.Add(Hint(option.Hint));
-                if (option.Details != null) AddDetails(layout, option);
+                content.Controls.Add(box);
+                if (option.Hint != null) content.Controls.Add(Hint(option.Hint));
+                if (option.Details != null) AddDetails(content, option);
             }
             autostartBox.Text = "Запускать при входе в Windows";
             autostartBox.Checked = true;
             autostartBox.AutoSize = true;
             autostartBox.Margin = new Padding(0, 4, 0, 0);
-            layout.Controls.Add(autostartBox);
+            content.Controls.Add(autostartBox);
 
             progress.Width = ContentWidth;
             progress.Margin = new Padding(0, 16, 0, 4);
@@ -105,6 +114,34 @@ namespace AgentProxy
             installButton.Click += (sender, e) => StartInstall();
             layout.Controls.Add(installButton);
             AcceptButton = installButton;
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            FitToScreen();
+            CenterToScreen();
+        }
+
+        private void FitToScreen()
+        {
+            PerformLayout();
+            Rectangle area = Screen.FromControl(this).WorkingArea;
+            Control frame = scroller.Parent;
+            int limit = area.Height - (Height - ClientSize.Height) - frame.Margin.Vertical - (frame.Height - scroller.Height);
+            if (content.Height <= limit)
+            {
+                scroller.AutoScroll = false;
+                scroller.AutoSize = true;
+            }
+            else
+            {
+                scroller.AutoSize = false;
+                scroller.AutoScroll = true;
+                scroller.Size = new Size(content.Width + SystemInformation.VerticalScrollBarWidth, Math.Max(limit, content.Height / 4));
+            }
+            PerformLayout();
+            if (Bottom > area.Bottom) Top = Math.Max(area.Top, area.Bottom - Height);
         }
 
         private static Label Wrapped(string text, Padding margin)

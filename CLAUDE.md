@@ -76,7 +76,7 @@
   выключенным (откат с будущей версии не выбрасывает правила и не расширяет их условие), негодное правило — в `rules.json.<время>.broken` (одна копия на содержимое) и файл
   пересохраняется очищенным.
 - MCP-инструменты и HTTP API — один набор (`service.TOOLS`): новый инструмент — запись в `TOOLS`, метод в
-  `ProxyService`, строка в `SKILL.md` и README. Инструкции для Claude разделены так: схемы `TOOLS` — поля и их смысл, `claude\SKILL.md` — устройство, подключение, поиск причин, `claude\rules.md` — справочник правил подмены (ставится рядом со скиллом); один факт — в одном месте, кроме предупреждений безопасности (недоверенные данные, удалить правила после задачи) — их повторяют и скилл, и MCP. `test_skill_docs.py` ловит в текстах имена, которых нет в схемах и ответах, пропавшие инструменты, расхождение полей схемы и `normalize`, вставки текста схем как есть (переводы не ловит) и разрастание текстов.
+  `ProxyService`, строка в `SKILL.md` и README, событие `mcp.<имя>` в каталоге статистики сайта. Инструкции для Claude разделены так: схемы `TOOLS` — поля и их смысл, `claude\SKILL.md` — устройство, подключение, поиск причин, `claude\rules.md` — справочник правил подмены (ставится рядом со скиллом); один факт — в одном месте, кроме предупреждений безопасности (недоверенные данные, удалить правила после задачи) — их повторяют и скилл, и MCP. `test_skill_docs.py` ловит в текстах имена, которых нет в схемах и ответах, пропавшие инструменты, расхождение полей схемы и `normalize`, вставки текста схем как есть (переводы не ловит) и разрастание текстов.
 - API слушает только `127.0.0.1` и отклоняет чужие `Host` и `Origin` (защита от DNS rebinding и запросов из браузера),
   а также запросы с заголовком `X-AgentProxy-Proxied`: `OwnPortsGuard` ставит его на запросы через прокси к портам с
   номерами своих портов — rebinding в обход проверки адреса до API не дойдёт. Сырой TCP к таким портам (CONNECT, а
@@ -180,7 +180,20 @@
   вперёд — `Installation`, `RunningApp`, `AboutForm`, `AppLog`, `UserDataPaths`; переносить по решению треда AgentProxy): `installer\setup\{SetupForm, Installation, InstallTarget,
   Payload, SetupOption, SetupField, InstallRequest, SetupLog}.cs`, `installer\common\RunningApp.cs`,
   `src\{AboutForm, CrashReportConsent, CrashUploader, CrashReport, AppLog, UserDataPaths, Autostart}.cs`,
-  `installer\make-payload.ps1`.
+  `installer\make-payload.ps1`. Статистика использования и автопроверка обновлений — `src\{Usage, UsageDay,
+  UsageConsent, AutoUpdateCheck, UpdateWatcher}.cs`, одинаковые с AgentVpnGuard.
+- **Статистика использования:** события — `Usage.Hit`/`Usage.Add` (общие имена `app.start`, `menu.*`, `settings.save`,
+  `update.*`; свои — `menu.monitor`, `menu.claude_connect`, `menu.claude_disconnect`, `menu.engine_restart`,
+  `tray.double_click`, `mcp.<инструмент>`), состояние — `Usage.SetState` (`TrayApplication.UpdateUsageState`).
+  Вызовы инструментов считает движок только для MCP (`ProxyService.count_tool_call` из `mcp.py`, имена — только из
+  `TOOL_NAMES`), отдаёт в `tool_calls` статуса; трей прибавляет разницу снимков (`ToolCallUsage`, сброс при запуске
+  движка). Новое событие или ключ состояния (в том числе новый инструмент MCP → событие `mcp.<имя>`) — сначала строка в
+  каталоге `USAGE_CATALOG` в `D:\aokazantsev-site\panel\panel.py` и деплой панели, потом выпуск программы: сервер
+  отбрасывает имена не из каталога. Состав статистики — в `SetupProfile` («Что уходит в статистике») и README.
+  Согласие — `usage-statistics.txt` (`on`/`off`, нет файла — не отправляется; галка установщика — `InstallerDefault`).
+  Статистика включена, а метки `usage-notice.txt` (папка данных) нет — трей при запуске один раз показывает уведомление
+  о ней и пишет метку (клик — «Настройки…»): тихая установка и «Установить сейчас» окна с галкой не показывают. Клик по уведомлению делает то, что задало последнее
+  показанное (`TrayApplication.ShowBalloon`), по `BalloonTipClosed` не сбрасывается.
 - **Осознанные отличия:** установка без прав (папка пользователя, `UninstallRegistration` пишет в HKCU, манифесты
   `asInvoker`); тихий режим установщика и деинсталлятора (`SilentSetup`, `CommandLine`); `Update{Checker,Form,Release}.cs` —
   общие с AgentVpnGuard, AgentGlow и DevMonitor (сверка sha256 по `digest` релиза, установщик в

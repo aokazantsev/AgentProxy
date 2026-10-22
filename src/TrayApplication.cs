@@ -1,6 +1,8 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace AgentProxy
@@ -9,7 +11,9 @@ namespace AgentProxy
     {
         private const int TooltipLimit = 63;
         private const int ProblemTextLimit = 90;
+        private const int BalloonMs = 5000;
 
+        private static readonly string StatisticsNoticePath = Path.Combine(AppIdentity.DataDirectory, "usage-notice.txt");
         private readonly string installDirectory = Application.StartupPath;
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ContextMenuStrip menu = new ContextMenuStrip();
@@ -21,32 +25,54 @@ namespace AgentProxy
         private readonly ToolStripMenuItem autostartItem = new ToolStripMenuItem("Запускать при входе в Windows");
         private readonly EngineSupervisor engine;
         private readonly ClaudeLink claude;
+        private readonly SynchronizationContext ui;
         private EngineState notifiedState = EngineState.Starting;
+        private Action balloonClick;
 
         public TrayApplication()
         {
             AppLog.Append("=== " + AppIdentity.Name + " " + AppIdentity.Version + " start: user " + Environment.UserName
                 + ", " + Environment.OSVersion.VersionString + ", .NET " + Environment.Version
                 + ", install " + installDirectory + ", data " + UserDataPaths.Directory
-                + ", autostart " + Autostart.IsEnabled() + ", crash reports " + CrashReportConsent.IsGiven);
+                + ", autostart " + Autostart.IsEnabled() + ", crash reports " + CrashReportConsent.IsGiven
+                + ", usage statistics " + UsageConsent.IsGiven + ", auto update " + AutoUpdateCheck.IsEnabled);
+            ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
             engine = new EngineSupervisor(installDirectory);
             claude = new ClaudeLink(installDirectory);
             BuildMenu();
             tray.ContextMenuStrip = menu;
-            tray.DoubleClick += (sender, e) => OpenFromIcon();
+            tray.DoubleClick += (sender, e) =>
+            {
+                Usage.Hit("tray.double_click");
+                OpenFromIcon();
+            };
+            tray.BalloonTipClicked += OnBalloonClicked;
             tray.Visible = true;
+            bool announceStatistics = UsageConsent.IsGiven && !File.Exists(StatisticsNoticePath);
             engine.Changed += (sender, e) => UpdateView();
             claude.Changed += (sender, e) => UpdateView();
             UpdateView();
             engine.Start();
             claude.Refresh();
+            UpdateUsageState();
+            Usage.Start();
+            if (announceStatistics) ShowStatisticsBalloon();
+            UpdateWatcher.Start(version => ui.Post(state => ShowUpdateBalloon(version), null));
         }
 
         private void BuildMenu()
         {
-            monitorItem.Click += (sender, e) => OpenMonitor();
+            monitorItem.Click += (sender, e) =>
+            {
+                Usage.Hit("menu.monitor");
+                OpenMonitor();
+            };
             claudeItem.Click += (sender, e) => ToggleClaude();
-            restartItem.Click += (sender, e) => engine.Restart();
+            restartItem.Click += (sender, e) =>
+            {
+                Usage.Hit("menu.engine_restart");
+                engine.Restart();
+            };
             autostartItem.Click += (sender, e) => ToggleAutostart();
             menu.Items.Add(stateItem);
             menu.Items.Add(claudeStateItem);
@@ -55,13 +81,33 @@ namespace AgentProxy
             menu.Items.Add(claudeItem);
             menu.Items.Add(restartItem);
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(new ToolStripMenuItem("Настройки…", null, (sender, e) => SettingsForm.ShowSingle(OnSettingsSaved)));
-            menu.Items.Add(new ToolStripMenuItem("Журнал", null, (sender, e) => JournalForm.ShowSingle()));
-            menu.Items.Add(new ToolStripMenuItem("Проверить обновление…", null, (sender, e) => UpdateForm.ShowSingle()));
+            menu.Items.Add(new ToolStripMenuItem("Настройки…", null, (sender, e) =>
+            {
+                Usage.Hit("menu.settings");
+                OpenSettings();
+            }));
+            menu.Items.Add(new ToolStripMenuItem("Журнал", null, (sender, e) =>
+            {
+                Usage.Hit("menu.journal");
+                JournalForm.ShowSingle();
+            }));
+            menu.Items.Add(new ToolStripMenuItem("Проверить обновление…", null, (sender, e) =>
+            {
+                Usage.Hit("menu.update_check");
+                UpdateForm.ShowSingle();
+            }));
             menu.Items.Add(autostartItem);
-            menu.Items.Add(new ToolStripMenuItem("О приложении…", null, (sender, e) => AboutForm.ShowSingle()));
+            menu.Items.Add(new ToolStripMenuItem("О приложении…", null, (sender, e) =>
+            {
+                Usage.Hit("menu.about");
+                AboutForm.ShowSingle();
+            }));
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(new ToolStripMenuItem("Выход", null, (sender, e) => Quit()));
+            menu.Items.Add(new ToolStripMenuItem("Выход", null, (sender, e) =>
+            {
+                Usage.Hit("menu.exit");
+                Quit();
+            }));
             menu.Opening += (sender, e) => autostartItem.Checked = Autostart.IsEnabled();
         }
 
@@ -79,6 +125,73 @@ namespace AgentProxy
             string tooltip = AppIdentity.Name + ": " + line;
             tray.Text = tooltip.Length > TooltipLimit ? tooltip.Substring(0, TooltipLimit) : tooltip;
             NotifyProblem(state);
+            UpdateEngineUsageState(state, settings);
+        }
+
+        private void UpdateEngineUsageState(EngineState state, EngineSettings settings)
+        {
+            Usage.SetState("engine_running", state == EngineState.Running);
+            Usage.SetState("verify_upstream", settings.VerifyUpstream);
+            if (claude.Installed != null) Usage.SetState("claude_code", claude.Installed == true && claude.Complete);
+            EngineStatus status = engine.LastStatus;
+            if (status == null) return;
+            Usage.SetState("rules", status.Rules);
+            Usage.SetState("rules_enabled", status.RulesEnabled);
+        }
+
+        private void UpdateUsageState()
+        {
+            Usage.SetState("autostart", Autostart.IsEnabled());
+            Usage.SetState("auto_update", AutoUpdateCheck.IsEnabled);
+            Usage.SetState("crash_reports", CrashReportConsent.IsGiven);
+            UpdateEngineUsageState(engine.State, engine.Settings ?? EngineSettings.Load());
+        }
+
+        private void ShowBalloon(string text, ToolTipIcon icon, Action click)
+        {
+            balloonClick = click;
+            tray.ShowBalloonTip(BalloonMs, AppIdentity.Name, text, icon);
+        }
+
+        private void ShowUpdateBalloon(string version)
+        {
+            ShowBalloon("Вышла версия " + version + ". Нажми, чтобы скачать и установить.", ToolTipIcon.Info, () =>
+            {
+                Usage.Hit("update.notify_open");
+                UpdateForm.ShowSingle();
+            });
+        }
+
+        private void ShowStatisticsBalloon()
+        {
+            AppLog.Append("usage statistics notice shown");
+            try
+            {
+                Directory.CreateDirectory(AppIdentity.DataDirectory);
+                File.WriteAllText(StatisticsNoticePath, "shown");
+            }
+            catch (IOException error)
+            {
+                AppLog.Append("usage statistics notice mark not saved: " + error.Message);
+            }
+            catch (UnauthorizedAccessException error)
+            {
+                AppLog.Append("usage statistics notice mark not saved: " + error.Message);
+            }
+            ShowBalloon(AppIdentity.Name + " отправляет автору анонимную статистику: счётчики меню и инструментов MCP, без запросов, "
+                + "адресов и содержимого. Состав — в README, выключить — в «Настройках».", ToolTipIcon.Info, OpenSettings);
+        }
+
+        private void OnBalloonClicked(object sender, EventArgs e)
+        {
+            Action click = balloonClick;
+            balloonClick = null;
+            if (click != null) click();
+        }
+
+        private void OpenSettings()
+        {
+            SettingsForm.ShowSingle(OnSettingsSaved, UpdateUsageState, () => TrayIcons.IsProblem(engine.State) || engine.State == EngineState.Stopped);
         }
 
         private string StateText(EngineState state, EngineSettings settings)
@@ -123,8 +236,7 @@ namespace AgentProxy
             bool problem = TrayIcons.IsProblem(state);
             if (problem && !TrayIcons.IsProblem(notifiedState))
             {
-                tray.ShowBalloonTip(5000, AppIdentity.Name, StateText(state, engine.Settings ?? EngineSettings.Load())
-                    + ". Подробности — в журнале.", ToolTipIcon.Warning);
+                ShowBalloon(StateText(state, engine.Settings ?? EngineSettings.Load()) + ". Подробности — в журнале.", ToolTipIcon.Warning, null);
             }
             if (state != EngineState.Starting) notifiedState = state;
         }
@@ -144,8 +256,16 @@ namespace AgentProxy
 
         private void ToggleClaude()
         {
-            if (claude.Installed == true && claude.Complete) claude.Uninstall();
-            else claude.Install();
+            if (claude.Installed == true && claude.Complete)
+            {
+                Usage.Hit("menu.claude_disconnect");
+                claude.Uninstall();
+            }
+            else
+            {
+                Usage.Hit("menu.claude_connect");
+                claude.Install();
+            }
         }
 
         private void OnSettingsSaved()
@@ -157,8 +277,10 @@ namespace AgentProxy
         private void ToggleAutostart()
         {
             bool enable = !Autostart.IsEnabled();
+            Usage.Hit(enable ? "menu.autostart_on" : "menu.autostart_off");
             string problem = enable ? Autostart.Enable(Application.ExecutablePath) : Autostart.Disable();
             AppLog.Append("autostart " + (enable ? "enable" : "disable") + ": " + (problem ?? "ok"));
+            Usage.SetState("autostart", Autostart.IsEnabled());
             if (problem != null) MessageBox.Show(problem, AppIdentity.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 

@@ -258,6 +258,7 @@ class ProxyService:
         self.started_at = time.time()
         self.proxy_running = False
         self.injector = None
+        self.tool_calls = {}
         self.device = DeviceControl(lambda: self.settings, lambda: self.proxy_running)
 
     def ca_paths(self):
@@ -279,6 +280,7 @@ class ProxyService:
             "last_seq": self.store.last_seq(),
             "uptime_seconds": int(time.time() - self.started_at),
             "rules": self.rules.counts(),
+            "tool_calls": dict(self.tool_calls),
             "data_dir": self.data_dir,
             "ca_certificate": {
                 "pem_url": api + "/api/ca.pem",
@@ -286,6 +288,10 @@ class ProxyService:
                 "exists": os.path.exists(self.ca_paths()["pem"]),
             },
         }
+
+    def count_tool_call(self, name):
+        if isinstance(name, str) and name in TOOL_NAMES:
+            self.tool_calls[name] = self.tool_calls.get(name, 0) + 1
 
     def list_flows(self, arguments):
         limit = _int(arguments, "limit", 50, 1, MAX_LIST_LIMIT)
@@ -758,6 +764,9 @@ TOOLS = [
         "handler": "read_log",
     },
 ]
+
+
+TOOL_NAMES = frozenset(tool["name"] for tool in TOOLS)
 
 
 async def call_tool(service, name, arguments):

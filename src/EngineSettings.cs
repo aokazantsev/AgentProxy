@@ -18,6 +18,7 @@ namespace AgentProxy
         public int ProxyPort = DefaultProxyPort;
         public int ApiPort = DefaultApiPort;
         public bool VerifyUpstream = true;
+        public bool Parsed;
         private Dictionary<string, object> raw = new Dictionary<string, object>();
 
         public static EngineSettings Load()
@@ -31,7 +32,10 @@ namespace AgentProxy
             if (string.IsNullOrWhiteSpace(json)) return settings;
             try
             {
-                settings.raw = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json) ?? new Dictionary<string, object>();
+                Dictionary<string, object> values = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+                if (values == null) return settings;
+                settings.raw = values;
+                settings.Parsed = true;
             }
             catch (ArgumentException)
             {
@@ -63,6 +67,11 @@ namespace AgentProxy
             return null;
         }
 
+        public bool NeedsWrite(int proxyPort, int apiPort, bool verifyUpstream)
+        {
+            return proxyPort != ProxyPort || apiPort != ApiPort || verifyUpstream != VerifyUpstream || !Parsed && File.Exists(FilePath);
+        }
+
         public string ToJson()
         {
             var values = new Dictionary<string, object>(raw);
@@ -75,10 +84,12 @@ namespace AgentProxy
         public void Save()
         {
             UserDataPaths.Ensure();
+            if (!Parsed && File.Exists(FilePath)) File.Copy(FilePath, FilePath + ".broken", true);
             string temporary = FilePath + ".tmp";
             File.WriteAllText(temporary, ToJson(), new UTF8Encoding(false));
             if (File.Exists(FilePath)) File.Replace(temporary, FilePath, null);
             else File.Move(temporary, FilePath);
+            Parsed = true;
         }
 
         private static int Port(Dictionary<string, object> values, string key, int fallback)

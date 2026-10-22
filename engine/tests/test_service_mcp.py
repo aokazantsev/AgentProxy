@@ -1,11 +1,12 @@
 import asyncio
 import json
+import re
 
 import pytest
 
 from agentproxy import VERSION, mcp
 from agentproxy.rules import RuleSet
-from agentproxy.service import UNTRUSTED_NOTE, ProxyService, ToolError, call_tool, public_tools
+from agentproxy.service import TOOL_NAMES, UNTRUSTED_NOTE, ProxyService, ToolError, call_tool, public_tools
 
 from conftest import make_record
 
@@ -145,6 +146,35 @@ def test_mcp_tool_error_is_reported_in_result(service):
                          "params": {"name": "get_flow", "arguments": {"id": "x"}}})["result"]
     assert call["isError"] is True
     assert "not found" in call["content"][0]["text"]
+
+
+def test_status_counts_mcp_tool_calls_by_known_names_only(service):
+    assert service.status()["tool_calls"] == {}
+    for name in ("list_flows", "list_flows", "get_flow", "no_such_tool"):
+        rpc(service, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": {}}})
+    rpc(service, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": {"x": 1}}})
+    rpc(service, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_flows", "arguments": [1]}})
+    assert service.status()["tool_calls"] == {"list_flows": 2, "get_flow": 1}
+
+
+def test_tool_calls_through_http_api_are_not_counted(service):
+    run(call_tool(service, "list_flows", {}))
+    assert service.status()["tool_calls"] == {}
+
+
+def test_status_tool_calls_is_a_copy(service):
+    service.count_tool_call("proxy_status")
+    snapshot = service.status()["tool_calls"]
+    service.count_tool_call("proxy_status")
+    assert snapshot == {"proxy_status": 1}
+
+
+def test_counted_tool_names_match_site_catalog():
+    assert TOOL_NAMES == {
+        "proxy_status", "list_flows", "get_flow", "wait_for_flow", "list_events", "send_event", "wait_for_event",
+        "clear_flows", "list_rules", "add_rule", "update_rule", "delete_rule", "device_proxy", "read_log",
+    }
+    assert all(re.fullmatch(r"[a-z0-9_]{1,44}", name) for name in TOOL_NAMES)
 
 
 def test_mcp_protocol_errors(service):

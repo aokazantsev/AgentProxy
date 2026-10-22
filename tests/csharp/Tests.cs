@@ -1,6 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Reflection;
+using System.Text.RegularExpressions;
+using System.Web.Script.Serialization;
 
 namespace AgentProxy.Tests
 {
@@ -9,44 +13,113 @@ namespace AgentProxy.Tests
         private static int failed;
         private static int passed;
 
+        private static readonly string Sandbox = Path.Combine(Path.GetTempPath(), "AgentProxyTests-" + Guid.NewGuid().ToString("N"));
+
         private static int Main()
         {
-            Run("restart delays grow and cap", RestartDelaysGrowAndCap);
-            Run("restart failures reset after stable run", RestartResetsAfterStableRun);
-            Run("busy port waits longer and maps to state", BusyPortPolicy);
-            Run("settings parse values and fallbacks", SettingsParse);
-            Run("settings keep unknown keys on save", SettingsKeepUnknownKeys);
-            Run("settings validation", SettingsValidation);
-            Run("engine status parse", EngineStatusParse);
-            Run("last crash block is extracted", LastCrashExtracted);
-            Run("github release with digest", ReleaseWithDigest);
-            Run("github release without digest", ReleaseWithoutDigest);
-            Run("github release without asset fails", ReleaseWithoutAsset);
-            Run("sha256 of file", Sha256OfFile);
-            Run("installer downloads into its own folder", InstallerPathInOwnFolder);
-            Run("install status text follows setup mode", InstallStartedText);
-            Run("silent setup defaults", SilentDefaults);
-            Run("silent setup overrides", SilentOverrides);
-            Run("silent setup rejects unknown", SilentRejectsUnknown);
-            Run("dash arguments become slash arguments", DashArguments);
-            Run("readme silent commands parse with real options", ReadmeSilentCommands);
-            Run("download verification", DownloadVerification);
-            Run("previous install location comparison", PreviousLocation);
-            Run("nested install locations", NestedLocations);
-            Run("install target overlapping data folder is refused", TargetOverlappingDataFolder);
-            Run("folder contents removed except uninstaller", ContentsRemovedExceptUninstaller);
-            Run("install folder recognition", InstallFolderRecognition);
-            Run("release versions compare numerically", ReleaseVersionsCompare);
-            Run("install target refusals", TargetRefusals);
-            Run("uninstaller owns registration", OwnsRegistration);
-            Run("dead registration is not an update", DeadRegistrationIsNotUpdate);
-            Run("tray reads claude status from engine cli", EngineCliClaudeRoundTrip);
-            Run("json writer keeps doubles and refuses dates", JsonWriterNumbersAndDates);
-            Run("json writer round trip", JsonWriterRoundTrip);
-            Run("cleaner removes only our entries", CleanerRemovesOnlyOurs);
-            Run("engine starts with tray start info and stops by token", EngineStartsWithTrayStartInfo);
-            Console.WriteLine(passed + " passed, " + failed + " failed");
-            return failed == 0 ? 0 : 1;
+            try
+            {
+                Isolate();
+                Run("restart delays grow and cap", RestartDelaysGrowAndCap);
+                Run("restart failures reset after stable run", RestartResetsAfterStableRun);
+                Run("busy port waits longer and maps to state", BusyPortPolicy);
+                Run("settings parse values and fallbacks", SettingsParse);
+                Run("settings keep unknown keys on save", SettingsKeepUnknownKeys);
+                Run("settings validation", SettingsValidation);
+                Run("engine status parse", EngineStatusParse);
+                Run("tool call usage counts differences", ToolCallUsageDelta);
+                Run("status of previous engine launch is stale", ToolCallUsageGeneration);
+                Run("last crash block is extracted", LastCrashExtracted);
+                Run("github release with digest", ReleaseWithDigest);
+                Run("github release without digest", ReleaseWithoutDigest);
+                Run("github release without asset fails", ReleaseWithoutAsset);
+                Run("sha256 of file", Sha256OfFile);
+                Run("installer downloads into its own folder", InstallerPathInOwnFolder);
+                Run("install status text follows setup mode", InstallStartedText);
+                Run("silent setup defaults", SilentDefaults);
+                Run("silent setup overrides", SilentOverrides);
+                Run("silent setup rejects unknown", SilentRejectsUnknown);
+                Run("dash arguments become slash arguments", DashArguments);
+                Run("readme silent commands parse with real options", ReadmeSilentCommands);
+                Run("download verification", DownloadVerification);
+                Run("previous install location comparison", PreviousLocation);
+                Run("nested install locations", NestedLocations);
+                Run("install target overlapping data folder is refused", TargetOverlappingDataFolder);
+                Run("folder contents removed except uninstaller", ContentsRemovedExceptUninstaller);
+                Run("install folder recognition", InstallFolderRecognition);
+                Run("release versions compare numerically", ReleaseVersionsCompare);
+                Run("install target refusals", TargetRefusals);
+                Run("uninstaller owns registration", OwnsRegistration);
+                Run("dead registration is not an update", DeadRegistrationIsNotUpdate);
+                Run("tray reads claude status from engine cli", EngineCliClaudeRoundTrip);
+                Run("json writer keeps doubles and refuses dates", JsonWriterNumbersAndDates);
+                Run("json writer round trip", JsonWriterRoundTrip);
+                Run("cleaner removes only our entries", CleanerRemovesOnlyOurs);
+                Run("engine starts with tray start info and stops by token", EngineStartsWithTrayStartInfo);
+                Run("usage counters round trip", UsageCountersRoundTrip);
+                Run("usage packet shape", UsagePacketShape);
+                Run("usage without consent keeps nothing", UsageWithoutConsent);
+                Run("usage consent file", UsageConsentFile);
+                Run("usage counters merge after failed read", UsageMergeAfterFailedRead);
+                Run("usage keeps six days and drops broken lines", UsageRetention);
+                Run("usage final answers and sent revision", UsageSentRevision);
+                Run("usage refusal from settings forgets at once", UsageSetConsentRefusal);
+                Run("usage counters not saved after refusal", UsageSaveAfterRefusal);
+                Run("usage re-enabled starts from scratch", UsageConsentReenabled);
+                Run("usage state change unmarks today", UsageStateUnmarksToday);
+                Run("usage send without consent keeps nothing", UsageSendWithoutConsent);
+                Run("update check stamp and due time", UpdateCheckDue);
+                Run("update watcher keeps switch and interval", UpdateWatcherSkips);
+                Run("tool call usage reaches counters", ToolCallUsageApply);
+                Run("auto update check switch", AutoUpdateCheckSwitch);
+                Run("settings written only when changed or broken", SettingsNeedsWrite);
+                Run("broken settings kept aside on save", SettingsBrokenKeptOnSave);
+                Run("silent setup usage statistics option", SilentUsageStatistics);
+                Console.WriteLine(passed + " passed, " + failed + " failed");
+                return failed == 0 ? 0 : 1;
+            }
+            finally
+            {
+                RemoveSandbox();
+            }
+        }
+
+        private static void Isolate()
+        {
+            Directory.CreateDirectory(Sandbox);
+            Redirect(typeof(UserDataPaths), "Directory", null);
+            Redirect(typeof(AppLog), "FilePath", "log.txt");
+            Redirect(typeof(AppLog), "PreviousFilePath", "log.old.txt");
+            Redirect(typeof(Usage), "IdPath", "usage-id.txt");
+            Redirect(typeof(Usage), "DaysPath", "usage-days.txt");
+            Redirect(typeof(UsageConsent), "FilePath", "usage-statistics.txt");
+            Redirect(typeof(UsageConsent), "CountersPath", "usage-days.txt");
+            Redirect(typeof(UpdateWatcher), "StampPath", "update-check.txt");
+            Redirect(typeof(AutoUpdateCheck), "FilePath", "update-check-off.txt");
+            Redirect(typeof(EngineSettings), "FilePath", "settings.json");
+            Redirect(typeof(CrashReportConsent), "FilePath", "crash-reports-consent.txt");
+            Redirect(typeof(EngineLogTail), "FilePath", "engine.log");
+            Redirect(typeof(EngineRuntimeInfo), "FilePath", "engine-runtime.json");
+        }
+
+        private static void Redirect(Type type, string field, string name)
+        {
+            string path = name == null ? Sandbox : Path.Combine(Sandbox, name);
+            FieldInfo info = type.GetField(field, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+            if (info == null) throw new InvalidOperationException("no field " + type.Name + "." + field);
+            info.SetValue(null, path);
+            if ((string)info.GetValue(null) != path) throw new InvalidOperationException("not redirected " + type.Name + "." + field);
+        }
+
+        private static void RemoveSandbox()
+        {
+            try
+            {
+                if (Directory.Exists(Sandbox)) Directory.Delete(Sandbox, true);
+            }
+            catch (IOException)
+            {
+            }
         }
 
         private static void Run(string name, Action test)
@@ -131,6 +204,9 @@ namespace AgentProxy.Tests
             EngineSettings same = EngineSettings.Parse("{\"proxy_port\": 9000, \"api_port\": 9000}");
             True(same.ProxyPort != same.ApiPort, "same ports replaced");
             Equal(EngineSettings.DefaultApiPort, EngineSettings.Parse(null).ApiPort, "null json");
+            True(parsed.Parsed && low.Parsed, "object read from file");
+            True(!broken.Parsed && !EngineSettings.Parse(null).Parsed && !EngineSettings.Parse("null").Parsed && !EngineSettings.Parse("[1]").Parsed,
+                "missing or broken file is not parsed");
         }
 
         private static void SettingsKeepUnknownKeys()
@@ -155,6 +231,39 @@ namespace AgentProxy.Tests
             Equal(12, status.Flows, "flows");
             Equal(true, status.ProxyRunning, "running");
             Equal<EngineStatus>(null, EngineStatus.Parse("nope"), "garbage");
+            EngineStatus counted = EngineStatus.Parse("{\"rules\":{\"total\":3,\"enabled\":2,\"active\":1},\"tool_calls\":{\"list_flows\":4,\"get_flow\":\"x\"}}");
+            Equal(3, counted.Rules, "rules total");
+            Equal(2, counted.RulesEnabled, "rules enabled");
+            Equal(1, counted.ToolCalls.Count, "only numeric tool calls");
+            Equal(4, counted.ToolCalls["list_flows"], "list_flows calls");
+            Equal(0, status.ToolCalls.Count, "no tool calls field");
+        }
+
+        private static void ToolCallUsageDelta()
+        {
+            var usage = new ToolCallUsage();
+            Dictionary<string, int> first = usage.Delta(new Dictionary<string, int> { { "list_flows", 3 }, { "Bad-Name", 5 }, { "get_flow", 0 } });
+            Equal(1, first.Count, "first snapshot keeps only valid names with calls");
+            Equal(3, first["mcp.list_flows"], "first snapshot counts everything");
+            Dictionary<string, int> second = usage.Delta(new Dictionary<string, int> { { "list_flows", 5 }, { "get_flow", 2 } });
+            Equal(2, second["mcp.list_flows"], "growth is a difference");
+            Equal(2, second["mcp.get_flow"], "new tool counted whole");
+            Dictionary<string, int> restarted = usage.Delta(new Dictionary<string, int> { { "list_flows", 1 } });
+            Equal(1, restarted["mcp.list_flows"], "engine restart counts current value");
+            Equal(0, usage.Delta(new Dictionary<string, int> { { "list_flows", 1 } }).Count, "no change, no events");
+            Equal(0, usage.Delta(new Dictionary<string, int> { { "list_flows", 1 }, { "get_flow", -1 }, { new string('a', 45), 1 } }).Count, "negative and long names skipped");
+            usage.Reset();
+            Equal(1, usage.Delta(new Dictionary<string, int> { { "list_flows", 1 } })["mcp.list_flows"], "reset starts over");
+        }
+
+        private static void ToolCallUsageGeneration()
+        {
+            var usage = new ToolCallUsage();
+            int requested = usage.Generation;
+            True(usage.IsCurrent(requested), "status of the running engine is current");
+            usage.Reset();
+            True(!usage.IsCurrent(requested), "status requested before launch is stale");
+            True(usage.IsCurrent(usage.Generation), "status of the new engine is current");
         }
 
         private static void LastCrashExtracted()
@@ -591,6 +700,371 @@ namespace AgentProxy.Tests
             Throws<ArgumentException>(() => SilentSetup.Parse(new[] { "/silent", "/fast" }, Options(), "C:\\T", true), "unknown flag");
             Throws<ArgumentException>(() => SilentSetup.Parse(new[] { "/option:nope=1" }, Options(), "C:\\T", true), "unknown option");
             Throws<ArgumentException>(() => SilentSetup.Parse(new[] { "/option:claude=yes" }, Options(), "C:\\T", true), "bad value");
+        }
+
+        private static string SandboxFile(string name)
+        {
+            return Path.Combine(Sandbox, name);
+        }
+
+        private static object StaticField(Type type, string name)
+        {
+            return type.GetField(name, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public).GetValue(null);
+        }
+
+        private static void SetStaticField(Type type, string name, object value)
+        {
+            type.GetField(name, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public).SetValue(null, value);
+        }
+
+        private static object CallStatic(Type type, string name, params object[] arguments)
+        {
+            try
+            {
+                return type.GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public).Invoke(null, arguments);
+            }
+            catch (TargetInvocationException error)
+            {
+                throw error.InnerException;
+            }
+        }
+
+        private static string Today()
+        {
+            return DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        private static string DaysAgo(int days)
+        {
+            return DateTime.Today.AddDays(-days).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        private static Dictionary<string, UsageDay> UsageDays()
+        {
+            return (Dictionary<string, UsageDay>)StaticField(typeof(Usage), "Days");
+        }
+
+        private static void ResetUsage()
+        {
+            CallStatic(typeof(Usage), "Forget");
+            ((Dictionary<string, string>)StaticField(typeof(Usage), "State")).Clear();
+            SetStaticField(typeof(Usage), "installId", null);
+            SetStaticField(typeof(Usage), "lastReadFailure", null);
+            SetStaticField(typeof(Usage), "lastOutcome", null);
+            foreach (string name in new[] { "usage-days.txt", "usage-id.txt", "usage-statistics.txt" })
+            {
+                if (File.Exists(SandboxFile(name))) File.Delete(SandboxFile(name));
+            }
+        }
+
+        private static string[] DaysLines()
+        {
+            return File.ReadAllLines(SandboxFile("usage-days.txt"));
+        }
+
+        private static void UsageCountersRoundTrip()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            Usage.Add("mcp.list_flows", 3);
+            Usage.Hit("menu.about");
+            string[] lines = DaysLines();
+            Equal(1, lines.Length, "one day");
+            Equal(Today() + "\t0\tmenu.about=2,mcp.list_flows=3\t" + AppIdentity.Version, lines[0], "day line");
+        }
+
+        private static void UsagePacketShape()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            Usage.Hit("menu.about");
+            Usage.Add("mcp.list_flows", 3);
+            Usage.SetState("rules", 2);
+            Usage.SetState("verify_upstream", true);
+            UsageDay day = UsageDays()[Today()];
+            string packet = (string)CallStatic(typeof(Usage), "Packet", Today(), day);
+            Dictionary<string, object> json = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(packet);
+            string id = (string)json["id"];
+            True(Regex.IsMatch(id, "^[0-9a-f]{32}$"), "id: " + id);
+            Equal(File.ReadAllText(SandboxFile("usage-id.txt")).Trim(), id, "id saved");
+            Equal(Today(), (string)json["day"], "day");
+            Equal(AppIdentity.Version, (string)json["version"], "version");
+            True(Regex.IsMatch((string)json["windows"], @"^\d+(\.\d+){1,3}$"), "windows: " + json["windows"]);
+            True(packet.Contains("\"events\":{\"menu.about\":2,\"mcp.list_flows\":3}"), "events: " + packet);
+            True(packet.Contains("\"state\":{\"rules\":\"2\",\"verify_upstream\":\"true\"}"), "state: " + packet);
+            string past = (string)CallStatic(typeof(Usage), "Packet", "2000-01-01", day);
+            True(past.Contains("\"state\":{}"), "past day without state: " + past);
+            Usage.SetState("idle_effect", DayOfWeek.Monday);
+            Usage.SetState("adapter", "Fortinet");
+            var state = (Dictionary<string, string>)StaticField(typeof(Usage), "State");
+            Equal("monday", state["idle_effect"], "enum lower case");
+            Equal("fortinet", state["adapter"], "text lower case");
+            var odd = new UsageDay { Version = "1" };
+            odd.Events["q\"b\\c\nd"] = 1;
+            string escaped = (string)CallStatic(typeof(Usage), "Packet", "2000-01-01", odd);
+            var parsed = (Dictionary<string, object>)new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(escaped)["events"];
+            True(parsed.ContainsKey("q\"b\\c\nd"), "escaped name round trip: " + escaped);
+        }
+
+        private static void UsageWithoutConsent()
+        {
+            ResetUsage();
+            Equal(false, UsageConsent.IsGiven, "no file, no consent");
+            Equal(true, UsageConsent.InstallerDefault, "installer suggests on");
+            Usage.Hit("menu.about");
+            True(!File.Exists(SandboxFile("usage-days.txt")), "nothing counted without consent");
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            True(File.Exists(SandboxFile("usage-days.txt")), "counted with consent");
+            UsageConsent.Set(false);
+            Equal("off", File.ReadAllText(SandboxFile("usage-statistics.txt")), "refusal saved");
+            True(!File.Exists(SandboxFile("usage-days.txt")), "counters removed on refusal");
+            Equal(false, UsageConsent.InstallerDefault, "installer keeps refusal");
+            Usage.Hit("menu.about");
+            True(!File.Exists(SandboxFile("usage-days.txt")), "nothing counted after refusal");
+            Equal(0, UsageDays().Count, "days forgotten");
+        }
+
+        private static void UsageConsentFile()
+        {
+            ResetUsage();
+            File.WriteAllText(SandboxFile("usage-statistics.txt"), "on\r\n");
+            Equal(true, UsageConsent.IsGiven, "on with line break");
+            using (new FileStream(SandboxFile("usage-statistics.txt"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                Equal(false, UsageConsent.IsGiven, "unreadable file is no consent");
+                Equal(false, UsageConsent.InstallerDefault, "unreadable file is not offered as on");
+            }
+            File.WriteAllText(SandboxFile("usage-statistics.txt"), "yes");
+            Equal(false, UsageConsent.IsGiven, "unknown value is no consent");
+            Equal(false, UsageConsent.InstallerDefault, "unknown value is not offered as on");
+        }
+
+        private static void UsageMergeAfterFailedRead()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            string stored = Today() + "\t1\tmenu.about=5\t0.10";
+            File.WriteAllLines(SandboxFile("usage-days.txt"), new[] { stored });
+            using (new FileStream(SandboxFile("usage-days.txt"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                Usage.Hit("menu.exit");
+                Usage.Hit("menu.exit");
+            }
+            Equal(stored, string.Join("|", DaysLines()), "file untouched while unreadable");
+            True(File.ReadAllText(AppLog.FilePath).Contains("usage statistics: counters not read"), "failure logged");
+            Usage.Hit("menu.exit");
+            Equal(Today() + "\t0\tmenu.about=5,menu.exit=3\t" + AppIdentity.Version, string.Join("|", DaysLines()), "merged");
+        }
+
+        private static void UsageRetention()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            File.WriteAllLines(SandboxFile("usage-days.txt"), new[]
+            {
+                DaysAgo(10) + "\t0\tmenu.about=1\t0.10",
+                DaysAgo(6) + "\t1\tmenu.about=5,bad,x=-1\t0.10",
+                "garbage line"
+            });
+            Usage.Hit("menu.about");
+            string[] lines = DaysLines();
+            Equal(2, lines.Length, "days kept: " + string.Join("|", lines));
+            Equal(DaysAgo(6) + "\t1\tmenu.about=5\t0.10", lines[0], "six days ago kept as sent, broken items dropped");
+            Equal(Today() + "\t0\tmenu.about=1\t" + AppIdentity.Version, lines[1], "today");
+        }
+
+        private static void UsageSentRevision()
+        {
+            foreach (int status in new[] { 200, 400, 413 }) True(Usage.IsFinalAnswer(status), "final " + status);
+            foreach (int status in new[] { 429, 503, 500 }) True(!Usage.IsFinalAnswer(status), "retry " + status);
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            CallStatic(typeof(Usage), "Packet", Today(), UsageDays()[Today()]);
+            int packed = UsageDays()[Today()].Revision;
+            Usage.Hit("menu.about");
+            Usage.MarkSent(Today(), packed);
+            Equal(false, UsageDays()[Today()].Sent, "changed after packet is not sent");
+            True(DaysLines()[0].Contains("\t0\t"), "file not marked");
+            Usage.MarkSent(Today(), UsageDays()[Today()].Revision);
+            Equal(true, UsageDays()[Today()].Sent, "current revision sent");
+            True(DaysLines()[0].Contains("\t1\t"), "file marked");
+            Usage.Hit("menu.about");
+            Equal(false, UsageDays()[Today()].Sent, "new event unmarks");
+        }
+
+        private static void UsageSetConsentRefusal()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            Usage.SetConsent(false);
+            Equal(0, UsageDays().Count, "days forgotten at once");
+            Equal(false, (bool)StaticField(typeof(Usage), "loaded"), "counters to be read again");
+            True(!File.Exists(SandboxFile("usage-days.txt")), "counters removed");
+            Equal("off", File.ReadAllText(SandboxFile("usage-statistics.txt")), "refusal saved");
+        }
+
+        private static void UsageSaveAfterRefusal()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            int revision = UsageDays()[Today()].Revision;
+            File.WriteAllText(SandboxFile("usage-statistics.txt"), "off");
+            File.Delete(SandboxFile("usage-days.txt"));
+            CallStatic(typeof(Usage), "Save");
+            Usage.MarkSent(Today(), revision);
+            True(!File.Exists(SandboxFile("usage-days.txt")), "nothing written back after refusal");
+        }
+
+        private static void UsageConsentReenabled()
+        {
+            ResetUsage();
+            Usage.SetConsent(true);
+            Usage.Hit("menu.about");
+            Usage.Hit("menu.about");
+            Usage.SetConsent(false);
+            Usage.SetConsent(true);
+            Usage.Hit("menu.exit");
+            Equal(Today() + "\t0\tmenu.exit=1\t" + AppIdentity.Version, string.Join("|", DaysLines()), "old counters gone");
+        }
+
+        private static void UsageStateUnmarksToday()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            Usage.MarkSent(Today(), UsageDays()[Today()].Revision);
+            int revision = UsageDays()[Today()].Revision;
+            Usage.SetState("rules", 2);
+            Equal(false, UsageDays()[Today()].Sent, "state change unmarks");
+            True(UsageDays()[Today()].Revision > revision, "revision grows");
+            Usage.MarkSent(Today(), UsageDays()[Today()].Revision);
+            Usage.SetState("rules", 2);
+            Equal(true, UsageDays()[Today()].Sent, "same state keeps sent");
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.SetState("rules", 3);
+            Equal(0, UsageDays().Count, "state alone creates no day");
+        }
+
+        private static void UsageSendWithoutConsent()
+        {
+            ResetUsage();
+            UsageDays()[Today()] = new UsageDay { Version = AppIdentity.Version };
+            CallStatic(typeof(Usage), "SendPending");
+            Equal(0, UsageDays().Count, "days forgotten");
+            True(!File.Exists(SandboxFile("usage-days.txt")), "no counters file");
+            True(!File.Exists(SandboxFile("usage-id.txt")), "no install id");
+        }
+
+        private static void UpdateCheckDue()
+        {
+            string stamp = SandboxFile("update-check.txt");
+            if (File.Exists(stamp)) File.Delete(stamp);
+            Equal(DateTime.MinValue, (DateTime)CallStatic(typeof(UpdateWatcher), "LastCheck"), "no stamp");
+            DateTime now = DateTime.UtcNow;
+            CallStatic(typeof(UpdateWatcher), "SaveCheck", now);
+            Equal(now, (DateTime)CallStatic(typeof(UpdateWatcher), "LastCheck"), "stamp round trip");
+            File.WriteAllText(stamp, "yesterday");
+            Equal(DateTime.MinValue, (DateTime)CallStatic(typeof(UpdateWatcher), "LastCheck"), "garbage stamp");
+            Equal(false, UpdateWatcher.IsDue(now.AddHours(-23), now), "checked 23 hours ago");
+            Equal(true, UpdateWatcher.IsDue(now.AddHours(-25), now), "checked 25 hours ago");
+            Equal(true, UpdateWatcher.IsDue(DateTime.MinValue, now), "never checked");
+            Equal(true, UpdateWatcher.IsDue(now.AddHours(2), now), "stamp in the future");
+        }
+
+        private static void UpdateWatcherSkips()
+        {
+            string stamp = SandboxFile("update-check.txt");
+            if (File.Exists(stamp)) File.Delete(stamp);
+            AutoUpdateCheck.Set(false);
+            string log = File.Exists(AppLog.FilePath) ? File.ReadAllText(AppLog.FilePath) : "";
+            CallStatic(typeof(UpdateWatcher), "Check");
+            True(!File.Exists(stamp), "switched off, no check");
+            AutoUpdateCheck.Set(true);
+            CallStatic(typeof(UpdateWatcher), "SaveCheck", DateTime.UtcNow);
+            string saved = File.ReadAllText(stamp);
+            CallStatic(typeof(UpdateWatcher), "Check");
+            Equal(saved, File.ReadAllText(stamp), "checked recently, no check");
+            Equal(log, File.Exists(AppLog.FilePath) ? File.ReadAllText(AppLog.FilePath) : "", "nothing logged");
+        }
+
+        private static void ToolCallUsageApply()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            new ToolCallUsage().Apply(new Dictionary<string, int> { { "list_flows", 3 } });
+            True(DaysLines()[0].Contains("mcp.list_flows=3"), "counted: " + DaysLines()[0]);
+            ResetUsage();
+            UsageConsent.Set(false);
+            new ToolCallUsage().Apply(new Dictionary<string, int> { { "list_flows", 3 } });
+            True(!File.Exists(SandboxFile("usage-days.txt")), "nothing counted without consent");
+        }
+
+        private static void AutoUpdateCheckSwitch()
+        {
+            string flag = SandboxFile("update-check-off.txt");
+            if (File.Exists(flag)) File.Delete(flag);
+            Equal(true, AutoUpdateCheck.IsEnabled, "enabled by default");
+            AutoUpdateCheck.Set(false);
+            Equal(false, AutoUpdateCheck.IsEnabled, "disabled");
+            True(File.Exists(flag), "flag file written");
+            AutoUpdateCheck.Set(true);
+            Equal(true, AutoUpdateCheck.IsEnabled, "enabled again");
+            True(!File.Exists(flag), "flag file removed");
+        }
+
+        private static void SettingsNeedsWrite()
+        {
+            File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9000, \"api_port\": 9001, \"verify_upstream\": false}");
+            EngineSettings stored = EngineSettings.Load();
+            Equal(false, stored.NeedsWrite(9000, 9001, false), "same values");
+            Equal(true, stored.NeedsWrite(9002, 9001, false), "proxy port changed");
+            Equal(true, stored.NeedsWrite(9000, 9002, false), "api port changed");
+            Equal(true, stored.NeedsWrite(9000, 9001, true), "verify changed");
+            File.WriteAllText(EngineSettings.FilePath, "{broken");
+            Equal(true, EngineSettings.Load().NeedsWrite(EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true), "broken file rewritten");
+            File.Delete(EngineSettings.FilePath);
+            Equal(false, EngineSettings.Load().NeedsWrite(EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true), "no file, defaults");
+        }
+
+        private static void SettingsBrokenKeptOnSave()
+        {
+            File.WriteAllText(EngineSettings.FilePath, "{broken");
+            try
+            {
+                EngineSettings broken = EngineSettings.Load();
+                broken.ProxyPort = 9100;
+                broken.Save();
+                Equal("{broken", File.ReadAllText(EngineSettings.FilePath + ".broken"), "broken copy");
+                EngineSettings saved = EngineSettings.Load();
+                True(saved.Parsed, "new file parsed");
+                Equal(9100, saved.ProxyPort, "new value");
+            }
+            finally
+            {
+                File.Delete(EngineSettings.FilePath);
+                File.Delete(EngineSettings.FilePath + ".broken");
+            }
+        }
+
+        private static void SilentUsageStatistics()
+        {
+            ResetUsage();
+            List<SetupOption> options = SetupProfile.Options();
+            InstallRequest plain = SilentSetup.Parse(CommandLine.Normalize(new[] { "--silent" }), options, @"C:\T", true);
+            Equal(true, plain.Has(UsageConsent.OptionKey), "on by default");
+            InstallRequest refused = SilentSetup.Parse(CommandLine.Normalize(new[] { "--silent", "--option:usageStatistics=0" }), options, @"C:\T", true);
+            Equal(false, refused.Has(UsageConsent.OptionKey), "turned off");
+            UsageConsent.Set(false);
+            Equal(false, SilentSetup.Parse(CommandLine.Normalize(new[] { "--silent" }), SetupProfile.Options(), @"C:\T", true).Has(UsageConsent.OptionKey), "previous refusal kept");
+            UsageConsent.Set(true);
+            Equal(true, SilentSetup.Parse(CommandLine.Normalize(new[] { "--silent" }), SetupProfile.Options(), @"C:\T", true).Has(UsageConsent.OptionKey), "previous consent kept");
         }
     }
 }

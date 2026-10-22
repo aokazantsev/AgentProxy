@@ -13,6 +13,9 @@ namespace AgentProxy
 
         public bool ProxyRunning;
         public int Flows;
+        public int Rules;
+        public int RulesEnabled;
+        public readonly Dictionary<string, int> ToolCalls = new Dictionary<string, int>();
 
         public static EngineStatus Parse(string json)
         {
@@ -38,6 +41,24 @@ namespace AgentProxy
                 var proxy = value as Dictionary<string, object>;
                 object running;
                 if (proxy != null && proxy.TryGetValue("running", out running) && running is bool) status.ProxyRunning = (bool)running;
+            }
+            if (data.TryGetValue("rules", out value))
+            {
+                var rules = value as Dictionary<string, object>;
+                object count;
+                if (rules != null && rules.TryGetValue("total", out count) && count is int) status.Rules = (int)count;
+                if (rules != null && rules.TryGetValue("enabled", out count) && count is int) status.RulesEnabled = (int)count;
+            }
+            if (data.TryGetValue("tool_calls", out value))
+            {
+                var calls = value as Dictionary<string, object>;
+                if (calls != null)
+                {
+                    foreach (KeyValuePair<string, object> pair in calls)
+                    {
+                        if (pair.Value is int) status.ToolCalls[pair.Key] = (int)pair.Value;
+                    }
+                }
             }
             return status;
         }

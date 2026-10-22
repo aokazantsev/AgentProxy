@@ -22,6 +22,7 @@ namespace AgentProxy
         private readonly Timer restartTimer = new Timer();
         private readonly RestartPolicy policy = new RestartPolicy();
         private readonly StringBuilder stderrTail = new StringBuilder();
+        private readonly ToolCallUsage toolCalls = new ToolCallUsage();
         private Process process;
         private DateTime startedAt;
         private long logOffset;
@@ -89,6 +90,7 @@ namespace AgentProxy
             ProcessStartInfo info = EngineStartInfo(installDirectory, Process.GetCurrentProcess().Id);
             lock (stderrTail) stderrTail.Length = 0;
             logOffset = EngineLogTail.Length();
+            toolCalls.Reset();
             try
             {
                 process = new Process { StartInfo = info, EnableRaisingEvents = true };
@@ -198,21 +200,23 @@ namespace AgentProxy
         {
             if (process == null || Interlocked.Exchange(ref healthInFlight, 1) != 0) return;
             int port = Settings.ApiPort;
+            int generation = toolCalls.Generation;
             ThreadPool.QueueUserWorkItem(state =>
             {
                 EngineStatus status = EngineStatus.Fetch(port);
                 ui.Post(ignored =>
                 {
                     Interlocked.Exchange(ref healthInFlight, 0);
-                    ApplyHealth(status);
+                    ApplyHealth(status, generation);
                 }, null);
             });
         }
 
-        private void ApplyHealth(EngineStatus status)
+        private void ApplyHealth(EngineStatus status, int generation)
         {
-            if (process == null || disposed) return;
+            if (process == null || disposed || !toolCalls.IsCurrent(generation)) return;
             LastStatus = status;
+            if (status != null) toolCalls.Apply(status.ToolCalls);
             bool warmingUp = DateTime.UtcNow - startedAt < WarmUp;
             if (status != null && status.ProxyRunning) SetState(EngineState.Running, null);
             else if (warmingUp) SetState(EngineState.Starting, null);

@@ -87,6 +87,7 @@ async def _dispatch(service, message):
         arguments = params.get("arguments") or {}
         if not isinstance(arguments, dict):
             return _error(request_id, INVALID_PARAMS, "arguments must be an object")
+        service.count_tool_call(name)
         try:
             result = await call_tool(service, name, arguments)
         except ToolError as error:

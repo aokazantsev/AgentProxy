@@ -102,6 +102,7 @@ namespace AgentProxy
                 string path = UpdateChecker.Download(release);
                 downloadedRelease = release;
                 AppLog.Append("update downloaded: " + path + (release.Sha256 != null ? ", sha256 verified" : ", no sha256 in release"));
+                Usage.Hit("update.download");
                 Report("Скачана версия " + release.VersionText
                     + (release.Sha256 != null ? ", контрольная сумма сверена с GitHub" : ", в релизе нет контрольной суммы — файл не сверен")
                     + ". «Установить сейчас» запустит установщик: он поставит её поверх текущей и запустит программу заново, "
@@ -150,6 +151,7 @@ namespace AgentProxy
             {
                 UpdateChecker.Verify(downloadedPath, downloadedRelease);
                 AppLog.Append("update install started: " + downloadedPath);
+                Usage.Hit("update.install");
                 Process setup = Process.Start(new ProcessStartInfo(downloadedPath, AppIdentity.UpdateSetupArguments) { UseShellExecute = true });
                 if (setup != null)
                 {
