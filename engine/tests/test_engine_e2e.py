@@ -763,3 +763,27 @@ def test_documented_routes_answer(engine):
                                            "params": {"name": "get_flow", "arguments": {"id": seq}}})
     assert call["result"]["isError"] is True and "not found" in call["result"]["content"][0]["text"]
     target.shutdown()
+
+
+def test_check_connection_tells_failure_kinds_apart(start_engine, tmp_path):
+    engine = start_engine(verify_upstream=True)
+    target = start_server(str(tmp_path))
+    with pytest.raises(urllib.error.URLError):
+        proxied_opener(engine, cafile=certifi_bundle()).open(
+            "https://localhost:{0}/pinned".format(target.server_port), timeout=15)
+    with pytest.raises(urllib.error.URLError):
+        proxied_opener(engine).open("https://127.0.0.1:{0}/".format(free_port()), timeout=15)
+    with pytest.raises(urllib.error.HTTPError):
+        proxied_opener(engine, os.path.join(engine["data_dir"], "certs", "mitmproxy-ca-cert.pem")).open(
+            "https://127.0.0.1:{0}/selfsigned".format(target.server_port), timeout=15)
+
+    def checked():
+        answer = api_get(engine["api_port"], "/api/connection?device=false")[1]
+        kinds = {failure["kind"] for failure in answer["failures"]}
+        return answer if kinds == {"tls_untrusted", "connect_failed", "server_certificate"} else None
+
+    answer = wait_until(checked, 10)
+    assert answer and answer["verdict"] == "traffic_flows"
+    assert answer["proxy"]["listening"] is True and answer["device"] == {"checked": False}
+    assert (answer["traffic"]["count"], answer["traffic"]["failed"]) == (1, 1)
+    target.shutdown()

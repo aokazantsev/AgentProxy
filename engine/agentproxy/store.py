@@ -500,6 +500,12 @@ class FlowStore:
             rows = self._db.execute(sql, params + [limit]).fetchall()
         return [_row(row) for row in rows]
 
+    def activity(self, limit):
+        with self._lock:
+            rows = self._db.execute("SELECT started, duration_ms, method, scheme, host, error, open FROM flows "
+                                    "ORDER BY seq DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
     def get(self, flow_id):
         with self._lock:
             row = self._db.execute("SELECT * FROM flows WHERE id = ? OR CAST(seq AS TEXT) = ?",

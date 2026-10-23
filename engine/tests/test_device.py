@@ -117,7 +117,7 @@ def test_status_changes_nothing():
     adb = FakeAdb()
     answer = control(adb).apply("status", None)
     assert answer["ready"] is False and answer["changed"] is False
-    assert "run enable" in answer["hint"]
+    assert "run device_proxy enable" in answer["hint"]
     assert adb.proxy == {} and adb.reverse == {}
 
 
@@ -125,8 +125,9 @@ def test_status_hint_for_foreign_proxy_and_missing_reverse():
     adb = FakeAdb()
     adb.proxy["emu-1"] = "10.0.0.5:3128"
     assert "another proxy" in control(adb).apply("status", None)["hint"]
+    assert "run device_proxy enable" in control(adb).apply("status", None)["hint"]
     adb.proxy["emu-1"] = "127.0.0.1:8890"
-    assert "adb reverse is missing" in control(adb).apply("status", None)["hint"]
+    assert "no connection: run device_proxy enable" in control(adb).apply("status", None)["hint"]
 
 
 def test_failed_proxy_write_rolls_back_reverse():
@@ -158,7 +159,7 @@ def test_status_while_the_proxy_does_not_listen_is_not_ready():
     control(adb).apply("enable", None)
     answer = control(adb, listening=False).apply("status", None)
     assert answer["proxy_listening"] is False and answer["ready"] is False
-    assert "not listening" in answer["hint"]
+    assert "not listening" in answer["hint"] and "run device_proxy disable" in answer["hint"]
     assert control(adb, listening=False).apply("disable", None)["device_proxy"] is None
 
 

@@ -6,7 +6,7 @@ namespace AgentProxy
     internal static class AppIdentity
     {
         public const string Name = "AgentProxy";
-        public const string Version = "0.12";
+        public const string Version = "0.13";
         public const string UpdateSetupArguments = "/silent /notify";
         public const string UpdateKeeps = "настройки, правила подмены, история запросов и сертификат сохранятся";
         public const string ExecutableName = "AgentProxy.exe";

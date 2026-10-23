@@ -25,7 +25,8 @@ INSTRUCTIONS = (
     "changes requests (map local, rewrite, error, delay, drop, an SSE stream of its own); list_rules shows the rules, "
     "delete them when done. "
     "When something does not go as planned, read_log first: it shows what AgentProxy itself did. "
-    "device_proxy routes an Android device through AgentProxy over adb (and takes it off). The agentproxy skill "
+    "device_proxy routes an Android device through AgentProxy over adb (and takes it off); check_connection tells "
+    "whether traffic arrives and what to fix when it does not. The agentproxy skill "
     "explains device setup (CA certificate) and troubleshooting. " + UNTRUSTED_NOTE
 )
 
@@ -59,7 +60,7 @@ async def handle_message(service, message):
     except Exception:
         log.exception("MCP message failed")
         request_id = message.get("id") if isinstance(message, dict) else None
-        return _error(request_id, INTERNAL_ERROR, "internal error")
+        return _error(request_id, INTERNAL_ERROR, "internal error: read_log (source engine) has the details")
 
 
 async def _dispatch(service, message):
@@ -95,7 +96,7 @@ async def _dispatch(service, message):
             return _result(request_id, {"content": [{"type": "text", "text": str(error)}], "isError": True})
         except Exception as error:
             log.exception("tool %s failed", name)
-            return _result(request_id, {"content": [{"type": "text", "text": "internal error: {0}".format(error)}],
+            return _result(request_id, {"content": [{"type": "text", "text": "internal error: {0}; read_log (source engine) has the details, quote them to the user".format(error)}],
                                         "isError": True})
         text = json.dumps(result, ensure_ascii=False, indent=1)
         return _result(request_id, {"content": [{"type": "text", "text": text}], "structuredContent": result,

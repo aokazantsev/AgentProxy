@@ -78,7 +78,7 @@ class BaseHandler(tornado.web.RequestHandler):
         try:
             data = json.loads(self.request.body.decode("utf-8-sig"))
         except (ValueError, UnicodeDecodeError, RecursionError):
-            raise ToolError("body is not valid JSON")
+            raise ToolError("body is not valid JSON: send it as a UTF-8 file, curl --data-binary @body.json")
         if not isinstance(data, dict):
             raise ToolError("body must be a JSON object")
         return data
@@ -144,6 +144,11 @@ class FlowHandler(BaseHandler):
         arguments = self.query_arguments()
         arguments["id"] = flow_id
         await self.run_tool("get_flow", arguments)
+
+
+class ConnectionHandler(BaseHandler):
+    async def get(self):
+        await self.run_tool("check_connection", self.query_arguments())
 
 
 class LogHandler(BaseHandler):
@@ -279,6 +284,7 @@ def make_app(context):
         (r"/api/events/send", EventsSendHandler),
         (r"/api/log", LogHandler),
         (r"/api/device", DeviceHandler),
+        (r"/api/connection", ConnectionHandler),
         (r"/api/rules", RulesHandler),
         (r"/api/rules/([^/]+)", RuleHandler),
         (r"/api/monitor/pins", MonitorPinsHandler),

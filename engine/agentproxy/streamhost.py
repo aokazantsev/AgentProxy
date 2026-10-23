@@ -69,9 +69,10 @@ class MockStream:
 
     def send(self, content):
         if not self.is_open:
-            raise StreamRefused("the stream is closed")
+            raise StreamRefused("the stream is closed: wait for the app to reconnect and send into the new flow")
         if self.writer.transport.get_write_buffer_size() > MAX_BUFFERED_BYTES:
-            raise StreamRefused("the app does not read the stream: more than {0} MB wait to be delivered".format(
+            raise StreamRefused("the app does not read the stream: more than {0} MB wait to be delivered; bring the app "
+                                "to the foreground or end the stream with close".format(
                 MAX_BUFFERED_BYTES // (1024 * 1024)))
         self.writer.write(_chunk(content))
 

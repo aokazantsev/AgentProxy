@@ -21,12 +21,12 @@ description: Работа с AgentProxy — локальным HTTP(S)-прок�
 
 `proxy_status`, `list_flows`, `get_flow`, `wait_for_flow`, `clear_flows` — история запросов; `list_events`, `wait_for_event`,
 `send_event` — потоки, раздел ниже; `add_rule`, `list_rules`,
-`update_rule`, `delete_rule` — правила подмены, раздел ниже; `read_log` — журналы AgentProxy, раздел «Сначала журнал»; `device_proxy` — прокси устройства. Назначение, параметры и фильтры — в схемах инструментов.
+`update_rule`, `delete_rule` — правила подмены, раздел ниже; `read_log` — журналы AgentProxy, раздел «Сначала журнал»; `device_proxy` — прокси устройства; `check_connection` — доходит ли трафик и что чинить. Назначение, параметры и фильтры — в схемах инструментов.
 
 MCP недоступен (сессия началась до установки) — те же данные отдаёт HTTP API. В PowerShell — `curl.exe`;
 адрес с `&` — в двойных кавычках; тело `POST`/`PATCH` для `/api/rules` и `/api/events/send` — файлом в UTF-8 через
 `--data-binary "@rule.json"` (в Git Bash `-d` портит кириллицу, в PowerShell `-d` портит любой JSON). `curl -s http://127.0.0.1:{{API_PORT}}/api/status`, `"/api/flows?host=...&limit=20"`, `/api/flows/<id>` (`?raw=true` — как `raw` у `get_flow`), `/api/flows/wait?...` — как `wait_for_flow`,
-`DELETE /api/flows` — как `clear_flows`; потоки — `/api/events?flow=...` и `/api/events/wait` как `list_events` и `wait_for_event`, `POST /api/events/send` как `send_event`; правила —
+`DELETE /api/flows` — как `clear_flows`; `GET /api/connection` — как `check_connection`; потоки — `/api/events?flow=...` и `/api/events/wait` как `list_events` и `wait_for_event`, `POST /api/events/send` как `send_event`; правила —
 `GET`/`POST /api/rules` (`GET ?id=<id>` — как `list_rules` с `id`; тело `POST` — те же поля, что у `add_rule`), `DELETE /api/rules` — удалить **все**, `GET /api/log?source=engine&level=warning&lines=50` — как `read_log`,
 `PATCH`/`DELETE /api/rules/<id>` — одно. Схемы инструментов с описанием полей — метод MCP `tools/list`: в Git Bash
 `curl -s -X POST http://127.0.0.1:{{API_PORT}}/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`, в PowerShell
@@ -71,13 +71,14 @@ MCP недоступен (сессия началась до установки)
 историю. Запрос есть, а правила в его `rules` нет — условие, `times` или порядок. Запроса нет (`list_flows` по хосту,
 с `CONNECT`) и нет `not recorded`: соседние запросы приложения видны — кэш клиента, пиннинг хоста или запрос
 ещё не закончен (долгий ответ) — `{{SKILL_DIR}}\rules.md`, «Почему правило не
-сработало»; не видно ничего — таблица ниже.
+сработало»; не видно ничего — `check_connection`.
 
 ## Подключить Android-устройство (USB, Wi-Fi-отладка, эмулятор)
 
 1. Сам, без просьбы: `device_proxy` (`action: enable`). При нескольких устройствах нужен `serial`. Без MCP —
    `POST /api/device` с телом `{"action": "enable"}` (файлом, как правила), `GET /api/device` — только чтение.
-   Отказ (нет adb, устройства, прокси не слушает порт) называет следующий шаг.
+   Отказ (нет adb, устройства, прокси не слушает порт) называет следующий шаг. Затем `check_connection`: вердикт и
+   подсказки, повторять после каждой починки.
 2. Сертификат ставится один раз на устройство: с включённым прокси открыть в браузере устройства `http://mitm.it`
    и следовать инструкции для Android (Безопасность → Шифрование и учётные данные → Установить
    сертификат → Сертификат ЦС). Это делает пользователь руками: Android не даёт поставить ЦС из adb.
@@ -89,11 +90,12 @@ AgentProxy закроют.
 
 ## Почему не видно трафика
 
+Сначала `check_connection`: прокси устройства, `adb reverse`, запросы за последние минуты, отказы TLS по хостам
+(сертификат не стоит, приложению не доверяет пользовательским ЦС или пиннинг), недоступные с ПК хосты и что делать.
+Остальное:
+
 | Симптом | Причина и что делать |
 |---|---|
-| В истории пусто | Проверить `device_proxy` (`action: status`): прокси устройства и `adb reverse`. Приложение перезапустить: часть HTTP-клиентов читает прокси только при старте. Если запросы другого приложения через прокси видны, а этого нет — вероятен пиннинг сертификата (OkHttp `CertificatePinner` рвёт соединение после рукопожатия, записи не остаётся). |
-| В истории записи `CONNECT` с ошибкой «TLS handshake with the client failed» | Причина — в тексте ошибки. «does not trust the proxy's certificate» — сертификат не стоит или приложение не доверяет пользовательским ЦС (шаги 2–3), либо пиннинг. «cannot agree on a TLS version» — старая версия TLS на устройстве. `list_flows` с `failed_only` показывает такие записи. |
-| `CONNECT failed` | Хост недоступен с этого ПК (VPN, DNS) — проблема сети, не приложения. Мок на такой хост — `{{SKILL_DIR}}\rules.md`, раздел «Почему правило не сработало». |
 | `wait_for_flow` вернул «engine is stopping» (HTTP 503) | Движок перезапускается: пользователь сменил порты или проверку сертификатов, перезапустил движок или ставит обновление. Подождать, вызвать `proxy_status` и повторить `wait_for_flow`. После смены порта — HTTP API на новом порту. |
 | `proxy_status` не отвечает | Движок не запущен: значок в трее, журнал `engine.log`. Перезапуск — пункт трея «Перезапустить движок». |
 | Правило не сработало или не дало эффекта (`hits` = 0, пометки в поле `rules`, `hits` растут без эффекта) | `{{SKILL_DIR}}\rules.md`, раздел «Почему правило не сработало». |

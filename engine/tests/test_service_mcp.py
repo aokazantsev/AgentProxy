@@ -75,7 +75,7 @@ def test_wait_returns_flow_inserted_later(service, store):
 
 def test_wait_times_out(service):
     result = run(service.wait_for_flow({"timeout_seconds": 1}))
-    assert result == {"flow": None, "timed_out": True}
+    assert result["flow"] is None and result["timed_out"] is True and "check_connection" in result["hint"]
 
 
 def test_wait_with_since_seq_returns_existing(service, store):
@@ -172,7 +172,8 @@ def test_status_tool_calls_is_a_copy(service):
 def test_counted_tool_names_match_site_catalog():
     assert TOOL_NAMES == {
         "proxy_status", "list_flows", "get_flow", "wait_for_flow", "list_events", "send_event", "wait_for_event",
-        "clear_flows", "list_rules", "add_rule", "update_rule", "delete_rule", "device_proxy", "read_log",
+        "clear_flows", "list_rules", "add_rule", "update_rule", "delete_rule", "device_proxy", "check_connection",
+        "read_log",
     }
     assert all(re.fullmatch(r"[a-z0-9_]{1,44}", name) for name in TOOL_NAMES)
 

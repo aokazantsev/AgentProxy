@@ -11,6 +11,9 @@ from .streamtap import NO_BODY_STATUSES, StreamTap, should_stream, should_stream
 log = logging.getLogger("agentproxy.recorder")
 
 TLS_CLIENT_ERROR = "TLS handshake with the client failed: {0}"
+CONNECT_FAILED = "CONNECT failed"
+CONNECT_ADVICE = " If you plan to redirect"
+CONNECT_DETAIL_CHARS = 300
 STREAM_DONE_MARK = "agentproxy_stream_done"
 INCOMING = "incoming"
 OUTGOING = "outgoing"
@@ -114,11 +117,25 @@ def tls_failure_record(data):
     server = data.context.server
     host = client.sni or (server.address[0] if server and server.address else "unknown")
     port = server.address[1] if server and server.address else 443
+    now = time.time()
     return FlowRecord(
-        id=str(uuid.uuid4()), started=time.time(), method="CONNECT", scheme="https",
+        duration_ms=int((now - client.timestamp_start) * 1000) if client.timestamp_start else None,
+        id=str(uuid.uuid4()), started=now, method="CONNECT", scheme="https",
         host=host, port=port, path="", url="https://{0}:{1}".format(host, port), request_headers=[],
         error=TLS_CLIENT_ERROR.format(data.conn.error or "handshake failed"),
         client=client.peername[0] if client.peername else "")
+
+
+def connect_failure(response):
+    if response is None:
+        return CONNECT_FAILED
+    reason = "{0}: {1} {2}".format(CONNECT_FAILED, response.status_code, response.reason)
+    try:
+        text = response.get_text(strict=False) or ""
+    except Exception:
+        text = ""
+    detail = " ".join(text.split(CONNECT_ADVICE)[0].split())[:CONNECT_DETAIL_CHARS]
+    return "{0} ({1})".format(reason, detail) if detail else reason
 
 
 class Recorder:
@@ -195,10 +212,7 @@ class Recorder:
             self._save(flow)
 
     def http_connect_error(self, flow):
-        reason = "CONNECT failed"
-        if flow.response is not None:
-            reason += ": {0} {1}".format(flow.response.status_code, flow.response.reason)
-        self._save(flow, reason)
+        self._save(flow, connect_failure(flow.response))
 
     def tls_failed_client(self, data):
         server = data.context.server

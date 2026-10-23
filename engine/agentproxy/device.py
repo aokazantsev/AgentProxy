@@ -110,7 +110,7 @@ class DeviceControl:
             if action == "enable":
                 if not self.is_listening():
                     raise DeviceError("the AgentProxy proxy is not listening on port {0}, the device would lose its "
-                                      "connection: check proxy_status and read_log, then repeat enable "
+                                      "connection: check proxy_status and read_log, then repeat device_proxy enable "
                                       "once proxy_status reports running".format(port), "proxy not listening")
                 self._enable(serial, port, address, had_reverse)
             elif action == "disable":
@@ -225,10 +225,10 @@ class DeviceControl:
                     "device)")
         if state["device_proxy"] == state["expected_proxy"] and not state["proxy_listening"]:
             return ("the device points to AgentProxy but the proxy is not listening, so the device has no "
-                    "connection: check proxy_status and read_log, or run disable")
+                    "connection: check proxy_status and read_log, or run device_proxy disable")
         if state["device_proxy"] and state["device_proxy"] != state["expected_proxy"]:
-            return "the device uses another proxy ({0}): run enable to switch it to AgentProxy".format(
+            return "the device uses another proxy ({0}): run device_proxy enable to switch it to AgentProxy".format(
                 state["device_proxy"])
         if state["device_proxy"] and not state["reverse_active"]:
-            return "the proxy is set but adb reverse is missing, the device has no connection: run enable"
-        return "the device proxy is off: run enable to route its traffic through AgentProxy"
+            return "the proxy is set but adb reverse is missing, the device has no connection: run device_proxy enable"
+        return "the device proxy is off: run device_proxy enable to route its traffic through AgentProxy"
