@@ -8,20 +8,23 @@ import time
 from .bodies import CHARSET, SLOW_CHARSETS, TEXT_CHARSETS
 from .guard import OWN_PORT_MARK
 from .rules import (APPLIED_MARK, MAX_DELAY_MS, MAX_FILE_BYTES, NO_REQUEST_STREAM_MARK,
-                    NO_RESPONSE_STREAM_MARK, PLAN_MARK, TERMINAL_ACTIONS, changes_body)
+                    NO_RESPONSE_STREAM_MARK, PLAN_MARK, TERMINAL_ACTIONS, RuleError, changes_body)
+from .streamhost import DEFAULT_HEADERS as DEFAULT_STREAM_HEADERS, LOOPBACK, STREAM_HEADER, StreamRefused
 from .streamtap import IDENTITY_ENCODINGS, NO_BODY_STATUSES, decoded_pieces
 
 log = logging.getLogger("agentproxy.rewriter")
 
 EDITOR_MARK = "agentproxy_body_editor"
 LIMIT_TEXT = "larger than {0} MB".format(MAX_FILE_BYTES // (1024 * 1024))
-UPLOAD_TOO_LARGE = "request body is {0}; respond cannot buffer it"
+UPLOAD_TOO_LARGE = "request body is {0}; the rule cannot buffer it"
 UPLOAD_GREW = "request body without length grew {0}; it went on to the server, the client got no answer"
 JSON_SNIFF_BYTES = 1024 * 1024
 PACK_NAMES = {"x-gzip": "gzip"}
 PLAIN_TYPES = ("text/plain", "application/octet-stream")
 RESPOND_ERROR_MARK = "agentproxy_respond_error"
 DELAY_MARK = "agentproxy_delay"
+ORIGIN_MARK = "agentproxy_stream_origin"
+BUFFERING_ACTIONS = ("respond", "sse")
 MIME_TYPES = mimetypes.MimeTypes()
 ORDER_MARKED_CHARSETS = {"utf-16": (b"\xff\xfe", b"\xfe\xff"),
                          "utf-32": (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")}
@@ -283,8 +286,9 @@ class BodyEditor:
 
 
 class Rewriter:
-    def __init__(self, rule_set):
+    def __init__(self, rule_set, streams=None):
         self.rules = rule_set
+        self.streams = streams
         self.lazy_clients = set()
         self.edits = asyncio.Semaphore(PARALLEL_EDITS)
 
@@ -322,7 +326,7 @@ class Rewriter:
                 _set_headers(request.headers, rule["request_headers"])
         if plan[-1]["action"] in TERMINAL_ACTIONS:
             flow.metadata[NO_REQUEST_STREAM_MARK] = True
-            if plan[-1]["action"] == "respond" and _declared_length(request.headers) > MAX_FILE_BYTES:
+            if plan[-1]["action"] in BUFFERING_ACTIONS and _declared_length(request.headers) > MAX_FILE_BYTES:
                 self._refuse_upload(flow, plan[-1], UPLOAD_TOO_LARGE)
                 return
         delay = min(sum(rule.get("delay_ms", 0) for rule in plan), MAX_DELAY_MS) / 1000.0
@@ -353,7 +357,7 @@ class Rewriter:
         if not plan or flow.error is not None:
             return
         delay = flow.metadata.pop(DELAY_MARK, 0)
-        if plan[-1]["action"] == "respond" and flow.request.stream:
+        if plan[-1]["action"] in BUFFERING_ACTIONS and flow.request.stream:
             self._refuse_upload(flow, plan[-1], UPLOAD_GREW)
             return
         if delay:
@@ -362,6 +366,67 @@ class Rewriter:
             flow.kill()
         elif plan[-1]["action"] == "respond":
             await self._respond(flow, plan[-1])
+        elif plan[-1]["action"] == "sse":
+            self._serve_stream(flow, plan[-1])
+
+    def _serve_stream(self, flow, rule):
+        from mitmproxy import http
+        try:
+            current = self.rules.get(rule["id"])
+        except RuleError:
+            current = None
+        if current is None or not current["enabled"] or current["action"] != "sse":
+            self._refuse_stream(flow, rule, "the rule was deleted, disabled or changed while the request waited")
+            return
+        if flow.request.method == "HEAD":
+            headers = dict(current.get("headers", {}))
+            named = {name.lower() for name in headers}
+            headers.update((name, value) for name, value in DEFAULT_STREAM_HEADERS if name.lower() not in named)
+            flow.response = http.Response.make(200, b"", headers)
+            flow.metadata[NO_RESPONSE_STREAM_MARK] = True
+            return
+        try:
+            if self.streams is None:
+                raise StreamRefused("no stream listener")
+            stream = self.streams.reserve(flow.id, rule["id"], current.get("headers", {}), current.get("body", ""))
+        except StreamRefused as error:
+            self.rules.note_error(rule["id"], str(error))
+            self._refuse_stream(flow, rule, str(error))
+            return
+        self.rules.clear_error(rule["id"])
+        request = flow.request
+        flow.metadata[ORIGIN_MARK] = (request.scheme, request.host, request.port, request.host_header)
+        request.scheme = "http"
+        request.host = LOOPBACK
+        request.port = stream.port
+        request.headers[STREAM_HEADER] = stream.token
+
+    @staticmethod
+    def _refuse_stream(flow, rule, message):
+        from mitmproxy import http
+        log.warning("rule %s: %s", rule["id"], message)
+        _entry(flow, rule)["error"] = message
+        text = "AgentProxy rule {0}: {1}".format(rule["id"], message).encode("utf-8")
+        flow.response = http.Response.make(503, text, {"Content-Type": "text/plain; charset=utf-8"})
+        flow.metadata[NO_RESPONSE_STREAM_MARK] = True
+
+    def _restore_request(self, flow):
+        origin = flow.metadata.pop(ORIGIN_MARK, None)
+        if origin is None:
+            return
+        request = flow.request
+        scheme, host, port, host_header = origin
+        request.scheme = scheme
+        request.host = host
+        request.port = port
+        if host_header is not None:
+            request.host_header = host_header
+        request.headers.pop(STREAM_HEADER, None)
+
+    def error(self, flow):
+        self._restore_request(flow)
+        if self.streams is not None:
+            self.streams.release(flow.id)
 
     async def _respond(self, flow, rule):
         from mitmproxy import http
@@ -420,6 +485,7 @@ class Rewriter:
             return content
 
     def responseheaders(self, flow):
+        self._restore_request(flow)
         plan = flow.metadata.get(PLAN_MARK)
         if not plan:
             return
@@ -431,6 +497,11 @@ class Rewriter:
             for rule in plan:
                 if rule["action"] == "rewrite" and ("status" in rule or "response_headers" in rule or changes_body(rule)):
                     _entry(flow, rule)["skipped"] = "response changes not applied: the respond rule could not read its body_file"
+            return
+        if plan[-1]["action"] == "sse":
+            for rule in plan:
+                if rule["action"] == "rewrite" and ("status" in rule or "response_headers" in rule or changes_body(rule)):
+                    _entry(flow, rule)["skipped"] = "response changes not applied: an sse rule answers with its own stream"
             return
         for rule in plan:
             if rule["action"] != "rewrite":

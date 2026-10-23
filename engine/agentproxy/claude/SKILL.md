@@ -35,12 +35,12 @@ MCP недоступен (сессия началась до установки)
 ## Потоки: SSE и WebSocket
 
 Поток — запись истории с момента открытия (`list_flows`: `kind` `sse` или `websocket`, `open`), тела у него нет, сообщения —
-события. Читать `list_events`, ждать `wait_for_event` (без `flow` — любой поток под фильтры, и открывшийся позже), слать в
-открытый WebSocket `send_event`; реакцию ждать `wait_for_event` с `since_n` = `events_before` и обратным `direction`. Ответ ожидания
-с `closed` — поток закончился. У SSE, закрытого приложением, тоже бывает `error` (HTTP/1 — «Client disconnected.»): кто
-закрыл, не говорят ни ошибка, ни события; «incomplete…» в `note` — событие оборвано. После `note` «events not read…»
-события потока не пишутся.
-Правила подмены на события не действуют; ответ правила `respond` с `text/event-stream` — обычный запрос с телом, без событий.
+события. Читать `list_events`, ждать `wait_for_event` (без `flow` — любой под фильтры), слать `send_event`;
+реакцию WebSocket ждать `wait_for_event` с `since_n` = `events_before` и обратным `direction`, на SSE — `wait_for_flow`.
+Ответ ожидания с `closed` — поток закончился. SSE, закрытый приложением, бывает с `error` («Client disconnected.»): кто
+закрыл, не видно; «incomplete…» в `note` — событие оборвано; после «events not read…» события не пишутся. Правила
+подмены на события не действуют. В SSE слать — только в поток правила `sse` (`{{SKILL_DIR}}\rules.md`, «Поток `sse`»);
+`respond` с `text/event-stream` — обычный запрос без событий.
 
 ## Правила подмены (вместо map local и rewrite в Charles)
 

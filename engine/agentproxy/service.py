@@ -3,6 +3,7 @@ import base64
 import binascii
 import logging
 import os
+import re
 import time
 from dataclasses import replace
 
@@ -13,6 +14,7 @@ from .flowlog import clean, describe_rule
 from .injector import InjectError
 from .rules import VIEW_FIELDS, RuleError, RuleNotFound, matches
 from .store import EventFilter, FlowFilter
+from .streamhost import StreamRefused, build_frame
 
 log = logging.getLogger("agentproxy.service")
 
@@ -28,6 +30,8 @@ DEFAULT_EVENT_CHARS = 2000
 FLOW_KINDS = ("http", "sse", "websocket")
 DIRECTIONS = ("incoming", "outgoing")
 MAX_SEND_BYTES = 1024 * 1024
+MAX_RETRY_MS = 24 * 60 * 60 * 1000
+SINGLE_LINE_BREAKS = re.compile(r"[\r\n\x00]")
 HISTORY_SCAN_LIMIT = 20000
 DEFAULT_BODY_CHARS = 20000
 TRUE_WORDS = ("true", "1", "yes")
@@ -153,12 +157,14 @@ PREVIEW_CHARS = 300
 RULE_PROPERTIES = {
     "name": {"type": "string", "description": "Short human note, e.g. 'empty product list'"},
     "enabled": {"type": "boolean", "description": "Default true"},
-    "action": {"type": "string", "enum": ["respond", "rewrite", "drop", "delay"],
+    "action": {"type": "string", "enum": ["respond", "rewrite", "drop", "delay", "sse"],
                "description": "respond: answer from the proxy, the server is not contacted (map local, error "
                               "response); rewrite: change request headers on the way out and the response on "
                               "the way back, the request body stays; drop: abort the request without an answer "
-                              "(HTTP/2: stream reset); delay: only wait delay_ms. For an unreachable HTTPS host "
-                              "respond and drop need a host condition, url_regex alone is not enough: without host "
+                              "(HTTP/2: stream reset); delay: only wait delay_ms; sse: the proxy itself serves an "
+                              "open Server-Sent Events stream, the server is not contacted, and send_event writes "
+                              "events into it. For an unreachable HTTPS host "
+                              "respond, drop and sse need a host condition, url_regex alone is not enough: without host "
                               "the proxy connects to the server first and the request ends with CONNECT failed"},
     "host": {"type": "string", "description": "Condition: substring of the host, case-insensitive (as in list_flows)"},
     "path": {"type": "string", "description": "Condition: substring of the path with query string, case-sensitive "
@@ -183,9 +189,14 @@ RULE_PROPERTIES = {
                                                "counts"},
     "status": {"type": "integer", "description": "200..599. respond: status code, default 200; rewrite: replace the "
                                                 "server's status code"},
-    "headers": dict(FIXED_HEADERS_SCHEMA, description="respond: response headers"),
+    "headers": dict(FIXED_HEADERS_SCHEMA, description="respond, sse: response headers"),
     "body": {"type": "string", "description": "respond: response body text, encoded in the charset "
-                                             "of Content-Type (UTF-8 by default) and packed by Content-Encoding"},
+                                             "of Content-Type (UTF-8 by default) and packed by Content-Encoding; "
+                                             "sse: text written to the stream as soon as the app connects, "
+                                             "e.g. \"data: hello\\n\\n\" (events end with an empty line). Copy the "
+                                             "first events and the shape of events from list_events of a recorded "
+                                             "real stream of the same URL: apps often wait for a connect event and "
+                                             "silently drop events of another shape"},
     "body_file": {"type": "string", "description": "respond: absolute path of a local file sent as the body, as is "
                                                   "(Charles map local); read on every request, so edits apply "
                                                   "at once"},
@@ -258,6 +269,7 @@ class ProxyService:
         self.started_at = time.time()
         self.proxy_running = False
         self.injector = None
+        self.streams = None
         self.tool_calls = {}
         self.device = DeviceControl(lambda: self.settings, lambda: self.proxy_running)
 
@@ -391,6 +403,12 @@ class ProxyService:
         if later:
             hints.append("this rule answers every request of the later rules {0}, so they do not apply while it is "
                          "enabled".format(", ".join(later)))
+        if rule["action"] == "sse" and rule["enabled"]:
+            hints.append("the rule serves streams the app opens from now on: a stream that is already open stays with "
+                         "the real server, so make the app reconnect, then send_event writes into the new flow")
+            if rule.get("body") and not rule["body"].endswith(("\n\n", "\r\n\r\n", "\r\r")):
+                hints.append("body does not end with an empty line: its last event reaches the app only after the "
+                             "next event is sent")
         if rule.get("remaining") == 0 and rule["enabled"]:
             hints.append("the rule has used all its times; pass reset_hits=true to start it again")
         if hints:
@@ -435,6 +453,8 @@ class ProxyService:
             raise ToolError(str(error))
         log.info("rule %s updated (%s): %s", rule_id, ", ".join(sorted(changes) + (["reset_hits"] if reset_hits else [])),
                  describe_rule(rule))
+        if self.streams is not None and (not rule["enabled"] or rule["action"] != "sse"):
+            self.streams.close_rules([rule_id])
         return self._rule_answer(rule)
 
     def delete_rule(self, arguments):
@@ -449,6 +469,8 @@ class ProxyService:
         except RuleError as error:
             raise ToolError(str(error))
         log.info("rules deleted: %s", ", ".join(removed) if removed else "none")
+        if self.streams is not None:
+            self.streams.close_rules(removed)
         return {"removed": removed, "counts": self.rules.counts()}
 
     def read_log(self, arguments):
@@ -477,11 +499,17 @@ class ProxyService:
 
     def send_event(self, arguments):
         summary = self._flow_ref(arguments.get("flow"))
-        if summary["kind"] != "websocket":
-            raise ToolError("only WebSocket connections take sent messages: an SSE stream cannot be written to from "
-                            "the proxy")
         if not summary["open"]:
             raise ToolError("flow {0} is closed".format(summary["seq"]))
+        if summary["kind"] == "sse":
+            return self._send_sse(summary, arguments)
+        used = [name for name in ("event", "id") if _str(arguments, name) is not None]
+        if _int(arguments, "retry") is not None:
+            used.append("retry")
+        if _bool(arguments, "close"):
+            used.append("close")
+        if used:
+            raise ToolError("{0}: only for SSE streams; a WebSocket message is data or data_base64".format(", ".join(used)))
         direction = _choice(arguments, "direction", DIRECTIONS) or "incoming"
         text = arguments.get("data")
         packed = _str(arguments, "data_base64")
@@ -504,6 +532,52 @@ class ProxyService:
             raise ToolError(str(error))
         return {"sent": True, "flow": summary["seq"], "direction": direction, "type": "text" if text is not None else "binary",
                 "size": len(content), "events_before": before}
+
+    def _send_sse(self, summary, arguments):
+        seq = summary["seq"]
+        if _choice(arguments, "direction", DIRECTIONS) == "outgoing":
+            raise ToolError("an SSE stream carries events from the server only: direction outgoing is for WebSocket")
+        if arguments.get("data_base64") not in (None, ""):
+            raise ToolError("SSE events are text: pass data, not data_base64")
+        data = arguments.get("data")
+        if data is not None and not isinstance(data, str):
+            raise ToolError("data must be a string")
+        event = _str(arguments, "event")
+        event_id = _str(arguments, "id")
+        retry = _int(arguments, "retry", low=0, high=MAX_RETRY_MS)
+        close = _bool(arguments, "close")
+        has_event = not (data is None and event is None and event_id is None and retry is None)
+        if not has_event and not close:
+            raise ToolError("pass data, event, id, retry or close")
+        if data is None and (event is not None or event_id is not None):
+            raise ToolError("an SSE event without data never reaches the app: pass data (it may be empty)")
+        for name, value in (("event", event), ("id", event_id)):
+            if value is not None and SINGLE_LINE_BREAKS.search(value):
+                raise ToolError("{0} must be a single line without NUL".format(name))
+        try:
+            frame = build_frame(data, event, event_id, retry) if has_event else b""
+        except UnicodeEncodeError:
+            raise ToolError("data, event and id must be valid Unicode text")
+        if len(frame) > MAX_SEND_BYTES:
+            raise ToolError("an event is limited to {0} bytes".format(MAX_SEND_BYTES))
+        stream = self.streams.find(seq) if self.streams is not None else None
+        if stream is None:
+            rule = next((entry["id"] for entry in summary.get("rules") or [] if entry.get("action") == "sse"), None)
+            if rule is not None:
+                raise ToolError("flow {0} is a stream of rule {1} that is closing (close was sent or the app left): wait "
+                                "for the app to reconnect and send into the new flow".format(seq, rule))
+            raise ToolError("flow {0} is an SSE stream of the real server: only streams served by an sse rule take events. "
+                            "Add a rule with action sse for this URL and make the app reconnect".format(seq))
+        before = self._stream(seq)["event_count"]
+        try:
+            if frame:
+                stream.send(frame)
+            if close:
+                stream.close()
+        except StreamRefused as error:
+            raise ToolError(str(error))
+        return {"sent": bool(frame), "flow": seq, "direction": "incoming", "type": "event", "size": len(frame),
+                "events_before": before, "closed": close}
 
     async def wait_for_event(self, arguments):
         timeout = _int(arguments, "timeout_seconds", 60, 1, MAX_WAIT_SECONDS)
@@ -648,19 +722,29 @@ TOOLS = [
     },
     {
         "name": "send_event",
-        "description": "Send a message into an open WebSocket connection through the proxy: incoming (default) "
+        "description": "Send a message into an open stream through the proxy. WebSocket: incoming (default) "
                        "delivers it to the app as if the server had sent it, outgoing delivers it to the server as if "
-                       "the app had. The message is recorded as an event with the note injected; events_before is the "
-                       "event count before the call. To catch the reaction, call wait_for_event with since_n set to "
-                       "events_before and the opposite direction (outgoing for the app's answer to an incoming "
-                       "message), otherwise the sent message itself comes first. Works for "
-                       "WebSocket only: nothing can be written into an SSE stream. Sending changes what the app "
-                       "or the server sees: tell the user what you sent.",
+                       "the app had; the message is recorded with the note injected. SSE: only a stream served by an "
+                       "sse rule takes events (a stream of the real server cannot be written to); data, event, id, "
+                       "retry build one event, close ends the stream (deleting, disabling or changing the action of the rule closes its streams "
+                       "too). events_before is the event count before the call. To catch the reaction to a WebSocket "
+                       "message, call wait_for_event with since_n set to events_before and the opposite direction "
+                       "(outgoing for the app's answer to an incoming message), otherwise the sent message itself comes "
+                       "first; an SSE stream has no answer direction, the app reacts with requests: wait_for_flow. "
+                       "Sending changes what the app or the server sees: tell the user what you sent.",
         "inputSchema": {"type": "object", "required": ["flow"], "properties": {
-            "flow": {"type": "string", "description": "Flow id or seq number of an open WebSocket flow"},
-            "direction": {"type": "string", "enum": list(DIRECTIONS), "description": "Default incoming"},
-            "data": {"type": "string", "description": "Text message, UTF-8"},
-            "data_base64": {"type": "string", "description": "Binary message, base64; use either data or this"}}},
+            "flow": {"type": "string", "description": "Flow id or seq number of an open WebSocket or SSE flow"},
+            "direction": {"type": "string", "enum": list(DIRECTIONS), "description": "Default incoming; SSE has only "
+                                                                                      "incoming"},
+            "data": {"type": "string", "description": "Text message, UTF-8; SSE: the event's data, line breaks "
+                                                      "become several data lines"},
+            "data_base64": {"type": "string", "description": "WebSocket binary message, base64; use either data or "
+                                                              "this"},
+            "event": {"type": "string", "description": "SSE: event name, one line"},
+            "id": {"type": "string", "description": "SSE: event id, one line"},
+            "retry": {"type": "integer", "description": "SSE: reconnect delay in milliseconds for the app"},
+            "close": {"type": "boolean", "description": "SSE: end the stream after the event (or at once without "
+                                                        "one)"}}},
         "handler": "send_event",
     },
     {
@@ -703,8 +787,8 @@ TOOLS = [
         "description": "Add a proxy rule (Charles map local and rewrite): answer requests from the proxy with a "
                        "local file or text, return an error status, drop the connection, delay, change headers, "
                        "status or body text. The condition uses host, path, method, url_regex (at least one). "
-                       "Matching rules apply in list order, a new rule goes to the end; respond and drop end the "
-                       "chain. " + RULES_REFERENCE + " Returns the stored rule "
+                       "Matching rules apply in list order, a new rule goes to the end; respond, drop and sse end "
+                       "the chain. " + RULES_REFERENCE + " Returns the stored rule "
                        "and how many recorded flows already match the condition. " + RULE_NOTE,
         "inputSchema": {"type": "object", "required": ["action"], "properties": RULE_PROPERTIES},
         "handler": "add_rule",

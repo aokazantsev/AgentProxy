@@ -21,8 +21,9 @@ INSTRUCTIONS = (
     "Devices and browsers send traffic through it; every finished request is recorded, SSE and WebSocket streams when they open. "
     "Start with proxy_status. Use list_flows/get_flow to inspect traffic and wait_for_flow to wait for a "
     "request the user is about to trigger. SSE and WebSocket streams are flows with events: list_events, "
-    "wait_for_event and, for WebSocket, send_event. add_rule answers or changes requests (map local, rewrite, error, "
-    "delay, drop); list_rules shows the rules, delete them when done. "
+    "wait_for_event and send_event (any WebSocket; SSE only for streams an sse rule serves). add_rule answers or "
+    "changes requests (map local, rewrite, error, delay, drop, an SSE stream of its own); list_rules shows the rules, "
+    "delete them when done. "
     "When something does not go as planned, read_log first: it shows what AgentProxy itself did. "
     "device_proxy routes an Android device through AgentProxy over adb (and takes it off). The agentproxy skill "
     "explains device setup (CA certificate) and troubleshooting. " + UNTRUSTED_NOTE

@@ -18,13 +18,14 @@ from .api import make_app
 from .claude import integration
 from .flowlog import FlowLog
 from .guard import OwnPortsGuard
-from .injector import WebSocketInjector
+from .injector import StreamLookup, WebSocketInjector
 from .monitorpins import MonitorPins
 from .recorder import Recorder
 from .rewriter import Rewriter
 from .rules import MAX_FILE_BYTES, RuleSet
 from .service import ProxyService
 from .store import FlowStore
+from .streamhost import StreamHost
 
 log = logging.getLogger("agentproxy.engine")
 
@@ -121,10 +122,13 @@ async def serve(current, data_dir, parent_pid):
     service = ProxyService(store, current, data_dir, cert_dir, rules)
     master = create_master(current, cert_dir)
     master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
-    master.addons.add(Rewriter(rules))
+    streams = StreamHost()
+    await streams.start()
+    master.addons.add(Rewriter(rules, streams))
     recorder = Recorder(store, current.max_body_bytes, FlowLog())
     master.addons.add(recorder)
     service.injector = WebSocketInjector(master, recorder)
+    service.streams = StreamLookup(streams, recorder)
     loop = asyncio.get_running_loop()
 
     def shutdown():
@@ -144,6 +148,7 @@ async def serve(current, data_dir, parent_pid):
     finally:
         prober.cancel()
         server.stop()
+        streams.stop()
         store.close()
         if os.path.exists(runtime_path):
             os.remove(runtime_path)

@@ -13,8 +13,8 @@ from .streamtap import NO_BODY_STATUSES
 log = logging.getLogger("agentproxy.rules")
 
 FILE_NAME = "rules.json"
-ACTIONS = ("respond", "rewrite", "drop", "delay")
-TERMINAL_ACTIONS = ("respond", "drop")
+ACTIONS = ("respond", "rewrite", "drop", "delay", "sse")
+TERMINAL_ACTIONS = ("respond", "drop", "sse")
 MATCH_FIELDS = ("host", "path", "method", "url_regex")
 VIEW_FIELDS = ("id", "created", "hits", "remaining", "active", "last_applied", "last_error")
 HOST_WITH_PORT = re.compile(r"^(?:[^:\[\]]*|\[.*\]):\d+$")
@@ -24,6 +24,7 @@ ACTION_FIELDS = {
     "rewrite": ("status", "request_headers", "response_headers", "response_body", "replace"),
     "drop": (),
     "delay": (),
+    "sse": ("headers", "body"),
 }
 REWRITE_CHANGES = ACTION_FIELDS["rewrite"]
 BODY_CHANGES = ("response_body", "replace")
@@ -35,6 +36,7 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_REPLACEMENTS = 100
 MAX_TEXT = 16 * 1024 * 1024
 MANAGED_HEADERS = ("content-length", "transfer-encoding", "x-agentproxy-proxied")
+STREAM_FIXED_HEADERS = ("content-type", "content-encoding")
 HOP_BY_HOP_HEADERS = ("connection", "keep-alive", "proxy-connection", "upgrade", "te", "trailer")
 MAX_MATCHED_URL = 8192
 CONTROL_CHARACTERS = re.compile("[\x00-\x08\x0a-\x1f\x7f]")
@@ -214,6 +216,11 @@ def normalize(raw, check_files=True):
     for name in ("request_headers", "response_headers"):
         if name in values:
             rule[name] = _headers(name, values[name], removable=True)
+    if action == "sse":
+        fixed = sorted(name for name in rule.get("headers", {}) if name.lower() in STREAM_FIXED_HEADERS)
+        if fixed:
+            raise RuleError("headers: the stream is always text/event-stream and unpacked; drop {0}".format(
+                ", ".join(fixed)))
     if "body" in values and "body_file" in values:
         raise RuleError("use either body or body_file, not both")
     for name in ("body", "response_body"):

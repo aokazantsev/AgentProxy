@@ -14,3 +14,18 @@ class WebSocketInjector:
         if not flow.live or flow.websocket is None:
             raise InjectError("the WebSocket connection is closing")
         self.master.commands.call("inject.websocket", flow, to_client, content, is_text)
+
+
+class StreamLookup:
+    def __init__(self, host, recorder):
+        self.host = host
+        self.recorder = recorder
+
+    def find(self, seq):
+        for flow_id, live in list(self.recorder.streams.items()):
+            if live.seq == seq:
+                return self.host.find(flow_id)
+        return None
+
+    def close_rules(self, rule_ids):
+        self.host.close_rules(rule_ids)
