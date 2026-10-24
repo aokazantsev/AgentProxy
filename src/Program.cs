@@ -17,7 +17,11 @@ namespace AgentProxy
             bool isFirstInstance;
             using (new Mutex(true, AppIdentity.SingleInstanceMutex, out isFirstInstance))
             {
-                if (!isFirstInstance) return 0;
+                if (!isFirstInstance)
+                {
+                    AppLog.Append("another instance is running, exit");
+                    return 0;
+                }
                 UserDataPaths.Ensure();
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);

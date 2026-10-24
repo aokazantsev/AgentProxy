@@ -32,13 +32,15 @@ class Throttle:
 
 def _entry_text(entry):
     parts = [entry["id"], entry["action"]]
+    if "changed" in entry:
+        parts.append("changed={0}".format(entry["changed"]))
     if "replaced" in entry:
         parts.append("replaced={0}".format(entry["replaced"]))
     if entry.get("not_found"):
         parts.append("not_found={0}".format(len(entry["not_found"])))
     if entry.get("limited"):
         parts.append("limited=" + entry["limited"])
-    for name in ("error", "skipped"):
+    for name in ("closed", "error", "skipped"):
         if entry.get(name):
             parts.append("{0}={1}".format(name, clean(entry[name], REASON_CHARS)))
     return " ".join(parts)

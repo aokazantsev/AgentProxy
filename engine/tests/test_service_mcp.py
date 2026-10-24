@@ -84,6 +84,28 @@ def test_wait_with_since_seq_returns_existing(service, store):
     assert result["flow"]["id"] == "flow-1"
 
 
+def test_wait_with_since_seq_returns_the_first_flow_after_it(service, store):
+    for number in (1, 2, 3):
+        store.insert(make_record(number))
+    assert run(service.wait_for_flow({"since_seq": 1, "timeout_seconds": 1}))["flow"]["id"] == "flow-2"
+
+
+def test_null_number_arguments_take_their_defaults(service, store):
+    store.insert(make_record(1))
+    assert len(service.list_flows({"limit": None})["flows"]) == 1
+    assert run(service.wait_for_flow({"since_seq": 0, "timeout_seconds": None}))["flow"]["id"] == "flow-1"
+    with pytest.raises(ToolError, match="since_seq must be <="):
+        service.list_flows({"since_seq": 10 ** 30})
+    with pytest.raises(ToolError, match="limit must be a number"):
+        service.list_flows({"limit": float("inf")})
+
+
+def test_update_rule_schema_lets_null_remove_enum_fields():
+    schema = next(tool for tool in public_tools() if tool["name"] == "update_rule")["inputSchema"]["properties"]
+    assert None in schema["close"]["enum"] and None in schema["direction"]["enum"]
+    assert schema["action"]["enum"].count(None) == 0
+
+
 def test_wait_cleans_listener(service, store):
     run(service.wait_for_flow({"timeout_seconds": 1}))
     assert store._listeners == []

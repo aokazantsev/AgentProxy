@@ -43,6 +43,7 @@ def test_sse_rule_serves_an_open_stream_and_events_are_sent_into_it(engine):
     assert [value for name, value in full["request_headers"] if name.lower() == "host"] == ["sse.example.test"]
     status, answer = send(engine, flow=flow["id"], data="line one\nline two", event="update", id="7", retry=1500)
     assert status == 200 and answer["sent"] is True and answer["events_before"] == 1 and answer["closed"] is False
+    assert isinstance(answer["last_seq"], int)
     assert read_event(response) == [b"event: update", b"id: 7", b"retry: 1500", b"data: line one", b"data: line two"]
     events = wait_until(lambda: len(events_of(engine, flow)) == 2 and events_of(engine, flow), 10)
     assert [(e["name"], e["data"], e.get("id")) for e in events] == [

@@ -13,7 +13,7 @@ COPY_WINDOW_WORDS = 6
 ANSWER_FIELDS = {
     "rewriter.py": ("skipped", "replaced", "not_found", "error", "limited"),
     "eventrules.py": ("changed", "replaced", "closed"),
-    "service.py": ("history_matches", "hint", "counts", "events_before", "closed", "note", "paused"),
+    "service.py": ("history_matches", "hint", "counts", "events_before", "last_seq", "closed", "note", "paused"),
     "rules.py": ("problem",),
     "bodies.py": ("truncated",),
     "settings.py": ("max_body_bytes",),

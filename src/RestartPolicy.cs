@@ -48,6 +48,7 @@ namespace AgentProxy
         public static EngineState StateAfterExit(int exitCode)
         {
             if (exitCode == ExitPortBusy) return EngineState.PortBusy;
+            if (exitCode == 0 || ExitMeaning(exitCode) == "ended from outside") return EngineState.Starting;
             return EngineState.Crashed;
         }
     }

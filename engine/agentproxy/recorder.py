@@ -161,6 +161,8 @@ class Recorder:
             return
         if is_event_stream(flow.request, flow.response) and self._open_event_stream(flow):
             return
+        if callable(flow.response.stream):
+            return
         headers = flow.response.headers
         if should_stream(flow.request.method, flow.response.status_code, headers.get("content-type"),
                          headers.get("content-length"), self.body_limit):

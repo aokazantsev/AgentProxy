@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 
 import pytest
@@ -302,7 +303,7 @@ def test_update_rule_schema_keeps_enabled_boolean():
 def test_scenario_with_times_before_the_mock_gets_no_hint(service):
     service.add_rule({"action": "drop", "path": "/pay", "times": 2})
     answer = service.add_rule({"action": "respond", "path": "/pay", "body": "{}"})
-    assert "is earlier" not in answer.get("hint", "") and "later rules" not in answer.get("hint", "")
+    assert "is earlier" not in answer.get("hint", "") and "of the rules" not in answer.get("hint", "")
 
 
 def test_delay_behind_a_mock_is_pointed_to_delay_ms(service):
@@ -318,7 +319,19 @@ def test_rule_that_now_covers_later_ones_says_so(service, change):
     service.add_rule(first)
     service.add_rule({"action": "respond", "path": "/p/items", "body": "[]"})
     answer = service.update_rule(dict({"id": "r1"}, **change))
-    assert "later rules r2" in answer["hint"]
+    assert "of the rules r2" in answer["hint"]
+
+
+def test_events_rule_is_shadowed_by_an_answer_anywhere_in_the_list(service):
+    service.add_rule({"action": "events", "path": "/feed", "close": "after", "times": 1})
+    answer = service.add_rule({"action": "sse", "path": "/feed"})
+    assert "of the rules r1" in answer["hint"]
+    service.delete_rule({"id": "r2"})
+    service.add_rule({"action": "respond", "path": "/feed", "body": "{}"})
+    answer = service.add_rule({"action": "events", "host": "rt.example.com", "path": "/feed/x", "close": "before",
+                               "times": 1})
+    assert "rule r3 (respond) answers every request this rule matches" in answer["hint"]
+    assert "order does not matter for events" in answer["hint"] and "restart the app" in answer["hint"]
 
 
 def test_one_rule_comes_whole(service):
@@ -370,7 +383,7 @@ def test_chars_field_alone_is_refused_with_explanation(service):
 def test_narrower_earlier_rule_is_not_listed_as_shadowed_by_a_later_one(service):
     service.add_rule({"action": "respond", "path": "/p/items", "body": "[]"})
     answer = service.add_rule({"action": "respond", "path": "/p", "body": "{}"})
-    assert "later rules" not in answer.get("hint", "")
+    assert "of the rules" not in answer.get("hint", "")
     assert service.rules.shadowing("r2") == []
 
 
@@ -432,7 +445,7 @@ def test_shadow_hints_name_the_right_rules_among_several(service):
     service.add_rule({"action": "respond", "path": "/pay/later", "body": "{}"})
     service.update_rule({"id": "r2", "enabled": False})
     answer = service.update_rule({"id": "r2", "enabled": True})
-    assert "later rules r3, r4" in answer["hint"]
+    assert "of the rules r3, r4" in answer["hint"]
 
 
 def test_rule_with_last_error_copied_from_list_rules_can_be_added_again(service, tmp_path):
@@ -510,3 +523,74 @@ def test_exhausted_rule_points_to_reset_hits(service):
     service.rules.plan("example.com", "/", "GET", "http://example.com/")
     hint = service.update_rule({"id": "r1", "path": "/right"})["hint"]
     assert "reset_hits=true" in hint
+
+
+def test_updated_events_rule_says_open_streams_take_the_change(service):
+    added = service.add_rule({"action": "events", "path": "/feed", "replace": [{"find": "a", "with": "b"}]})
+    assert "make the app reconnect" in added["hint"]
+    updated = service.update_rule({"id": "r1", "replace": [{"find": "a", "with": "c"}]})
+    assert "already changes take the change at once" in updated["hint"]
+
+
+def test_events_rule_counts_only_recorded_streams(service, store):
+    store.insert(make_record(1, path="/feed"))
+    answer = service.add_rule({"action": "events", "path": "/feed", "close": "after", "times": 1})
+    assert answer["history_matches"] == 0 and "no recorded sse or websocket stream" in answer["hint"]
+
+
+def test_events_rule_updated_before_a_later_answer_is_told_order_does_not_matter(service):
+    service.add_rule({"action": "events", "path": "/feed", "close": "after", "times": 1})
+    service.add_rule({"action": "respond", "path": "/feed", "body": "{}"})
+    hint = service.update_rule({"id": "r1", "times": 2})["hint"]
+    assert "rule r2 (respond) answers every request this rule matches" in hint
+
+
+def test_websocket_send_answers_last_seq_taken_before_sending(service, store):
+    seq = store.insert(make_record(1, kind="websocket", open=True))
+
+    class Injector:
+        def send(self, *args):
+            store.insert(make_record(2))
+
+    service.injector = Injector()
+    answer = service.send_event({"flow": str(seq), "data": "ping"})
+    assert answer["last_seq"] == seq
+    found = asyncio.run(service.wait_for_flow({"since_seq": answer["last_seq"], "timeout_seconds": 1}))
+    assert found["flow"]["id"] == "flow-2"
+
+
+def test_events_close_rule_without_times_hints_at_the_first_stream_and_the_schema_agrees(service):
+    from agentproxy.service import TOOLS
+    hint = service.add_rule({"action": "events", "path": "/feed", "close": "before"})["hint"]
+    assert "reconnects in a loop" in hint and "times=1 limits the rule to the first matching stream" in hint
+    assert "reconnects in a loop" not in service.add_rule({"action": "events", "path": "/x", "close": "before",
+                                                           "times": 1})["hint"]
+    times = next(tool for tool in TOOLS if tool["name"] == "add_rule")["inputSchema"]["properties"]["times"]
+    assert "acts on the first matching stream only" in times["description"]
+
+
+def test_outgoing_events_rule_counts_only_recorded_websockets(service, store):
+    store.insert(make_record(1, path="/feed", kind="sse"))
+    answer = service.add_rule({"action": "events", "path": "/feed", "direction": "outgoing", "close": "after"})
+    assert answer["history_matches"] == 0 and "no recorded websocket stream" in answer["hint"]
+    assert "list_flows and kind websocket" in answer["hint"] and "sse" not in answer["hint"]
+    assert service.add_rule({"action": "events", "path": "/feed", "close": "after"})["history_matches"] == 1
+
+
+def test_long_event_data_is_shown_as_a_preview(service):
+    answer = service.add_rule({"action": "events", "path": "/feed", "event_data": "x" * 5000})
+    assert "event_data" not in answer["rule"] and answer["rule"]["event_data_preview"].endswith("…")
+    assert service.list_rules({"id": "r1"})["rule"]["event_data"] == "x" * 5000
+
+
+def test_text_arguments_must_be_valid_unicode(service, store):
+    store.insert(make_record(1))
+    with pytest.raises(ToolError, match="host must be valid Unicode text"):
+        service.list_flows({"host": "a\ud800b"})
+    with pytest.raises(ToolError, match="flow must be valid Unicode text"):
+        service.list_events({"flow": "\ud800"})
+
+
+def test_blank_and_null_arguments_take_defaults(service, store):
+    store.insert(make_record(1))
+    assert len(service.list_flows({"limit": "", "failed_only": None})["flows"]) == 1

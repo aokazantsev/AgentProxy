@@ -520,7 +520,9 @@ class RuleSet:
                 return None
             for rule in self._rules:
                 if rule["id"] == rule_id:
-                    return None
+                    if target["action"] != "events":
+                        return None
+                    continue
                 if _answers_always(rule) and _covers(rule, target):
                     return {"id": rule["id"], "action": rule["action"]}
 
@@ -531,7 +533,9 @@ class RuleSet:
             current = self._rules[position]
             if not _answers_always(current):
                 return []
-            return [rule["id"] for rule in self._rules[position + 1:] if rule["enabled"] and _covers(current, rule)]
+            return [rule["id"] for index, rule in enumerate(self._rules)
+                    if (index > position or index < position and rule["action"] == "events") and rule["enabled"]
+                    and _covers(current, rule)]
 
     def get(self, rule_id):
         with self._lock:
@@ -629,18 +633,21 @@ class RuleSet:
                     break
         return chosen
 
-    def plan_events(self, host, path, method, url):
+    def plan_events(self, host, path, method, url, count=True, websocket=True):
         chosen = []
         now = time.time()
         with self._lock:
             for rule in self._rules:
                 if rule["action"] != "events" or not rule["enabled"] or not matches(rule, host, path, method, url):
                     continue
+                if not websocket and rule.get("direction") == "outgoing":
+                    continue
                 state = self._state.setdefault(rule["id"], {"hits": 0})
                 if "times" in rule and state["hits"] >= rule["times"]:
                     continue
-                state["hits"] += 1
-                state["last_applied"] = now
+                if count:
+                    state["hits"] += 1
+                    state["last_applied"] = now
                 chosen.append(copy.deepcopy(rule))
         return chosen
 

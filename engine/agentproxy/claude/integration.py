@@ -307,10 +307,9 @@ def install(env, now=None):
 
 
 def uninstall(env):
-    removed = {"mcp": remove_mcp(env), "skill": remove_skill(env), "hooks": remove_hooks(env)}
     if os.path.exists(env.state_file):
         os.remove(env.state_file)
-    return removed
+    return {"mcp": remove_mcp(env), "skill": remove_skill(env), "hooks": remove_hooks(env)}
 
 
 def status(env):

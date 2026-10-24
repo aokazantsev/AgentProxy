@@ -337,6 +337,7 @@ async function showFlow(id) {
   selected = id;
   let flow;
   try { flow = await getJson("/api/flows/" + encodeURIComponent(id)); } catch (error) { return; }
+  if (selected !== id) return;
   const detail = document.getElementById("detail");
   detail.textContent = "";
   section(detail, "Запрос", flow.method + " " + flow.url);

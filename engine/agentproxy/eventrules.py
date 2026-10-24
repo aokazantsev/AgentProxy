@@ -63,6 +63,7 @@ class EventChanger:
             return text, False
         self.counted[direction] += 1
         closing = None
+        edits = []
         for rule in self.rules:
             if rule.get("direction", INCOMING) != direction:
                 continue
@@ -74,17 +75,20 @@ class EventChanger:
             elif "event_contains" in rule and rule["event_contains"] not in text:
                 continue
             else:
-                text = self._edit(rule, text)
+                text = self._edit(rule, text, edits)
             if "close" in rule and (closing is None or rule["close"] == "before" and closing["close"] == "after"):
                 closing = rule
-        if closing is None:
-            return text, True
-        return text, not self._close(closing, direction)
+        deliver = closing is None or not self._close(closing, direction)
+        if deliver:
+            for entry, replaced in edits:
+                entry["changed"] = entry.get("changed", 0) + 1
+                if replaced is not None:
+                    entry["replaced"] = entry.get("replaced", 0) + replaced
+        return text, deliver
 
-    def _edit(self, rule, text):
-        entry = self._entry(rule)
+    def _edit(self, rule, text, edits):
         if "event_data" in rule:
-            entry["changed"] = entry.get("changed", 0) + 1
+            edits.append((self._entry(rule), None))
             return rule["event_data"]
         if "replace" not in rule:
             return text
@@ -93,13 +97,12 @@ class EventChanger:
             replaced += text.count(item["find"])
             text = text.replace(item["find"], item["with"])
         if replaced:
-            entry["changed"] = entry.get("changed", 0) + 1
-            entry["replaced"] = entry.get("replaced", 0) + replaced
+            edits.append((self._entry(rule), replaced))
         return text
 
     def _close(self, rule, direction):
         entry = self._entry(rule)
-        problem = self.closer(rule["close"])
+        problem = self.closer(rule["close"], direction)
         if problem:
             entry["error"] = problem
             return False
@@ -125,7 +128,7 @@ class SseEditor:
 
     def __call__(self, chunk):
         if self.passing:
-            return chunk
+            return chunk or []
         if self.changer.closed or not chunk:
             return []
         self.pending += chunk
@@ -145,6 +148,12 @@ class SseEditor:
             del self.pending[:end]
             self.scan = self.line_start = 0
             out += self._edit(block)
+        comments = self._leading_comments()
+        if comments:
+            out += self.pending[:comments]
+            del self.pending[:comments]
+            self.scan -= comments
+            self.line_start -= comments
         if self.changer.closed:
             self.pending.clear()
         elif len(self.pending) > MAX_BLOCK_BYTES:
@@ -156,15 +165,25 @@ class SseEditor:
 
     def _block_end(self):
         for match in LINE_END.finditer(self.pending, self.scan):
-            if match.group() == b"\r" and match.end() == len(self.pending):
+            empty = match.start() == self.line_start
+            if match.group() == b"\r" and match.end() == len(self.pending) and not empty:
                 self.scan = match.start()
                 return None
-            empty = match.start() == self.line_start
             self.line_start = self.scan = match.end()
             if empty:
                 return match.end()
         self.scan = len(self.pending)
         return None
+
+    def _leading_comments(self):
+        if not self.pending.startswith(b":"):
+            return 0
+        end = 0
+        for match in LINE_END.finditer(self.pending, 0, self.line_start):
+            if self.pending[end:end + 1] != b":":
+                break
+            end = match.end()
+        return end
 
     def _edit(self, block):
         lines = []
@@ -183,14 +202,17 @@ class SseEditor:
             return block
         first = data_lines[0]
         prefix = b"data: " if lines[first][0][5:6] == b" " else b"data:"
-        terminator = lines[0][1]
+        terminator = lines[first][1]
         skipped = set(data_lines[1:])
         out = bytearray()
         for index, (content, ending) in enumerate(lines):
             if index == first:
                 for part in TEXT_LINE_END.split(new):
-                    out += prefix + part.encode("utf-8", "surrogateescape") + terminator
+                    start = b"data: " if part.startswith(" ") else prefix
+                    out += start + part.encode("utf-8", "surrogateescape") + terminator
             elif index not in skipped:
+                if not content and ending.startswith(b"\n") and out.endswith(b"\r"):
+                    out += b"\n"
                 out += content + ending
         return bytes(out)
 

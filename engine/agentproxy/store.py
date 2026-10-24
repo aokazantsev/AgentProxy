@@ -463,7 +463,7 @@ class FlowStore:
                 (flow_id, flow_id)).fetchone()
         return _row(row) if row else None
 
-    def query(self, flow_filter, limit):
+    def query(self, flow_filter, limit, oldest_first=False):
         clauses = []
         params = []
         if flow_filter.host:
@@ -495,7 +495,8 @@ class FlowStore:
         if flow_filter.open_only:
             clauses.append("open = 1")
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        sql = "SELECT {0} FROM flows{1} ORDER BY seq DESC LIMIT ?".format(", ".join(SUMMARY_COLUMNS), where)
+        sql = "SELECT {0} FROM flows{1} ORDER BY seq {2} LIMIT ?".format(", ".join(SUMMARY_COLUMNS), where,
+                                                                      "ASC" if oldest_first else "DESC")
         with self._lock:
             rows = self._db.execute(sql, params + [limit]).fetchall()
         return [_row(row) for row in rows]

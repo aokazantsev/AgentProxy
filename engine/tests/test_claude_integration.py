@@ -416,3 +416,13 @@ def test_claude_cli_in_current_directory_is_ignored(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
     assert integration.find_claude_cli() is None
+
+
+def test_sessions_with_a_broken_seen_value_are_dropped(env):
+    import json
+    import os
+    seen = SeenVersions(env.data_dir)
+    with open(os.path.join(env.data_dir, "claude-sessions.json"), "w", encoding="utf-8") as handle:
+        json.dump({"old": {"version": "0.1", "seen": "yesterday"}}, handle)
+    seen.remember("new", VERSION)
+    assert seen.get("new") == VERSION and seen.get("old") is None

@@ -170,6 +170,10 @@ namespace AgentProxy
             {
                 SetState(next, "порт " + Settings.ProxyPort + " или " + Settings.ApiPort + " занят другой программой");
             }
+            else if (next == EngineState.Starting)
+            {
+                SetState(next, null);
+            }
             else
             {
                 string crash = EngineLogTail.LastCrashSince(logOffset);

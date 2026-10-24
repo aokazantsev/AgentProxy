@@ -1,3 +1,6 @@
+from .rules import EVENTS_MARK
+
+
 class InjectError(Exception):
     pass
 
@@ -16,6 +19,10 @@ class WebSocketInjector:
         if not flow.live or flow.websocket is None:
             raise InjectError("the WebSocket connection is closing: wait for the app to reconnect and send into "
                               "the new flow")
+        changer = flow.metadata.get(EVENTS_MARK)
+        if changer is not None and changer.closed:
+            raise InjectError("an events rule closed this WebSocket connection: wait for the app to reconnect and "
+                              "send into the new flow")
         self.master.commands.call("inject.websocket", flow, to_client, content, is_text)
 
 

@@ -60,6 +60,7 @@ namespace AgentProxy.Tests
                 Run("usage packet shape", UsagePacketShape);
                 Run("usage without consent keeps nothing", UsageWithoutConsent);
                 Run("usage consent file", UsageConsentFile);
+                Run("journal follows the end only when the user is there", JournalFollowsTheEndOnlyWhenTheUserIsThere);
                 Run("usage counters merge after failed read", UsageMergeAfterFailedRead);
                 Run("usage keeps six days and drops broken lines", UsageRetention);
                 Run("usage final answers and sent revision", UsageSentRevision);
@@ -120,6 +121,97 @@ namespace AgentProxy.Tests
             catch (IOException)
             {
             }
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+
+        private static void JournalFollowsTheEndOnlyWhenTheUserIsThere()
+        {
+            Exception error = null;
+            var thread = new System.Threading.Thread(() =>
+            {
+                try { JournalScenario(); }
+                catch (Exception e) { error = e; }
+            });
+            thread.SetApartmentState(System.Threading.ApartmentState.STA);
+            thread.Start();
+            thread.Join();
+            if (error != null) throw error;
+        }
+
+        private static void JournalScenario()
+        {
+            string path = Path.Combine(Sandbox, "journal-scroll.log");
+            File.WriteAllText(path, new string('w', 3000) + "\n" + JournalLines("a", 400));
+            using (var form = new System.Windows.Forms.Form())
+            {
+                form.StartPosition = System.Windows.Forms.FormStartPosition.Manual;
+                form.Location = new System.Drawing.Point(-3000, -3000);
+                form.Size = new System.Drawing.Size(600, 400);
+                form.ShowInTaskbar = false;
+                var box = new System.Windows.Forms.TextBox
+                {
+                    Multiline = true, ReadOnly = true, WordWrap = false,
+                    ScrollBars = System.Windows.Forms.ScrollBars.Both, Dock = System.Windows.Forms.DockStyle.Fill
+                };
+                form.Controls.Add(box);
+                var source = new JournalSource(path, box);
+                form.Show();
+                source.Refresh(true, 1 << 20);
+                System.Windows.Forms.Application.DoEvents();
+
+                True(JournalAppendShows(source, path, "b"), "a journal at the end follows new lines");
+
+                SendMessage(box.Handle, 0x115, (IntPtr)6, IntPtr.Zero);
+                True(!JournalAppendShows(source, path, "c"), "a journal scrolled up keeps its place");
+                SendMessage(box.Handle, 0x115, (IntPtr)7, IntPtr.Zero);
+                True(JournalTickShows(source, "c"), "back at the bottom it catches up");
+
+                box.Select(box.TextLength - 5, 5);
+                True(!JournalAppendShows(source, path, "d"), "a selection at the end is not wiped");
+                box.Select(box.TextLength, 0);
+                True(JournalTickShows(source, "d"), "without the selection it catches up");
+
+                SendMessage(box.Handle, 0x114, (IntPtr)7, IntPtr.Zero);
+                True(!JournalAppendShows(source, path, "e"), "a journal scrolled right keeps its place");
+                SendMessage(box.Handle, 0x114, (IntPtr)6, IntPtr.Zero);
+                True(JournalTickShows(source, "e"), "back at the left edge it catches up");
+
+                box.Hide();
+                True(JournalAppendShows(source, path, "f"), "a hidden tab at the end takes new lines");
+                box.Show();
+                source.Shown();
+                System.Windows.Forms.Application.DoEvents();
+                True(SendMessage(box.Handle, 0xCE, IntPtr.Zero, IntPtr.Zero).ToInt32() > 0, "a shown tab opens at the end");
+
+                SendMessage(box.Handle, 0x115, (IntPtr)6, IntPtr.Zero);
+                source.Leaving();
+                box.Hide();
+                True(!JournalAppendShows(source, path, "g"), "a tab left scrolled up keeps its place while hidden");
+                box.Show();
+            }
+        }
+
+        private static string JournalLines(string tag, int count)
+        {
+            var text = new System.Text.StringBuilder();
+            for (int i = 0; i < count; i++) text.Append(tag + " line " + i + "\n");
+            return text.ToString();
+        }
+
+        private static bool JournalAppendShows(JournalSource source, string path, string tag)
+        {
+            System.Windows.Forms.Application.DoEvents();
+            File.AppendAllText(path, JournalLines(tag, 3));
+            return JournalTickShows(source, tag);
+        }
+
+        private static bool JournalTickShows(JournalSource source, string tag)
+        {
+            source.Refresh(false, 1 << 20);
+            System.Windows.Forms.Application.DoEvents();
+            return source.Box.Text.TrimEnd().EndsWith(tag + " line 2");
         }
 
         private static void Run(string name, Action test)
@@ -185,6 +277,9 @@ namespace AgentProxy.Tests
             Equal(0, policy.Failures, "busy port is not a failure");
             Equal(EngineState.PortBusy, RestartPolicy.StateAfterExit(3), "state 3");
             Equal(EngineState.Crashed, RestartPolicy.StateAfterExit(1), "state 1");
+            Equal(EngineState.Starting, RestartPolicy.StateAfterExit(1073807364), "state logoff");
+            Equal(EngineState.Starting, RestartPolicy.StateAfterExit(-1073741510), "state ctrl-c");
+            Equal(EngineState.Starting, RestartPolicy.StateAfterExit(0), "state 0");
             Equal("port busy", RestartPolicy.ExitMeaning(3), "meaning 3");
             Equal("ended from outside", RestartPolicy.ExitMeaning(1073807364), "meaning killed");
             Equal(null, RestartPolicy.ExitMeaning(77), "meaning unknown");

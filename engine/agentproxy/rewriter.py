@@ -3,6 +3,7 @@ import codecs
 import json
 import logging
 import mimetypes
+import re
 import time
 
 from .bodies import CHARSET, SLOW_CHARSETS, TEXT_CHARSETS
@@ -18,6 +19,8 @@ from .streamtap import IDENTITY_ENCODINGS, NO_BODY_STATUSES, decoded_pieces
 log = logging.getLogger("agentproxy.rewriter")
 
 EDITOR_MARK = "agentproxy_body_editor"
+LABEL = re.compile(r"[A-Za-z0-9._-]{1,32}")
+BROKEN_BODY = "the response broke before its end"
 LIMIT_TEXT = "larger than {0} MB".format(MAX_FILE_BYTES // (1024 * 1024))
 UPLOAD_TOO_LARGE = "request body is {0}; the rule cannot buffer it"
 UPLOAD_GREW = "request body without length grew {0}; it went on to the server, the client got no answer"
@@ -32,7 +35,7 @@ NO_LINK = "speed limit not applied: the client connection is not TCP"
 NO_CLOSE_LINK = "the stream was not closed: the client connection is not TCP"
 CLOSE_FALLBACK_SECONDS = 1.0
 COMPRESSED_STREAM = ("events not changed: the stream is compressed ({0}); add a rewrite rule with request_headers "
-                     "Accept-Encoding: identity for this stream, earlier in the list")
+                     "Accept-Encoding: identity for this stream")
 SERVED_STREAM = "events not changed: the stream comes from an sse rule, send_event writes it"
 HTTP1 = b"http/1.1"
 HTTP2 = b"h2"
@@ -148,9 +151,13 @@ def _unpack(raw, encoding):
     except Exception as error:
         kind = error.__class__
         name = kind.__name__ if kind.__module__ == "builtins" else kind.__module__ + "." + kind.__name__
-        raise BodySkipped("{0} body could not be unpacked ({1})".format(encoding, name))
+        raise BodySkipped("{0} body could not be unpacked ({1})".format(_label(encoding), name))
     return bytes(unpacked)
 
+
+
+def _label(value):
+    return value if LABEL.fullmatch(value) else "(unusual value)"
 
 def _text_charset(name):
     try:
@@ -188,7 +195,7 @@ def _encode_body(flow, rule, content_type):
             raise LookupError(charset)
         return text.encode(charset)
     except (UnicodeError, LookupError):
-        _entry(flow, rule)["error"] = "body cannot be encoded as {0}; sent as utf-8".format(charset)
+        _entry(flow, rule)["error"] = "body cannot be encoded as {0}; sent as utf-8".format(_label(charset))
         return text.encode("utf-8")
 
 
@@ -226,16 +233,16 @@ class BodyEditor:
         try:
             charset = _text_charset(self.charset)
             if charset is None:
-                raise BodySkipped("charset {0} is not supported for editing".format(self.charset))
+                raise BodySkipped("charset {0} is not supported for editing".format(_label(self.charset)))
             unpacked = _unpack(raw, self.encoding)
             marks = ORDER_MARKED_CHARSETS.get(charset)
             if marks and unpacked and not unpacked.startswith(marks):
-                raise BodySkipped("{0} body has no byte order mark".format(charset))
+                raise BodySkipped("{0} body has no byte order mark".format(_label(charset)))
             return unpacked.decode(self.charset)
         except BodySkipped as reason:
             _entry(self.flow, rule)["skipped"] = "body not changed: {0}".format(reason)
         except UnicodeDecodeError:
-            _entry(self.flow, rule)["skipped"] = "body not changed: body is not {0} text".format(self.charset)
+            _entry(self.flow, rule)["skipped"] = "body not changed: body is not {0} text".format(_label(self.charset))
         return None
 
     def edit(self, raw):
@@ -285,7 +292,7 @@ class BodyEditor:
             packed = _pack(encoded, self.encoding)
         except (UnicodeEncodeError, LookupError, ValueError) as error:
             self.skip("new body cannot be encoded as {0} ({1})".format(
-                " ".join(part for part in (self.charset, self.encoding) if part), error.__class__.__name__))
+                " ".join(_label(part) for part in (self.charset, self.encoding) if part), error.__class__.__name__))
             return raw
         for rule in self.rules:
             if rule["id"] in replaced_by:
@@ -479,17 +486,20 @@ class Rewriter:
 
     def error(self, flow):
         self._restore_request(flow)
+        editor = flow.metadata.get(EDITOR_MARK)
+        if editor is not None and flow.response is not None:
+            editor.skip(BROKEN_BODY)
         self.events.release(flow.id)
         if self.streams is not None:
             self.streams.release(flow.id)
 
     def _closer(self, flow):
-        def close(moment):
+        def close(moment, direction):
             link = self.speeds.get(flow.client_conn.id) if self.speeds is not None else None
             if link is None:
                 return NO_CLOSE_LINK
             loop = asyncio.get_running_loop()
-            if moment == "after":
+            if moment == "after" and direction == INCOMING:
                 link.writer.close_after_write = True
                 loop.call_later(CLOSE_FALLBACK_SECONDS, link.writer.close)
             else:
@@ -497,17 +507,20 @@ class Rewriter:
             return None
         return close
 
-    def _start_events(self, flow):
+    def _start_events(self, flow, refusal=None):
         if flow.metadata.get(OWN_PORT_MARK) or flow.metadata.get(EVENTS_MARK):
             return None
+        plan = flow.metadata.get(PLAN_MARK)
+        if plan and plan[-1]["action"] == "sse":
+            refusal = SERVED_STREAM
         request = flow.request
-        rules = self.rules.plan_events(request.pretty_host, request.path, request.method, request.pretty_url)
+        rules = self.rules.plan_events(request.pretty_host, request.path, request.method, request.pretty_url,
+                                       count=refusal is None, websocket=is_websocket_handshake(flow))
         if not rules:
             return None
         changer = EventChanger(flow, rules, self._closer(flow), whole_connection=request.is_http2)
-        plan = flow.metadata.get(PLAN_MARK)
-        if plan and plan[-1]["action"] == "sse":
-            changer.give_up(SERVED_STREAM)
+        if refusal is not None:
+            changer.give_up(refusal)
             return None
         flow.metadata[EVENTS_MARK] = changer
         self.events.add(flow.id, changer)
@@ -515,15 +528,17 @@ class Rewriter:
 
     def _edit_event_stream(self, flow):
         response = flow.response
-        if flow.metadata.get(NO_RESPONSE_STREAM_MARK) or not is_event_stream(flow.request, response):
-            return
-        changer = self._start_events(flow)
-        if changer is None:
+        if (flow.metadata.get(NO_RESPONSE_STREAM_MARK) or not 200 <= response.status_code < 300
+                or not is_event_stream(flow.request, response)):
             return
         encoding = response.headers.get("content-encoding", "").strip().lower()
-        if encoding and encoding != "identity":
-            changer.give_up(COMPRESSED_STREAM.format(encoding))
+        refusal = COMPRESSED_STREAM.format(_label(encoding)) if encoding not in IDENTITY_ENCODINGS else None
+        changer = self._start_events(flow, refusal)
+        if changer is None:
             return
+        response.headers.pop("content-length", None)
+        if flow.request.http_version == "HTTP/1.1" and response.http_version != "HTTP/1.0":
+            response.headers["transfer-encoding"] = "chunked"
         response.stream = SseEditor(changer)
 
     def websocket_message(self, flow):
@@ -531,10 +546,10 @@ class Rewriter:
         if changer is None or not flow.websocket.messages:
             return
         message = flow.websocket.messages[-1]
-        if message.injected:
-            return
         if changer.closed:
             message.drop()
+            return
+        if message.injected:
             return
         text, deliver = changer.handle(OUTGOING if message.from_client else INCOMING,
                                        message.text if message.is_text else None)
@@ -678,7 +693,7 @@ class Rewriter:
         if is_websocket_handshake(flow):
             self._start_events(flow)
             return
-        if isinstance(response.stream, SseEditor):
+        if flow.metadata.get(EVENTS_MARK) is not None:
             self.events.release(flow.id)
         if isinstance(response.stream, BodyDiscarder):
             response.raw_content = b""

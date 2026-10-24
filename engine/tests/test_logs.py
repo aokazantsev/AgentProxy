@@ -296,3 +296,9 @@ def test_log_endpoint_rejects_bad_arguments(engine):
     assert read_log_api(engine, "?source=tray&level=error")[0] == 400
     status, answer = read_log_api(engine, "?source=tray")
     assert status == 200 and answer["returned"] == 0
+
+
+def test_events_rule_outcome_is_in_the_rules_line():
+    text = flowlog._entry_text({"id": "r1", "action": "events", "changed": 2, "replaced": 3,
+                                "closed": "after incoming event 2"})
+    assert text == "r1 events changed=2 replaced=3 closed=after incoming event 2"

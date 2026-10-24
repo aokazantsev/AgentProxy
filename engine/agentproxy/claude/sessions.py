@@ -33,7 +33,8 @@ class SeenVersions:
         data = self._load()
         data[session_id] = {"version": version, "seen": now}
         fresh = {key: value for key, value in data.items()
-                 if isinstance(value, dict) and now - value.get("seen", 0) <= MAX_AGE_SECONDS}
+                 if isinstance(value, dict) and isinstance(value.get("seen"), (int, float))
+                 and not isinstance(value.get("seen"), bool) and now - value["seen"] <= MAX_AGE_SECONDS}
         if len(fresh) > MAX_SESSIONS:
             newest = sorted(fresh.items(), key=lambda item: item[1].get("seen", 0), reverse=True)[:MAX_SESSIONS]
             fresh = dict(newest)

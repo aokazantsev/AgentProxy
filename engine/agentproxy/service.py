@@ -12,7 +12,7 @@ from .bodies import render
 from .device import DeviceControl, DeviceError
 from .flowlog import clean, describe_rule
 from .injector import InjectError
-from .rules import VIEW_FIELDS, RuleError, RuleNotFound, limits_speed, matches
+from .rules import VIEW_FIELDS, RuleError, RuleNotFound, closes_streams, limits_speed, matches
 from .speed import rule_limits
 from .store import EventFilter, FlowFilter
 from .streamhost import StreamRefused, build_frame
@@ -32,6 +32,7 @@ FLOW_KINDS = ("http", "sse", "websocket")
 DIRECTIONS = ("incoming", "outgoing")
 MAX_SEND_BYTES = 1024 * 1024
 MAX_RETRY_MS = 24 * 60 * 60 * 1000
+MAX_SEQ = 2 ** 63 - 1
 SINGLE_LINE_BREAKS = re.compile(r"[\r\n\x00]")
 HISTORY_SCAN_LIMIT = 20000
 DEFAULT_BODY_CHARS = 20000
@@ -55,14 +56,16 @@ class NotFound(ToolError):
 
 
 def _int(arguments, name, default=None, low=None, high=None):
-    value = arguments.get(name, default)
+    value = arguments.get(name)
+    if value is None or isinstance(value, str) and not value.strip():
+        value = default
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         raise ToolError("{0} must be a number".format(name))
     try:
         value = int(value)
-    except ValueError:
+    except (ValueError, OverflowError):
         raise ToolError("{0} must be a number".format(name))
     if low is not None and value < low:
         raise ToolError("{0} must be >= {1}".format(name, low))
@@ -72,8 +75,8 @@ def _int(arguments, name, default=None, low=None, high=None):
 
 
 def _bool(arguments, name, default=False):
-    value = arguments.get(name, default)
-    if isinstance(value, str) and not value.strip():
+    value = arguments.get(name)
+    if value is None or isinstance(value, str) and not value.strip():
         return default
     if isinstance(value, bool):
         return value
@@ -88,7 +91,15 @@ def _str(arguments, name):
         return None
     if not isinstance(value, str):
         raise ToolError("{0} must be a string".format(name))
+    _check_text(name, value)
     return value
+
+
+def _check_text(name, value):
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ToolError("{0} must be valid Unicode text".format(name))
 
 
 def _choice(arguments, name, choices):
@@ -108,7 +119,7 @@ def build_event_filter(arguments):
         type=_str(arguments, "type"),
         name=_str(arguments, "name"),
         contains=_str(arguments, "contains"),
-        since_n=_int(arguments, "since_n", low=0),
+        since_n=_int(arguments, "since_n", low=0, high=MAX_SEQ),
     )
 
 
@@ -119,7 +130,7 @@ def build_filter(arguments):
         method=_str(arguments, "method"),
         status=_int(arguments, "status", low=100, high=599),
         failed_only=_bool(arguments, "failed_only"),
-        since_seq=_int(arguments, "since_seq", low=0),
+        since_seq=_int(arguments, "since_seq", low=0, high=MAX_SEQ),
         text=_str(arguments, "url_contains"),
         rule=_str(arguments, "rule"),
         kind=_choice(arguments, "kind", FLOW_KINDS),
@@ -180,14 +191,14 @@ RULE_PROPERTIES = {
     "method": {"type": "string", "description": "Condition: HTTP method"},
     "url_regex": {"type": "string", "description": "Condition: Python regular expression searched in the full URL"},
     "delay_ms": {"type": "integer", "description": "Wait after the request body before the request goes on "
-                                                "(any action), 0..300000; under rewrite and delay an upload without "
+                                                "(any action except events), 0..300000; under rewrite and delay an upload without "
                                                 "length or over max_body_bytes (2 MB by default) reaches the server "
                                                 "first and the wait holds the answer; drop of an upload without "
                                                 "length or over 64 MB aborts at once (skipped), a smaller one is "
                                                 "recorded with its body; the wait ends "
                                                 "when the client disconnects; delays of all matching rules add up, "
                                                 "total at most 300000"},
-    "download_kbps": {"type": "integer", "description": "Any action: limit the speed of the answer to the client, "
+    "download_kbps": {"type": "integer", "description": "Any action except events: limit the speed of the answer to the client, "
                                                      "kilobits per second, 1..1000000 (e.g. 500 for a slow mobile "
                                                      "network), to test progress and loaders; delay_ms adds the wait "
                                                      "before the answer. The speed is shared by everything the rule "
@@ -205,7 +216,7 @@ RULE_PROPERTIES = {
                                                      "a client without HTTP/1.1) the whole connection is slowed until "
                                                      "it closes or the rule is disabled or deleted; the flow's rules entry shows "
                                                      "limited: request or connection"},
-    "upload_kbps": {"type": "integer", "description": "Any action: limit the speed at which the request body is "
+    "upload_kbps": {"type": "integer", "description": "Any action except events: limit the speed at which the request body is "
                                                    "read from the client, kilobits per second, 1..1000000, to test "
                                                    "upload progress; scope as with download_kbps"},
     "times": {"type": "integer", "description": "Apply only to the first N matching requests; after that the rule "
@@ -215,8 +226,9 @@ RULE_PROPERTIES = {
                                                "clients retry dropped requests (OkHttp: 1 to 3 requests per action "
                                                "under drop) and 408, and 503 with Retry-After: 0, so use respond with status 500/503 "
                                                "without Retry-After for exact "
-                                               "counts. events: counts streams, so close with times=1 breaks one "
-                                               "stream and lets the reconnect through"},
+                                               "counts. events: counts streams as they open, so close with times=1 "
+                                               "acts on the first matching stream only and lets the reconnect "
+                                               "through"},
     "status": {"type": "integer", "description": "200..599. respond: status code, default 200; rewrite: replace the "
                                                 "server's status code"},
     "headers": dict(FIXED_HEADERS_SCHEMA, description="respond, sse: response headers"),
@@ -238,8 +250,8 @@ RULE_PROPERTIES = {
     "response_body": {"type": "string", "description": "rewrite: replace the whole response body (the request "
                                                       "still reaches the server)"},
     "event_contains": {"type": "string", "description": "events: change only events whose data contains this text, "
-                                                       "case-sensitive (as list_events shows the data, before this "
-                                                       "rule's changes)"},
+                                                       "case-sensitive (as list_events shows the data: after the "
+                                                       "changes of earlier rules, before this rule's)"},
     "direction": {"type": "string", "enum": ["incoming", "outgoing"],
                   "description": "events: incoming (default): from the server to the app; outgoing: from the app "
                                  "to the server, WebSocket only"},
@@ -255,16 +267,28 @@ RULE_PROPERTIES = {
                                                 "JSON and rewrites \\uXXXX, \\/ and numbers (100.00 -> 100.0), so "
                                                 "take fragments from get_flow with raw=true of a flow no rule changed "
                                                 "(history keeps bodies after rules). Items not found are "
-                                                "listed in not_found of the flow's rules entry",
+                                                "listed in not_found of the flow's rules entry. events: take "
+                                                "fragments from list_events; a stream has no not_found",
                 "items": {"type": "object", "required": ["find", "with"],
                           "properties": {"find": {"type": "string"}, "with": {"type": "string"}}}},
 }
+
+def _stream_kinds(rule):
+    if rule["action"] != "events":
+        return None
+    return ("websocket",) if rule.get("direction") == "outgoing" else ("sse", "websocket")
+
 
 def _nullable(properties):
     result = {}
     for name, schema in properties.items():
         kind = schema.get("type")
-        result[name] = schema if name in ("action", "enabled") else dict(schema, type=[kind, "null"])
+        if name in ("action", "enabled"):
+            result[name] = schema
+        elif "enum" in schema:
+            result[name] = dict(schema, type=[kind, "null"], enum=schema["enum"] + [None])
+        else:
+            result[name] = dict(schema, type=[kind, "null"])
     return result
 
 
@@ -292,7 +316,7 @@ def _shorten(target, field):
 
 def _brief(rule):
     brief = dict(rule)
-    for field in ("body", "response_body"):
+    for field in ("body", "response_body", "event_data"):
         _shorten(brief, field)
     if "replace" in brief:
         brief["replace"] = [dict(item) for item in brief["replace"]]
@@ -386,6 +410,7 @@ class ProxyService:
             value = str(value)
         if not isinstance(value, str) or not value:
             raise ToolError("flow is required: the id or seq of an sse or websocket flow")
+        _check_text("flow", value)
         summary = self.store.find_summary(value)
         if summary is None:
             raise NotFound(FLOW_NOT_FOUND.format(value))
@@ -429,17 +454,18 @@ class ProxyService:
     def history_matches(self, rule):
         flow_filter = FlowFilter(host=rule.get("host"), path=rule.get("path"), method=rule.get("method"))
         summaries = self.store.query(flow_filter, min(self.settings.max_flows, HISTORY_SCAN_LIMIT))
-        streams_only = rule["action"] == "events"
+        kinds = _stream_kinds(rule)
         return sum(1 for summary in summaries if summary["method"] != "CONNECT"
-                   and (not streams_only or summary.get("kind", "http") != "http")
+                   and (kinds is None or summary.get("kind", "http") in kinds)
                    and matches(rule, summary["host"], summary["path"], summary["method"], summary["url"]))
 
-    def _rule_answer(self, rule):
+    def _rule_answer(self, rule, updated=False):
         answer = {"rule": _brief(rule), "history_matches": self.history_matches(rule), "counts": self.rules.counts()}
         hints = []
         if not answer["history_matches"] and rule["action"] == "events":
-            hints.append("no recorded sse or websocket stream matches this condition yet; check host and path with "
-                         "list_flows and kind sse or websocket")
+            kinds = " or ".join(_stream_kinds(rule))
+            hints.append("no recorded {0} stream matches this condition yet; check host and path with list_flows and "
+                         "kind {0}".format(kinds))
         elif not answer["history_matches"]:
             hints.append("no recorded request matches this condition yet; check host and path with list_flows "
                          "(CONNECT records do not count: rules apply to decrypted requests only)")
@@ -447,6 +473,10 @@ class ProxyService:
         if earlier and _same_rule(self.rules.get(earlier["id"]), rule):
             hints.append("this rule repeats {0}: if you are moving {0}, delete {0} to finish; otherwise delete this "
                          "rule".format(earlier["id"]))
+        elif earlier and rule["action"] == "events":
+            hints.append("rule {0} ({1}) answers every request this rule matches, so no stream reaches this rule while "
+                         "{0} is enabled; order does not matter for events: disable {0} or narrow its "
+                         "conditions".format(earlier["id"], earlier["action"]))
         elif earlier:
             hint = ("rule {0} ({1}) is earlier in the list and answers every request this rule matches, so this rule "
                     "does not apply while {0} is enabled; to put {0} after this one, take it whole with list_rules "
@@ -457,7 +487,7 @@ class ProxyService:
             hints.append(hint)
         later = self.rules.shadowing(rule["id"])
         if later:
-            hints.append("this rule answers every request of the later rules {0}, so they do not apply while it is "
+            hints.append("this rule answers every request of the rules {0}, so they do not apply while it is "
                          "enabled".format(", ".join(later)))
         if rule["action"] == "sse" and rule["enabled"]:
             hints.append("the rule serves streams the app opens from now on: a stream that is already open stays with "
@@ -466,11 +496,18 @@ class ProxyService:
                 hints.append("body does not end with an empty line: its last event reaches the app only after the "
                              "next event is sent")
         if rule["action"] == "events" and rule["enabled"]:
-            hint = ("the rule changes streams the app opens from now on: a stream that is already open stays as it "
-                    "is, so make the app reconnect")
+            if updated:
+                hint = ("streams this rule already changes take the change at once; other open streams stay as they "
+                        "are until the app reconnects")
+            else:
+                hint = ("the rule changes streams the app opens from now on: a stream that is already open stays as "
+                        "it is, so make the app reconnect")
             if "close" in rule and "times" not in rule:
                 hint += ("; without times every new stream is closed again and the app reconnects in a loop: "
-                         "times=1 breaks one stream")
+                         "times=1 limits the rule to the first matching stream")
+            if closes_streams(rule) and "host" in rule:
+                hint += ("; connections the app opened before this rule stay HTTP/2, where close breaks the whole "
+                         "connection: restart the app")
             hints.append(hint)
         if limits_speed(rule) and rule["enabled"]:
             if "host" in rule:
@@ -529,7 +566,7 @@ class ProxyService:
             self.speeds.change_rule(rule_id, rule_limits(rule))
         if self.events is not None:
             self.events.change_rule(rule_id, rule)
-        return self._rule_answer(rule)
+        return self._rule_answer(rule, updated=True)
 
     def delete_rule(self, arguments):
         rule_id = _str(arguments, "id")
@@ -579,6 +616,8 @@ class ProxyService:
             raise ToolError(str(error), error.kind)
         if action == "disable" and self.charles is not None:
             self.charles.forget(answer["serial"])
+        if action == "status" and self.paused_for and "hint" in answer:
+            answer["hint"] = connection.PAUSED_FOR_CHARLES
         return answer
 
     async def check_connection(self, arguments):
@@ -628,6 +667,8 @@ class ProxyService:
             raise ToolError("pass exactly one of data (text message) and data_base64 (binary message)")
         if text is not None and not isinstance(text, str):
             raise ToolError("data must be a string")
+        if text is not None:
+            _check_text("data", text)
         try:
             content = text.encode("utf-8") if text is not None else base64.b64decode(packed, validate=True)
         except (binascii.Error, ValueError):
@@ -637,12 +678,13 @@ class ProxyService:
         if self.injector is None:
             raise ToolError("sending is not available: the proxy is not running; check proxy_status and read_log")
         before = self._stream(summary["seq"])["event_count"]
+        last_seq = self.store.last_seq()
         try:
             self.injector.send(summary["seq"], direction == "incoming", content, text is not None)
         except InjectError as error:
             raise ToolError(str(error))
         return {"sent": True, "flow": summary["seq"], "direction": direction, "type": "text" if text is not None else "binary",
-                "size": len(content), "events_before": before}
+                "size": len(content), "events_before": before, "last_seq": last_seq}
 
     def _send_sse(self, summary, arguments):
         seq = summary["seq"]
@@ -680,6 +722,7 @@ class ProxyService:
             raise ToolError("flow {0} is an SSE stream of the real server: only streams served by an sse rule take events. "
                             "Add a rule with action sse for this URL and make the app reconnect".format(seq))
         before = self._stream(seq)["event_count"]
+        last_seq = self.store.last_seq()
         try:
             if frame:
                 stream.send(frame)
@@ -688,7 +731,7 @@ class ProxyService:
         except StreamRefused as error:
             raise ToolError(str(error))
         return {"sent": bool(frame), "flow": seq, "direction": "incoming", "type": "event", "size": len(frame),
-                "events_before": before, "closed": close}
+                "events_before": before, "last_seq": last_seq, "closed": close}
 
     async def wait_for_event(self, arguments):
         timeout = _int(arguments, "timeout_seconds", 60, 1, MAX_WAIT_SECONDS)
@@ -756,7 +799,7 @@ class ProxyService:
         flow_filter = build_filter(arguments)
         if flow_filter.since_seq is None:
             flow_filter = replace(flow_filter, since_seq=self.store.last_seq())
-        existing = self.store.query(flow_filter, 1)
+        existing = self.store.query(flow_filter, 1, oldest_first=True)
         if existing:
             return {"flow": existing[0], "timed_out": False}
         loop = asyncio.get_running_loop()
@@ -798,7 +841,7 @@ TOOLS = [
         "description": "Full flow by id or seq: request and response headers and bodies. "
                        "Text bodies are decoded by the charset of their Content-Type (UTF-8 without it). "
                        "JSON bodies are pretty-printed (raw=true shows them as stored, after rules), binary bodies are "
-                       "base64. " + UNTRUSTED_NOTE,
+                       "base64. The size of a cut or broken compressed body is an estimate. " + UNTRUSTED_NOTE,
         "inputSchema": {"type": "object", "required": ["id"], "properties": {
             "id": {"type": "string", "description": "Flow id or seq number"},
             "max_body_chars": {"type": "integer", "description": "Cut each body to this many characters, default 20000"},
@@ -813,7 +856,7 @@ TOOLS = [
         "description": "Block until a flow matching the filters completes, then return its summary. "
                        "By default only flows finished after the call are considered. SSE and WebSocket streams are "
                        "reported when they open (open: true), not when they end: wait for their events and their end "
-                       "with wait_for_event. "
+                       "with wait_for_event. With since_seq the first matching flow after it is returned. "
                        "Typical use: ask the user to tap something in the app and wait for the request. " + UNTRUSTED_NOTE,
         "inputSchema": {"type": "object", "properties": dict(FILTER_PROPERTIES, timeout_seconds={
             "type": "integer", "description": "1..300, default 60"})},
@@ -825,7 +868,7 @@ TOOLS = [
                        "number n, ms since the request started, direction, type, name, data. An open stream grows: "
                        "call again with since_n set to the last n you saw. A stream keeps its last 5000 events, at most "
                        "64 MB of them and 256 KB of each, and records at most 500 events or 4 MB per second (a note counts the "
-                       "rest). " + UNTRUSTED_NOTE,
+                       "rest). A message an events rule did not deliver has the note dropped. " + UNTRUSTED_NOTE,
         "inputSchema": {"type": "object", "required": ["flow"], "properties": dict(EVENT_PROPERTIES, **{
             "flow": {"type": "string", "description": "Flow id or seq number of the stream"},
             "since_n": {"type": "integer", "description": "Only events with n greater than this value"},
@@ -840,10 +883,10 @@ TOOLS = [
                        "the app had; the message is recorded with the note injected. SSE: only a stream served by an "
                        "sse rule takes events (a stream of the real server cannot be written to); data, event, id, "
                        "retry build one event, close ends the stream (deleting, disabling or changing the action of the rule closes its streams "
-                       "too). events_before is the event count before the call. To catch the reaction to a WebSocket "
+                       "too). events_before is the event count before the call, last_seq the newest flow seq. To catch the reaction to a WebSocket "
                        "message, call wait_for_event with since_n set to events_before and the opposite direction "
                        "(outgoing for the app's answer to an incoming message), otherwise the sent message itself comes "
-                       "first; an SSE stream has no answer direction, the app reacts with requests: wait_for_flow. "
+                       "first; an SSE stream has no answer direction, the app reacts with requests: wait_for_flow with since_seq set to last_seq. "
                        "Sending changes what the app or the server sees: tell the user what you sent.",
         "inputSchema": {"type": "object", "required": ["flow"], "properties": {
             "flow": {"type": "string", "description": "Flow id or seq number of an open WebSocket or SSE flow"},

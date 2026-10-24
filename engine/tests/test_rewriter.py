@@ -1132,3 +1132,14 @@ def test_request_only_rewrite_is_not_marked_when_body_file_fails(rules, tmp_path
     mock.unlink()
     flow = through(Rewriter(rules), tflow.tflow())
     assert flow.response.status_code == 502 and "skipped" not in flow.metadata["agentproxy_rules"][0]
+
+
+def test_edited_body_that_broke_on_the_way_is_marked_skipped(rules):
+    rules.add({"action": "rewrite", "path": "/path", "replace": [{"find": "ok", "with": "no"}]})
+    rewriter = Rewriter(rules)
+    flow = tflow.tflow()
+    run(rewriter.requestheaders(flow))
+    flow.response = server_response()
+    rewriter.responseheaders(flow)
+    rewriter.error(flow)
+    assert "broke before its end" in flow.metadata["agentproxy_rules"][0]["skipped"]

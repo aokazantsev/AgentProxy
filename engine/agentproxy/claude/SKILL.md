@@ -36,7 +36,7 @@ MCP недоступен (сессия началась до установки)
 
 Поток — запись истории с момента открытия (`list_flows`: `kind` `sse` или `websocket`, `open`), тела у него нет, сообщения —
 события. Читать `list_events`, ждать `wait_for_event` (без `flow` — любой под фильтры), слать `send_event`;
-реакцию WebSocket ждать `wait_for_event` с `since_n` = `events_before` и обратным `direction`, на SSE — `wait_for_flow`.
+реакцию WebSocket ждать `wait_for_event` с `since_n` = `events_before` и обратным `direction`, на SSE — `wait_for_flow` с `since_seq` = `last_seq`.
 Ответ ожидания с `closed` — поток закончился. SSE, закрытый приложением, бывает с `error` («Client disconnected.»): кто
 закрыл, не видно; «incomplete…» в `note` — событие оборвано; после «events not read…» события не пишутся. Подмена
 событий и обрыв потока — правило `events`. В SSE слать — только в поток правила `sse` (`{{SKILL_DIR}}\rules.md`, «Поток `sse`»);

@@ -15,6 +15,14 @@ class Feed(http.server.BaseHTTPRequestHandler):
     release = None
 
     def do_GET(self):
+        if self.path.startswith("/sized"):
+            body = b"data: one\n\ndata: two\n\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
@@ -143,13 +151,29 @@ def test_plain_requests_do_not_use_up_times_of_an_events_rule(engine):
 def test_compressed_sse_stream_is_passed_unchanged_with_a_reason(engine):
     target = start_streaming_server()
     try:
-        rule = add_rule(engine, action="events", path="/gzip-events", replace=[{"find": "packed", "with": "x"}])
+        rule = add_rule(engine, action="events", path="/gzip-events", replace=[{"find": "packed", "with": "x"}],
+                        times=1)
         fetch(engine, target.server_port, "/gzip-events")
         flow = finished_flow(engine, "sse")
         assert "compressed (gzip)" in rule_entry(flow, rule)["skipped"]
         assert [event["data"] for event in events_of(engine, flow)] == ["packed"]
+        assert api_get(engine["api_port"], "/api/rules")[1]["rules"][0]["remaining"] == 1
     finally:
         target.shutdown()
+
+
+def test_sse_with_content_length_is_sent_chunked_and_a_close_is_a_break(engine):
+    feed = start_feed()
+    try:
+        rule = add_rule(engine, action="events", path="/sized", replace=[{"find": "one", "with": "longer one"}])
+        head, _, body = fetch(engine, feed.server_port, "/sized").partition(HEADERS_END)
+        assert b"content-length" not in head.lower() and b"transfer-encoding: chunked" in head.lower()
+        assert b"data: longer one\n\n" in body and body.endswith(b"0\r\n\r\n")
+        api_call(engine["api_port"], "PATCH", "/api/rules/" + rule, {"close": "after", "event_contains": "two"})
+        body = fetch(engine, feed.server_port, "/sized").partition(HEADERS_END)[2]
+        assert b"data: two" in body and not body.endswith(b"0\r\n\r\n")
+    finally:
+        feed.shutdown()
 
 
 def test_deleting_the_rule_stops_changing_an_open_stream(engine):
@@ -243,6 +267,26 @@ def test_websocket_close_after_delivers_the_message_first(engine):
         target["loop"].call_soon_threadsafe(target["loop"].stop)
 
 
+def test_websocket_close_after_an_outgoing_message_breaks_at_once(engine):
+    target = start_websocket_echo()
+    try:
+        add_rule(engine, action="events", path="/ws", direction="outgoing", event_contains="stop", close="after")
+        sock = connect_websocket(engine, target)
+        started = time.monotonic()
+        sock.sendall(client_frame(1, b"stop"))
+        try:
+            while read_frame(sock) is not None:
+                pass
+        except (EOFError, ConnectionError):
+            pass
+        assert time.monotonic() - started < 0.8
+        sock.close()
+        events = events_of(engine, finished_flow(engine, "websocket"))
+        assert events[0]["direction"] == "outgoing" and events[0]["data"] == "stop" and "note" not in events[0]
+    finally:
+        target["loop"].call_soon_threadsafe(target["loop"].stop)
+
+
 def test_closing_rule_host_is_offered_http1(engine):
     from test_speed_e2e import negotiated_protocol
     add_rule(engine, action="respond", host="close.example.test", body="{}")
@@ -250,3 +294,30 @@ def test_closing_rule_host_is_offered_http1(engine):
     add_rule(engine, action="respond", host="open.example.test", body="{}")
     assert negotiated_protocol(engine, "close.example.test") == "http/1.1"
     assert negotiated_protocol(engine, "open.example.test") == "h2"
+
+
+def test_outgoing_events_rule_spends_times_on_a_websocket_but_not_on_an_sse_stream(engine):
+    feed = start_feed()
+    target = start_websocket_echo()
+    try:
+        rule = add_rule(engine, action="events", host="127.0.0.1", direction="outgoing", event_contains="stop",
+                        close="after", times=1)
+        body = fetch(engine, feed.server_port)
+        assert b"data: tick 5" in body and body.endswith(b"0\r\n\r\n")
+        sse = finished_flow(engine, "sse")
+        assert all(entry["id"] != rule for entry in sse.get("rules") or [])
+        rules = api_get(engine["api_port"], "/api/rules")[1]["rules"]
+        assert rules[0]["hits"] == 0 and rules[0]["remaining"] == 1
+        sock = connect_websocket(engine, target)
+        sock.sendall(client_frame(1, b"stop"))
+        try:
+            closed = read_frame(sock) is None
+        except (EOFError, ConnectionError):
+            closed = True
+        assert closed
+        sock.close()
+        rules = api_get(engine["api_port"], "/api/rules")[1]["rules"]
+        assert rules[0]["hits"] == 1 and rules[0]["remaining"] == 0
+    finally:
+        feed.shutdown()
+        target["loop"].call_soon_threadsafe(target["loop"].stop)

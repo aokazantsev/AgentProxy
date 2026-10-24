@@ -47,7 +47,7 @@ namespace AgentProxy
             var copy = new Button { Text = "Скопировать вкладку", AutoSize = true };
             copy.Click += (sender, e) => CopyCurrent();
             var folder = new Button { Text = "Открыть папку журналов", AutoSize = true };
-            folder.Click += (sender, e) => Process.Start(new ProcessStartInfo(SystemTools.Explorer, "\"" + UserDataPaths.Directory + "\"") { UseShellExecute = false });
+            folder.Click += (sender, e) => OpenFolder();
             buttons.Controls.Add(close);
             buttons.Controls.Add(copy);
             buttons.Controls.Add(folder);
@@ -56,6 +56,8 @@ namespace AgentProxy
             CancelButton = close;
 
             timer.Tick += (sender, e) => RefreshAll(false);
+            tabs.Deselecting += (sender, e) => { if (e.TabPage != null) ((JournalSource)e.TabPage.Tag).Leaving(); };
+            tabs.SelectedIndexChanged += (sender, e) => ((JournalSource)tabs.SelectedTab.Tag).Shown();
             Shown += (sender, e) =>
             {
                 RefreshAll(true);
@@ -89,7 +91,28 @@ namespace AgentProxy
         private void CopyCurrent()
         {
             var source = (JournalSource)tabs.SelectedTab.Tag;
-            if (source.Box.TextLength > 0) Clipboard.SetText(source.Box.Text);
+            if (source.Box.TextLength == 0) return;
+            try
+            {
+                Clipboard.SetText(source.Box.Text);
+            }
+            catch (System.Runtime.InteropServices.ExternalException error)
+            {
+                AppLog.Append("journal copy failed: " + error.Message);
+                MessageBox.Show(this, "Буфер обмена занят другой программой — попробуй ещё раз.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private void OpenFolder()
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(SystemTools.Explorer, "\"" + UserDataPaths.Directory + "\"") { UseShellExecute = false });
+            }
+            catch (System.ComponentModel.Win32Exception error)
+            {
+                AppLog.Append("journal folder not opened: " + error.Message);
+            }
         }
     }
 }
