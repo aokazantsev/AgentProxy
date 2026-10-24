@@ -12,7 +12,7 @@ RULES_MAX_CHARS = 11000
 COPY_WINDOW_WORDS = 6
 ANSWER_FIELDS = {
     "rewriter.py": ("skipped", "replaced", "not_found", "error", "limited"),
-    "service.py": ("history_matches", "hint", "counts", "events_before", "closed", "note"),
+    "service.py": ("history_matches", "hint", "counts", "events_before", "closed", "note", "paused"),
     "rules.py": ("problem",),
     "bodies.py": ("truncated",),
     "settings.py": ("max_body_bytes",),

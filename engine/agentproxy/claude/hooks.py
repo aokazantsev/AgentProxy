@@ -27,7 +27,13 @@ def describe(env, status):
                 "недоступны. Запуск без ожидания: explorer.exe \"{2}\" (не вызывать exe напрямую из Bash — команда повиснет), или значок в трее. Журналы: {3}\\log.txt, {3}\\engine.log."
                 .format(VERSION, env.api_port, exe, env.data_dir))
     proxy = status.get("proxy") if isinstance(status.get("proxy"), dict) else {}
-    state = "работает" if proxy.get("running") is True else "запущен, но прокси не слушает порт (см. engine.log)"
+    if proxy.get("paused") == "charles":
+        state = ("выключен, пока запущен Charles (настройка трея), и включится сам, когда Charles закроют; MCP и история "
+                 "доступны")
+    elif proxy.get("running") is True:
+        state = "работает"
+    else:
+        state = "запущен, но прокси не слушает порт (см. engine.log)"
     flows = status.get("flows")
     rules = status.get("rules") if isinstance(status.get("rules"), dict) else {}
     enabled = rules.get("enabled")

@@ -189,7 +189,7 @@ def test_engine_builds_its_master_through_create_master(tmp_path, monkeypatch):
     class Stop(Exception):
         pass
 
-    def fake(current, cert_dir):
+    def fake(current, cert_dir, listening=True):
         called.append(cert_dir)
         raise Stop()
 

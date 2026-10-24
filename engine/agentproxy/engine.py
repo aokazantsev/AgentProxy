@@ -15,6 +15,7 @@ from dataclasses import replace
 from . import VERSION, logs, paths
 from . import settings as settings_module
 from .api import make_app
+from .charles import PAUSED_FOR, CharlesYield, charles_running
 from .claude import integration
 from .flowlog import FlowLog
 from .guard import OwnPortsGuard
@@ -91,27 +92,39 @@ def write_runtime(data_dir, payload):
 async def probe_proxy(service):
     seen_listening = False
     while True:
-        running = await asyncio.to_thread(proxy_listening, LOCAL_HOST, service.settings.proxy_port)
-        if running != service.proxy_running:
-            log.info("proxy %s", "listening" if running else "not listening")
-        service.proxy_running = running
-        seen_listening = seen_listening or running
+        epoch = service.listen_epoch
+        running = False
+        if not service.paused_for:
+            running = await asyncio.to_thread(proxy_listening, LOCAL_HOST, service.settings.proxy_port)
+        if epoch == service.listen_epoch:
+            if running != service.proxy_running:
+                log.info("proxy %s", "listening" if running else "not listening")
+            service.proxy_running = running
+        seen_listening = seen_listening or running or bool(service.paused_for)
         await asyncio.sleep(PROBE_INTERVAL_SECONDS if seen_listening else STARTUP_PROBE_SECONDS)
+
+
+def charles_at_start():
+    try:
+        return charles_running()
+    except OSError as error:
+        log.warning("charles check failed at start: %s", error)
+        return False
 
 
 def settings_for_log(current):
     return replace(current, adb_path="(set)" if current.adb_path else "")
 
 
-def proxy_options(current, cert_dir):
+def proxy_options(current, cert_dir, listening=True):
     from mitmproxy import options
     return options.Options(listen_host=LOCAL_HOST, listen_port=current.proxy_port, confdir=cert_dir,
-                           ssl_insecure=not current.verify_upstream, websocket=True)
+                           ssl_insecure=not current.verify_upstream, websocket=True, server=listening)
 
 
-def create_master(current, cert_dir):
+def create_master(current, cert_dir, listening=True):
     from mitmproxy.tools.dump import DumpMaster
-    master = DumpMaster(proxy_options(current, cert_dir), with_termlog=False, with_dumper=False)
+    master = DumpMaster(proxy_options(current, cert_dir, listening), with_termlog=False, with_dumper=False)
     master.options.update(stream_large_bodies=str(MAX_FILE_BYTES))
     return master
 
@@ -121,7 +134,9 @@ async def serve(current, data_dir, parent_pid):
     store = FlowStore(os.path.join(data_dir, "flows.db"), current.max_flows)
     rules = RuleSet(data_dir)
     service = ProxyService(store, current, data_dir, cert_dir, rules)
-    master = create_master(current, cert_dir)
+    if current.yield_to_charles and charles_at_start():
+        service.paused_for = PAUSED_FOR
+    master = create_master(current, cert_dir, listening=not service.paused_for)
     master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
     streams = StreamHost()
     await streams.start()
@@ -146,11 +161,19 @@ async def serve(current, data_dir, parent_pid):
     if parent_pid:
         watch_parent(parent_pid, shutdown)
     prober = asyncio.ensure_future(probe_proxy(service))
+    yielder = None
+    if current.yield_to_charles:
+        watcher = CharlesYield(service, lambda on: master.options.update(server=on),
+                               lambda: proxy_listening(LOCAL_HOST, current.proxy_port))
+        service.charles = watcher
+        yielder = asyncio.ensure_future(watcher.run())
     log.info("api on %s:%s, proxy on %s:%s", LOCAL_HOST, current.api_port, LOCAL_HOST, current.proxy_port)
     try:
         await master.run()
     finally:
         prober.cancel()
+        if yielder is not None:
+            yielder.cancel()
         server.stop()
         streams.stop()
         store.close()

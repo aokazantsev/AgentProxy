@@ -91,3 +91,14 @@ def test_claude_install_reports_broken_settings(cli_env):
     code, out, _ = run_cli(cli_env, "claude", "install", "--no-cli")
     assert code == 1
     assert "not valid JSON" in json.loads(out)["error"]
+
+
+def test_status_counts_a_proxy_paused_for_charles_as_up(monkeypatch, capsys):
+    from agentproxy import cli
+    paused = {"proxy": {"running": False, "paused": "charles"}}
+    monkeypatch.setattr(cli.hooks, "fetch_status", lambda env: paused)
+    monkeypatch.setattr(cli.integration, "status", lambda env: {})
+    assert cli.command_status(type("Args", (), {"wait": 0})()) == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["running"] is False and answer["paused"] == "charles"
+    assert not cli.is_up({"proxy": {"running": False, "paused": None}}) and not cli.is_up(None)

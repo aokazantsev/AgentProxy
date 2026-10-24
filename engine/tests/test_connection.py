@@ -259,7 +259,7 @@ def test_proxy_not_listening_comes_first(service, store):
     add(store, 1, 10)
     answer = check(service)
     assert answer["verdict"] == "proxy_not_listening"
-    assert answer["proxy"] == {"port": 18890, "listening": False}
+    assert answer["proxy"] == {"port": 18890, "listening": False, "paused": None}
     assert any("PORT BUSY" in hint for hint in answer["hints"])
     assert any("device_proxy disable" in hint for hint in answer["hints"])
 

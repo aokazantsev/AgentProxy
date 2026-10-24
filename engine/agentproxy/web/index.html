@@ -85,8 +85,9 @@ async function getJson(url) { const response = await fetch(url, { cache: "no-sto
 async function refreshStatus() {
   try {
     const status = await getJson("/api/status");
-    document.getElementById("dot").className = "dot " + (status.proxy.running ? "on" : "off");
-    document.getElementById("state").textContent = status.proxy.running ? "работает" : "прокси не слушает порт";
+    const paused = status.proxy.paused === "charles";
+    document.getElementById("dot").className = "dot" + (paused ? "" : status.proxy.running ? " on" : " off");
+    document.getElementById("state").textContent = paused ? "выключен, пока работает Charles" : status.proxy.running ? "работает" : "прокси не слушает порт";
     document.getElementById("proxy").textContent = status.proxy.host + ":" + status.proxy.port;
     document.getElementById("count").textContent = status.flows;
     document.getElementById("rules").textContent = status.rules ? status.rules.active + (status.rules.problem ? " ⚠" : "") : "—";

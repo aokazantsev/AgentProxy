@@ -124,7 +124,7 @@ def two_ports():
 def start_engine(tmp_path):
     started = []
 
-    def start(**settings):
+    def start(wait_running=True, **settings):
         data_dir = str(tmp_path / "engine-data-{0}".format(len(started)))
         os.makedirs(data_dir)
         proxy_port, api_port = two_ports()
@@ -138,7 +138,7 @@ def start_engine(tmp_path):
         def ready():
             try:
                 status, body = api_get(values["api_port"], "/api/status", timeout=2)
-                return status == 200 and body["proxy"]["running"]
+                return status == 200 and (body["proxy"]["running"] or not wait_running and body["proxy"]["paused"])
             except OSError:
                 return False
 
@@ -787,3 +787,59 @@ def test_check_connection_tells_failure_kinds_apart(start_engine, tmp_path):
     assert answer["proxy"]["listening"] is True and answer["device"] == {"checked": False}
     assert (answer["traffic"]["count"], answer["traffic"]["failed"]) == (1, 1)
     target.shutdown()
+
+
+def start_fake_charles(tmp_path):
+    fake = tmp_path / "Charles.exe"
+    with open(os.path.join(os.environ["SystemRoot"], "System32", "ping.exe"), "rb") as source:
+        fake.write_bytes(source.read())
+    return subprocess.Popen([str(fake), "-n", "120", "127.0.0.1"], stdout=subprocess.DEVNULL,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def accepts_connections(port):
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+
+def test_engine_started_while_charles_runs_never_listens_until_it_closes(start_engine, tmp_path):
+    charles = start_fake_charles(tmp_path)
+    try:
+        engine = start_engine(wait_running=False, yield_to_charles=True, adb_path=str(tmp_path / "no-adb.exe"))
+        proxy = api_get(engine["api_port"], "/api/status")[1]["proxy"]
+        assert proxy["paused"] == "charles" and not proxy["running"]
+        assert not accepts_connections(engine["proxy_port"])
+    finally:
+        charles.kill()
+        charles.wait(10)
+    assert wait_until(lambda: api_get(engine["api_port"], "/api/status", timeout=2)[1]["proxy"]["running"], 20)
+    target = start_server()
+    response = proxied_opener(engine).open("http://127.0.0.1:{0}/after".format(target.server_port), timeout=15)
+    assert response.status == 201
+
+
+def test_proxy_is_off_while_charles_runs_and_back_after(start_engine, tmp_path):
+    engine = start_engine(yield_to_charles=True, adb_path=str(tmp_path / "no-adb.exe"))
+    charles = start_fake_charles(tmp_path)
+
+    def proxy():
+        return api_get(engine["api_port"], "/api/status", timeout=2)[1]["proxy"]
+
+    try:
+        assert wait_until(lambda: proxy()["paused"] == "charles", 20)
+        assert wait_until(lambda: not accepts_connections(engine["proxy_port"]), 10)
+        assert not proxy()["running"]
+        status, answer = api_get(engine["api_port"], "/api/connection?device=false")
+        assert status == 200 and answer["verdict"] == "paused_for_charles"
+    finally:
+        charles.kill()
+        charles.wait(10)
+    assert wait_until(lambda: proxy()["paused"] is None and proxy()["running"], 20)
+    target = start_server()
+    response = proxied_opener(engine).open("http://127.0.0.1:{0}/after".format(target.server_port), timeout=15)
+    assert response.status == 201
+    log = open(os.path.join(engine["data_dir"], "engine.log"), encoding="utf-8").read()
+    assert "charles running: proxy paused" in log and "charles closed: proxy resumed" in log

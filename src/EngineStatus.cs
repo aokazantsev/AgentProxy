@@ -12,6 +12,7 @@ namespace AgentProxy
         private const int TimeoutMs = 2000;
 
         public bool ProxyRunning;
+        public string Paused;
         public int Flows;
         public int Rules;
         public int RulesEnabled;
@@ -41,6 +42,8 @@ namespace AgentProxy
                 var proxy = value as Dictionary<string, object>;
                 object running;
                 if (proxy != null && proxy.TryGetValue("running", out running) && running is bool) status.ProxyRunning = (bool)running;
+                object paused;
+                if (proxy != null && proxy.TryGetValue("paused", out paused)) status.Paused = paused as string;
             }
             if (data.TryGetValue("rules", out value))
             {

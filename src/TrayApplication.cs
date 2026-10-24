@@ -27,6 +27,7 @@ namespace AgentProxy
         private readonly ClaudeLink claude;
         private readonly SynchronizationContext ui;
         private EngineState notifiedState = EngineState.Starting;
+        private EngineState charlesState = EngineState.Starting;
         private Action balloonClick;
 
         public TrayApplication()
@@ -71,6 +72,7 @@ namespace AgentProxy
             restartItem.Click += (sender, e) =>
             {
                 Usage.Hit("menu.engine_restart");
+                charlesState = EngineState.Starting;
                 engine.Restart();
             };
             autostartItem.Click += (sender, e) => ToggleAutostart();
@@ -120,11 +122,13 @@ namespace AgentProxy
             claudeStateItem.Text = ClaudeText();
             claudeItem.Text = ClaudeActionText();
             claudeItem.Enabled = !claude.IsBusy;
-            monitorItem.Enabled = state == EngineState.Running || state == EngineState.ProxyNotListening;
+            monitorItem.Enabled = state == EngineState.Running || state == EngineState.ProxyNotListening
+                || state == EngineState.PausedForCharles;
             tray.Icon = TrayIcons.For(state);
             string tooltip = AppIdentity.Name + ": " + line;
             tray.Text = tooltip.Length > TooltipLimit ? tooltip.Substring(0, TooltipLimit) : tooltip;
             NotifyProblem(state);
+            NotifyCharles(state);
             UpdateEngineUsageState(state, settings);
         }
 
@@ -132,6 +136,7 @@ namespace AgentProxy
         {
             Usage.SetState("engine_running", state == EngineState.Running);
             Usage.SetState("verify_upstream", settings.VerifyUpstream);
+            Usage.SetState("yield_to_charles", settings.YieldToCharles);
             if (claude.Installed != null) Usage.SetState("claude_code", claude.Installed == true && claude.Complete);
             EngineStatus status = engine.LastStatus;
             if (status == null) return;
@@ -202,6 +207,7 @@ namespace AgentProxy
                 int flows = engine.LastStatus != null ? engine.LastStatus.Flows : 0;
                 return "прокси 127.0.0.1:" + settings.ProxyPort + ", запросов " + flows;
             }
+            if (state == EngineState.PausedForCharles) return "выключен, пока работает Charles; включится сам";
             if (state == EngineState.Starting) return "запускается…";
             if (state == EngineState.Stopped) return "остановлен";
             if (state == EngineState.PortBusy) return detail ?? "порт занят";
@@ -241,6 +247,19 @@ namespace AgentProxy
             if (state != EngineState.Starting) notifiedState = state;
         }
 
+        private void NotifyCharles(EngineState state)
+        {
+            if (state == EngineState.PausedForCharles && charlesState != EngineState.PausedForCharles)
+            {
+                ShowBalloon("Прокси выключен, пока работает Charles. Включится сам, когда Charles закроют.", ToolTipIcon.Info, null);
+            }
+            else if (state == EngineState.Running && charlesState == EngineState.PausedForCharles)
+            {
+                ShowBalloon("Charles закрыт — прокси снова включён.", ToolTipIcon.Info, null);
+            }
+            if (state != EngineState.Starting) charlesState = state;
+        }
+
         private void OpenMonitor()
         {
             EngineSettings settings = engine.Settings ?? EngineSettings.Load();
@@ -270,6 +289,7 @@ namespace AgentProxy
 
         private void OnSettingsSaved()
         {
+            charlesState = EngineState.Starting;
             engine.Restart();
             claude.Refresh();
         }

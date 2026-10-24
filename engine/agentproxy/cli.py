@@ -29,20 +29,28 @@ def read_hook_input():
     return data if isinstance(data, dict) else {}
 
 
+def proxy_field(status, name):
+    return (status.get("proxy") or {}).get(name) if isinstance(status, dict) else None
+
+
 def is_running(status):
-    return isinstance(status, dict) and bool((status.get("proxy") or {}).get("running"))
+    return bool(proxy_field(status, "running"))
+
+
+def is_up(status):
+    return is_running(status) or bool(proxy_field(status, "paused"))
 
 
 def command_status(args):
     env = integration.detect(use_cli=False)
     deadline = time.monotonic() + args.wait
     status = hooks.fetch_status(env)
-    while not is_running(status) and time.monotonic() < deadline:
+    while not is_up(status) and time.monotonic() < deadline:
         time.sleep(WAIT_POLL_SECONDS)
         status = hooks.fetch_status(env)
-    emit({"version": VERSION, "engine": status, "running": is_running(status),
+    emit({"version": VERSION, "engine": status, "running": is_running(status), "paused": proxy_field(status, "paused"),
           "claude": integration.status(env)})
-    return EXIT_OK if is_running(status) else EXIT_FAILED
+    return EXIT_OK if is_up(status) else EXIT_FAILED
 
 
 def command_claude(args):

@@ -13,6 +13,7 @@ class Settings:
     max_body_bytes: int = 2 * 1024 * 1024
     verify_upstream: bool = True
     adb_path: str = ""
+    yield_to_charles: bool = False
 
 
 LIMITS = {

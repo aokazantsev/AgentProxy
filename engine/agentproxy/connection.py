@@ -19,6 +19,11 @@ CANCELLED_CONNECT_MS = 3000
 FAILURE_KINDS = ("tls_untrusted", "tls_dropped", "tls_version", "connect_failed", "server_certificate")
 QUIET_DEVICE_PROBLEMS = ("adb not found", "no device")
 TLS_KINDS = ("tls_untrusted", "tls_dropped", "tls_version")
+PAUSED_FOR_CHARLES = ("AgentProxy is off while Charles runs (tray setting «Выключать прокси, пока запущен Charles»): "
+                      "it turns back on by itself when Charles is closed and puts the device proxy back on devices it took "
+                      "it off, if they are still connected with no proxy; if AgentProxy is needed now, ask the user to "
+                      "close Charles or untick the setting in «Настройки…»: unticking restarts the engine without putting "
+                      "the device proxy back, so run device_proxy enable after it")
 APP_RESTART = ("restart the app (many HTTP clients read the proxy only at start) and do something in it that sends "
                "requests, then check_connection again; requests of other apps but none of this one: the app ignores "
                "the system proxy or pins certificates (OkHttp CertificatePinner closes the connection without a "
@@ -139,8 +144,10 @@ def certificate_refused(traffic, failures):
     return untrusted is not None and not traffic["https_hosts"]
 
 
-def verdict(listening, traffic, failures, device):
+def verdict(listening, traffic, failures, device, paused=None):
     kinds = {failure["kind"] for failure in failures}
+    if paused:
+        return "paused_for_charles"
     if not listening:
         return "proxy_not_listening"
     if certificate_refused(traffic, failures) or (not traffic["https_hosts"] and kinds & {"tls_dropped", "tls_version"}):
@@ -199,6 +206,9 @@ def build_hints(result, port):
     traffic = result["traffic"]
     device = result["device"]
     hints = []
+    if result["verdict"] == "paused_for_charles":
+        hints.append(PAUSED_FOR_CHARLES)
+        return hints
     if result["verdict"] == "proxy_not_listening":
         hints.append("the proxy is not listening on port {0}: read_log (source engine) shows PORT BUSY or a crash; "
                      "a program holding the port (often Charles) has to be closed, or the user changes the port in "

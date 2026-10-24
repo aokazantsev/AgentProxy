@@ -196,6 +196,9 @@ namespace AgentProxy.Tests
             Equal(9000, parsed.ProxyPort, "proxy");
             Equal(9001, parsed.ApiPort, "api");
             Equal(false, parsed.VerifyUpstream, "verify");
+            Equal(false, parsed.YieldToCharles, "yield to charles off by default");
+            Equal(true, EngineSettings.Parse("{\"yield_to_charles\": true}").YieldToCharles, "yield to charles on");
+            Equal(false, EngineSettings.Parse("{\"yield_to_charles\": 1}").YieldToCharles, "yield to charles not bool");
             EngineSettings broken = EngineSettings.Parse("{broken");
             Equal(EngineSettings.DefaultProxyPort, broken.ProxyPort, "broken proxy");
             EngineSettings low = EngineSettings.Parse("{\"proxy_port\": 80, \"api_port\": \"x\"}");
@@ -215,6 +218,8 @@ namespace AgentProxy.Tests
             parsed.ProxyPort = 9100;
             EngineSettings round = EngineSettings.Parse(parsed.ToJson());
             Equal(9100, round.ProxyPort, "proxy");
+            parsed.YieldToCharles = true;
+            Equal(true, EngineSettings.Parse(parsed.ToJson()).YieldToCharles, "yield to charles saved");
             True(parsed.ToJson().Contains("\"max_flows\":777"), "unknown key kept: " + parsed.ToJson());
         }
 
@@ -237,6 +242,9 @@ namespace AgentProxy.Tests
             Equal(1, counted.ToolCalls.Count, "only numeric tool calls");
             Equal(4, counted.ToolCalls["list_flows"], "list_flows calls");
             Equal(0, status.ToolCalls.Count, "no tool calls field");
+            Equal<string>(null, status.Paused, "not paused");
+            Equal("charles", EngineStatus.Parse("{\"proxy\":{\"running\":false,\"paused\":\"charles\"}}").Paused, "paused for charles");
+            Equal<string>(null, EngineStatus.Parse("{\"proxy\":{\"running\":true,\"paused\":null}}").Paused, "paused null");
         }
 
         private static void ToolCallUsageDelta()
@@ -1023,14 +1031,15 @@ namespace AgentProxy.Tests
         {
             File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9000, \"api_port\": 9001, \"verify_upstream\": false}");
             EngineSettings stored = EngineSettings.Load();
-            Equal(false, stored.NeedsWrite(9000, 9001, false), "same values");
-            Equal(true, stored.NeedsWrite(9002, 9001, false), "proxy port changed");
-            Equal(true, stored.NeedsWrite(9000, 9002, false), "api port changed");
-            Equal(true, stored.NeedsWrite(9000, 9001, true), "verify changed");
+            Equal(false, stored.NeedsWrite(9000, 9001, false, false), "same values");
+            Equal(true, stored.NeedsWrite(9002, 9001, false, false), "proxy port changed");
+            Equal(true, stored.NeedsWrite(9000, 9002, false, false), "api port changed");
+            Equal(true, stored.NeedsWrite(9000, 9001, true, false), "verify changed");
+            Equal(true, stored.NeedsWrite(9000, 9001, false, true), "yield to charles changed");
             File.WriteAllText(EngineSettings.FilePath, "{broken");
-            Equal(true, EngineSettings.Load().NeedsWrite(EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true), "broken file rewritten");
+            Equal(true, EngineSettings.Load().NeedsWrite(EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true, false), "broken file rewritten");
             File.Delete(EngineSettings.FilePath);
-            Equal(false, EngineSettings.Load().NeedsWrite(EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true), "no file, defaults");
+            Equal(false, EngineSettings.Load().NeedsWrite(EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true, false), "no file, defaults");
         }
 
         private static void SettingsBrokenKeptOnSave()

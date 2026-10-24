@@ -295,6 +295,9 @@ class ProxyService:
         self.cert_dir = cert_dir
         self.started_at = time.time()
         self.proxy_running = False
+        self.paused_for = None
+        self.listen_epoch = 0
+        self.charles = None
         self.injector = None
         self.streams = None
         self.speeds = None
@@ -312,7 +315,8 @@ class ProxyService:
         api = "http://127.0.0.1:{0}".format(settings.api_port)
         return {
             "version": VERSION,
-            "proxy": {"host": "127.0.0.1", "port": settings.proxy_port, "running": self.proxy_running},
+            "proxy": {"host": "127.0.0.1", "port": settings.proxy_port, "running": self.proxy_running,
+                      "paused": self.paused_for, "yield_to_charles": settings.yield_to_charles},
             "api": api,
             "mcp": api + "/mcp",
             "monitor": api + "/",
@@ -534,10 +538,15 @@ class ProxyService:
         action = _str(arguments, "action")
         if action is None:
             raise ToolError("action is required: enable, disable or status")
+        if action == "enable" and self.paused_for:
+            raise ToolError(connection.PAUSED_FOR_CHARLES, "proxy paused for charles")
         try:
-            return await asyncio.to_thread(self.device.apply, action, _str(arguments, "serial"))
+            answer = await asyncio.to_thread(self.device.apply, action, _str(arguments, "serial"))
         except DeviceError as error:
             raise ToolError(str(error), error.kind)
+        if action == "disable" and self.charles is not None:
+            self.charles.forget(answer["serial"])
+        return answer
 
     async def check_connection(self, arguments):
         minutes = _int(arguments, "since_minutes", connection.DEFAULT_MINUTES, 1, connection.MAX_MINUTES)
@@ -555,8 +564,10 @@ class ProxyService:
         rows = await asyncio.to_thread(self.store.activity, connection.SCAN_LIMIT)
         traffic, failures = connection.summarize(rows, now, minutes)
         listening = self.proxy_running
-        result = {"verdict": connection.verdict(listening, traffic, failures, device), "now": connection.local_time(now),
-                  "proxy": {"port": self.settings.proxy_port, "listening": listening}, "device": device,
+        result = {"verdict": connection.verdict(listening, traffic, failures, device, self.paused_for),
+                  "now": connection.local_time(now),
+                  "proxy": {"port": self.settings.proxy_port, "listening": listening, "paused": self.paused_for},
+                  "device": device,
                   "traffic": traffic, "failures": failures}
         result["hints"] = connection.build_hints(result, self.settings.proxy_port)
         device.pop("hint", None)
@@ -735,7 +746,8 @@ class ProxyService:
 TOOLS = [
     {
         "name": "proxy_status",
-        "description": "AgentProxy state: version, proxy address and port, number of recorded flows, "
+        "description": "AgentProxy state: version, proxy address and port, running, paused (charles: the proxy is off "
+                       "while Charles runs and turns back on by itself), yield_to_charles (the tray setting is on), number of recorded flows, "
                        "proxy rule counts (total, enabled, active, problem), CA certificate download URLs, monitor page URL.",
         "inputSchema": {"type": "object", "properties": {}},
         "handler": "status",
@@ -900,8 +912,8 @@ TOOLS = [
     {
         "name": "check_connection",
         "description": "Whether traffic reaches the proxy, in one call. verdict: traffic_flows, tls_refused, "
-                       "hosts_unreachable, device_not_routed, no_traffic or proxy_not_listening; proxy: port and "
-                       "whether it listens; device: the Android device over adb (proxy, adb reverse, ready) or the "
+                       "hosts_unreachable, device_not_routed, no_traffic, proxy_not_listening or paused_for_charles; "
+                       "proxy: port, whether it listens and paused (charles: off while Charles runs); device: the Android device over adb (proxy, adb reverse, ready) or the "
                        "problem that kept it unchecked; traffic: requests of the last since_minutes and open streams "
                        "(https, http, failed, top hosts), the last record of any kind, since when requests come without "
                        "a pause over 2 minutes; failures by kind with hosts (each with its last time; a host decrypted "

@@ -13,6 +13,7 @@ namespace AgentProxy
         private readonly NumericUpDown proxyPort = PortBox();
         private readonly NumericUpDown apiPort = PortBox();
         private readonly CheckBox verifyUpstream = new CheckBox { Text = "Проверять сертификаты серверов", AutoSize = true, Margin = new Padding(3, 10, 3, 0) };
+        private readonly CheckBox yieldToCharles = new CheckBox { Text = "Выключать прокси, пока запущен Charles", AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
         private readonly CheckBox autoUpdate = new CheckBox { Text = "Раз в сутки проверять обновление и сообщать о новой версии", AutoSize = true, Margin = new Padding(3, 10, 3, 0) };
         private readonly CheckBox usageStatistics = new CheckBox { Text = "Отправлять автору анонимную статистику использования", AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
         private readonly Action saved;
@@ -54,14 +55,18 @@ namespace AgentProxy
             proxyPort.Value = settings.ProxyPort;
             apiPort.Value = settings.ApiPort;
             verifyUpstream.Checked = settings.VerifyUpstream;
+            yieldToCharles.Checked = settings.YieldToCharles;
             AddRow(layout, "Порт прокси", proxyPort);
             AddRow(layout, "Порт API и MCP", apiPort);
             layout.Controls.Add(verifyUpstream);
             layout.SetColumnSpan(verifyUpstream, 2);
+            layout.Controls.Add(yieldToCharles);
+            layout.SetColumnSpan(yieldToCharles, 2);
             var hint = new Label
             {
                 Text = "Прокси слушает только 127.0.0.1: устройство подключается через adb reverse. "
-                    + "После смены портов или проверки сертификатов движок перезапустится, адрес MCP в Claude Code обновится сам; "
+                    + "С галкой про Charles AgentProxy на время его работы не слушает порт, а потом включается сам. "
+                    + "После смены этих настроек движок перезапустится, адрес MCP в Claude Code обновится сам; "
                     + "уже открытые сессии Claude Code увидят новый порт после перезапуска.",
                 AutoSize = true,
                 MaximumSize = new Size(ContentWidth, 0),
@@ -111,12 +116,13 @@ namespace AgentProxy
                 MessageBox.Show(this, problem, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            bool writeSettings = settings.NeedsWrite(proxy, api, verifyUpstream.Checked);
+            bool writeSettings = settings.NeedsWrite(proxy, api, verifyUpstream.Checked, yieldToCharles.Checked);
             if (writeSettings)
             {
                 settings.ProxyPort = proxy;
                 settings.ApiPort = api;
                 settings.VerifyUpstream = verifyUpstream.Checked;
+                settings.YieldToCharles = yieldToCharles.Checked;
                 try
                 {
                     settings.Save();
@@ -127,7 +133,8 @@ namespace AgentProxy
                     MessageBox.Show(this, "Не удалось сохранить настройки: " + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
-                AppLog.Append("settings saved: proxy " + proxy + ", api " + api + ", verify upstream " + settings.VerifyUpstream);
+                AppLog.Append("settings saved: proxy " + proxy + ", api " + api + ", verify upstream " + settings.VerifyUpstream
+                    + ", yield to charles " + settings.YieldToCharles);
             }
             string optionsProblem = SaveOptions();
             if (optionsProblem != null)

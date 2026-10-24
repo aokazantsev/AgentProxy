@@ -4,6 +4,7 @@ namespace AgentProxy
     {
         Starting,
         Running,
+        PausedForCharles,
         ProxyNotListening,
         NotResponding,
         PortBusy,

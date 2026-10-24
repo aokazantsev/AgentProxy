@@ -126,6 +126,46 @@ class DeviceControl:
                          "on" if answer["reverse_active"] else "off")
             return answer
 
+    def release(self):
+        with self.lock:
+            port, address = self._prepare()
+            released = []
+            for serial in self._ready_serials():
+                try:
+                    if self._proxy_value(serial).strip() != address:
+                        continue
+                    self._disable(serial, port)
+                    released.append(serial)
+                except DeviceError as error:
+                    log.info("device release skipped: %s", error.kind)
+            return released
+
+    def restore(self, serials):
+        with self.lock:
+            port, address = self._prepare()
+            ready = self._ready_serials()
+            restored = []
+            for serial in serials:
+                if serial not in ready:
+                    continue
+                try:
+                    if not device_is_proxy_off(self._proxy_value(serial)):
+                        continue
+                    self._enable(serial, port, address, self._reverse_active(serial, port))
+                    restored.append(serial)
+                except DeviceError as error:
+                    log.info("device restore skipped: %s", error.kind)
+            return restored
+
+    def _prepare(self):
+        settings = self.get_settings()
+        self.adb = self.finder(settings.adb_path)
+        return settings.proxy_port, "127.0.0.1:{0}".format(settings.proxy_port)
+
+    def _ready_serials(self):
+        _, text = self._adb(None, "devices")
+        return [name for name, state in parse_devices(text) if state == "device"]
+
     def _adb(self, serial, *args, check=True):
         command = [self.adb] + (["-s", serial] if serial else []) + list(args)
         code, text = self.runner(command)

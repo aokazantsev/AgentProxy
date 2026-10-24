@@ -59,7 +59,7 @@ namespace AgentProxy
         {
             if (IsProblem(state)) return ErrorColor;
             if (state == EngineState.Starting) return WarningColor;
-            if (state == EngineState.Stopped) return IdleColor;
+            if (state == EngineState.Stopped || state == EngineState.PausedForCharles) return IdleColor;
             return null;
         }
 

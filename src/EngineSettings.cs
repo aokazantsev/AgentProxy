@@ -18,6 +18,7 @@ namespace AgentProxy
         public int ProxyPort = DefaultProxyPort;
         public int ApiPort = DefaultApiPort;
         public bool VerifyUpstream = true;
+        public bool YieldToCharles;
         public bool Parsed;
         private Dictionary<string, object> raw = new Dictionary<string, object>();
 
@@ -49,6 +50,8 @@ namespace AgentProxy
             settings.ApiPort = Port(settings.raw, "api_port", DefaultApiPort);
             object verify;
             if (settings.raw.TryGetValue("verify_upstream", out verify) && verify is bool) settings.VerifyUpstream = (bool)verify;
+            object yieldToCharles;
+            if (settings.raw.TryGetValue("yield_to_charles", out yieldToCharles) && yieldToCharles is bool) settings.YieldToCharles = (bool)yieldToCharles;
             if (settings.ProxyPort == settings.ApiPort)
             {
                 settings.ProxyPort = DefaultProxyPort;
@@ -67,9 +70,10 @@ namespace AgentProxy
             return null;
         }
 
-        public bool NeedsWrite(int proxyPort, int apiPort, bool verifyUpstream)
+        public bool NeedsWrite(int proxyPort, int apiPort, bool verifyUpstream, bool yieldToCharles)
         {
-            return proxyPort != ProxyPort || apiPort != ApiPort || verifyUpstream != VerifyUpstream || !Parsed && File.Exists(FilePath);
+            return proxyPort != ProxyPort || apiPort != ApiPort || verifyUpstream != VerifyUpstream || yieldToCharles != YieldToCharles
+                || !Parsed && File.Exists(FilePath);
         }
 
         public string ToJson()
@@ -78,6 +82,7 @@ namespace AgentProxy
             values["proxy_port"] = ProxyPort;
             values["api_port"] = ApiPort;
             values["verify_upstream"] = VerifyUpstream;
+            values["yield_to_charles"] = YieldToCharles;
             return new JavaScriptSerializer().Serialize(values);
         }
 

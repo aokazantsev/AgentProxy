@@ -14,6 +14,7 @@ namespace AgentProxy
         private const int HealthIntervalMs = 5000;
         private const int StopWaitMs = 6000;
         private const int StderrTailChars = 4000;
+        private const string PausedForCharles = "charles";
         private static readonly TimeSpan WarmUp = TimeSpan.FromSeconds(30);
 
         private readonly string installDirectory;
@@ -218,7 +219,8 @@ namespace AgentProxy
             LastStatus = status;
             if (status != null) toolCalls.Apply(status.ToolCalls);
             bool warmingUp = DateTime.UtcNow - startedAt < WarmUp;
-            if (status != null && status.ProxyRunning) SetState(EngineState.Running, null);
+            if (status != null && status.Paused == PausedForCharles) SetState(EngineState.PausedForCharles, null);
+            else if (status != null && status.ProxyRunning) SetState(EngineState.Running, null);
             else if (warmingUp) SetState(EngineState.Starting, null);
             else if (status == null) SetState(EngineState.NotResponding, "API не отвечает на порту " + Settings.ApiPort);
             else SetState(EngineState.ProxyNotListening, "прокси не слушает порт " + Settings.ProxyPort);
