@@ -6,8 +6,10 @@ import mimetypes
 import time
 
 from .bodies import CHARSET, SLOW_CHARSETS, TEXT_CHARSETS
+from .eventrules import INCOMING, OUTGOING, EventChanger, EventStreams, SseEditor
 from .guard import OWN_PORT_MARK
-from .rules import (APPLIED_MARK, MAX_DELAY_MS, MAX_FILE_BYTES, NO_REQUEST_STREAM_MARK,
+from .recorder import is_event_stream, is_websocket_handshake
+from .rules import (APPLIED_MARK, EVENTS_MARK, MAX_DELAY_MS, MAX_FILE_BYTES, NO_REQUEST_STREAM_MARK,
                     NO_RESPONSE_STREAM_MARK, PLAN_MARK, TERMINAL_ACTIONS, RuleError, changes_body, limits_speed)
 from .speed import SCOPE_CONNECTION, SCOPE_REQUEST, rule_limits
 from .streamhost import DEFAULT_HEADERS as DEFAULT_STREAM_HEADERS, LOOPBACK, STREAM_HEADER, StreamRefused
@@ -27,6 +29,11 @@ DELAY_MARK = "agentproxy_delay"
 ORIGIN_MARK = "agentproxy_stream_origin"
 SPEED_MARK = "agentproxy_speed"
 NO_LINK = "speed limit not applied: the client connection is not TCP"
+NO_CLOSE_LINK = "the stream was not closed: the client connection is not TCP"
+CLOSE_FALLBACK_SECONDS = 1.0
+COMPRESSED_STREAM = ("events not changed: the stream is compressed ({0}); add a rewrite rule with request_headers "
+                     "Accept-Encoding: identity for this stream, earlier in the list")
+SERVED_STREAM = "events not changed: the stream comes from an sse rule, send_event writes it"
 HTTP1 = b"http/1.1"
 HTTP2 = b"h2"
 BUFFERING_ACTIONS = ("respond", "sse")
@@ -291,10 +298,11 @@ class BodyEditor:
 
 
 class Rewriter:
-    def __init__(self, rule_set, streams=None, speeds=None):
+    def __init__(self, rule_set, streams=None, speeds=None, events=None):
         self.rules = rule_set
         self.streams = streams
         self.speeds = speeds
+        self.events = events if events is not None else EventStreams()
         self.lazy_clients = set()
         self.http1_clients = set()
         self.edits = asyncio.Semaphore(PARALLEL_EDITS)
@@ -313,7 +321,7 @@ class Rewriter:
         client = data.context.client
         offers = tuple(client.alpn_offers or ())
         if (self.speeds is not None and client.sni and HTTP2 in offers and HTTP1 in offers
-                and self.rules.may_limit(client.sni)):
+                and self.rules.needs_http1(client.sni)):
             client.alpn_offers = tuple(offer for offer in offers if offer != HTTP2)
             self.http1_clients.add(client.id)
         if client.id not in self.lazy_clients:
@@ -471,8 +479,72 @@ class Rewriter:
 
     def error(self, flow):
         self._restore_request(flow)
+        self.events.release(flow.id)
         if self.streams is not None:
             self.streams.release(flow.id)
+
+    def _closer(self, flow):
+        def close(moment):
+            link = self.speeds.get(flow.client_conn.id) if self.speeds is not None else None
+            if link is None:
+                return NO_CLOSE_LINK
+            loop = asyncio.get_running_loop()
+            if moment == "after":
+                link.writer.close_after_write = True
+                loop.call_later(CLOSE_FALLBACK_SECONDS, link.writer.close)
+            else:
+                loop.call_soon(link.writer.close)
+            return None
+        return close
+
+    def _start_events(self, flow):
+        if flow.metadata.get(OWN_PORT_MARK) or flow.metadata.get(EVENTS_MARK):
+            return None
+        request = flow.request
+        rules = self.rules.plan_events(request.pretty_host, request.path, request.method, request.pretty_url)
+        if not rules:
+            return None
+        changer = EventChanger(flow, rules, self._closer(flow), whole_connection=request.is_http2)
+        plan = flow.metadata.get(PLAN_MARK)
+        if plan and plan[-1]["action"] == "sse":
+            changer.give_up(SERVED_STREAM)
+            return None
+        flow.metadata[EVENTS_MARK] = changer
+        self.events.add(flow.id, changer)
+        return changer
+
+    def _edit_event_stream(self, flow):
+        response = flow.response
+        if flow.metadata.get(NO_RESPONSE_STREAM_MARK) or not is_event_stream(flow.request, response):
+            return
+        changer = self._start_events(flow)
+        if changer is None:
+            return
+        encoding = response.headers.get("content-encoding", "").strip().lower()
+        if encoding and encoding != "identity":
+            changer.give_up(COMPRESSED_STREAM.format(encoding))
+            return
+        response.stream = SseEditor(changer)
+
+    def websocket_message(self, flow):
+        changer = flow.metadata.get(EVENTS_MARK)
+        if changer is None or not flow.websocket.messages:
+            return
+        message = flow.websocket.messages[-1]
+        if message.injected:
+            return
+        if changer.closed:
+            message.drop()
+            return
+        text, deliver = changer.handle(OUTGOING if message.from_client else INCOMING,
+                                       message.text if message.is_text else None)
+        if not deliver:
+            message.drop()
+        elif message.is_text and text != message.text:
+            message.text = text
+
+    def websocket_end(self, flow):
+        self.events.release(flow.id)
 
     async def _respond(self, flow, rule):
         from mitmproxy import http
@@ -532,6 +604,10 @@ class Rewriter:
 
     def responseheaders(self, flow):
         self._restore_request(flow)
+        self._rewrite_response(flow)
+        self._edit_event_stream(flow)
+
+    def _rewrite_response(self, flow):
         plan = flow.metadata.get(PLAN_MARK)
         if not plan:
             return
@@ -576,7 +652,7 @@ class Rewriter:
             return
         if event_stream or "text/event-stream" in response.headers.get("content-type", "").lower():
             for rule in body_rules:
-                _entry(flow, rule)["skipped"] = "body not changed: event stream"
+                _entry(flow, rule)["skipped"] = "body not changed: event stream; events of a stream change under action events"
             return
         self._start_editing(flow, body_rules)
 
@@ -599,6 +675,11 @@ class Rewriter:
 
     async def response(self, flow):
         response = flow.response
+        if is_websocket_handshake(flow):
+            self._start_events(flow)
+            return
+        if isinstance(response.stream, SseEditor):
+            self.events.release(flow.id)
         if isinstance(response.stream, BodyDiscarder):
             response.raw_content = b""
             return

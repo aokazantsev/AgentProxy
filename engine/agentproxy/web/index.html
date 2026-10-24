@@ -318,6 +318,8 @@ function rulesText(rules) {
   return (rules || []).map((rule) => rule.id + " " + rule.action + (rule.name ? " — " + rule.name : "") +
     (rule.error ? ", ошибка: " + rule.error : "") + (rule.skipped ? ", " + rule.skipped : "") +
     (rule.replaced !== undefined ? ", замен: " + rule.replaced : "") +
+    (rule.changed !== undefined ? ", изменено событий: " + rule.changed : "") +
+    (rule.closed ? ", поток оборван: " + rule.closed : "") +
     (rule.limited ? ", скорость ограничена: " + (rule.limited === "request" ? "запрос" : "соединение целиком") : "") +
     (rule.not_found ? ", не найдено: " + rule.not_found.join(" | ") : "")).join("\n");
 }

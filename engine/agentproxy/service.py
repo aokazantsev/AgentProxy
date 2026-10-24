@@ -163,13 +163,15 @@ PREVIEW_CHARS = 300
 RULE_PROPERTIES = {
     "name": {"type": "string", "description": "Short human note, e.g. 'empty product list'"},
     "enabled": {"type": "boolean", "description": "Default true"},
-    "action": {"type": "string", "enum": ["respond", "rewrite", "drop", "delay", "sse"],
+    "action": {"type": "string", "enum": ["respond", "rewrite", "drop", "delay", "sse", "events"],
                "description": "respond: answer from the proxy, the server is not contacted (map local, error "
                               "response); rewrite: change request headers on the way out and the response on "
                               "the way back, the request body stays; drop: abort the request without an answer "
                               "(HTTP/2: stream reset); delay: only slow down (delay_ms, download_kbps, upload_kbps); sse: the proxy itself serves an "
                               "open Server-Sent Events stream, the server is not contacted, and send_event writes "
-                              "events into it. For an unreachable HTTPS host "
+                              "events into it; events: change the events of SSE and WebSocket streams the app opens "
+                              "with a real server from now on (replace, event_data, close), the conditions pick the "
+                              "stream when it opens. For an unreachable HTTPS host "
                               "respond, drop and sse need a host condition, url_regex alone is not enough: without host "
                               "the proxy connects to the server first and the request ends with CONNECT failed"},
     "host": {"type": "string", "description": "Condition: substring of the host, case-insensitive (as in list_flows)"},
@@ -213,7 +215,8 @@ RULE_PROPERTIES = {
                                                "clients retry dropped requests (OkHttp: 1 to 3 requests per action "
                                                "under drop) and 408, and 503 with Retry-After: 0, so use respond with status 500/503 "
                                                "without Retry-After for exact "
-                                               "counts"},
+                                               "counts. events: counts streams, so close with times=1 breaks one "
+                                               "stream and lets the reconnect through"},
     "status": {"type": "integer", "description": "200..599. respond: status code, default 200; rewrite: replace the "
                                                 "server's status code"},
     "headers": dict(FIXED_HEADERS_SCHEMA, description="respond, sse: response headers"),
@@ -234,7 +237,20 @@ RULE_PROPERTIES = {
     "response_headers": dict(HEADERS_SCHEMA, description="rewrite: set response headers, null removes one"),
     "response_body": {"type": "string", "description": "rewrite: replace the whole response body (the request "
                                                       "still reaches the server)"},
-    "replace": {"type": "array", "description": "rewrite: text replacements in the response body, in order. The "
+    "event_contains": {"type": "string", "description": "events: change only events whose data contains this text, "
+                                                       "case-sensitive (as list_events shows the data, before this "
+                                                       "rule's changes)"},
+    "direction": {"type": "string", "enum": ["incoming", "outgoing"],
+                  "description": "events: incoming (default): from the server to the app; outgoing: from the app "
+                                 "to the server, WebSocket only"},
+    "event_data": {"type": "string", "description": "events: new data of every matching event, whole; in SSE a line "
+                                                   "break makes several data lines, the event: and id: fields stay"},
+    "close": {"type": "string", "enum": ["before", "after"],
+              "description": "events: close the app's connection at the first matching event: before (the event is "
+                             "not delivered) or after it; the app sees a broken connection. Further events are not "
+                             "delivered"},
+    "replace": {"type": "array", "description": "rewrite: text replacements in the response body, in order; events: "
+                                                "in the data of every matching event. The "
                                                 "body is searched as it came from the server; get_flow re-indents "
                                                 "JSON and rewrites \\uXXXX, \\/ and numbers (100.00 -> 100.0), so "
                                                 "take fragments from get_flow with raw=true of a flow no rule changed "
@@ -301,6 +317,7 @@ class ProxyService:
         self.injector = None
         self.streams = None
         self.speeds = None
+        self.events = None
         self.tool_calls = {}
         self.device = DeviceControl(lambda: self.settings, lambda: self.proxy_running)
 
@@ -412,13 +429,18 @@ class ProxyService:
     def history_matches(self, rule):
         flow_filter = FlowFilter(host=rule.get("host"), path=rule.get("path"), method=rule.get("method"))
         summaries = self.store.query(flow_filter, min(self.settings.max_flows, HISTORY_SCAN_LIMIT))
+        streams_only = rule["action"] == "events"
         return sum(1 for summary in summaries if summary["method"] != "CONNECT"
+                   and (not streams_only or summary.get("kind", "http") != "http")
                    and matches(rule, summary["host"], summary["path"], summary["method"], summary["url"]))
 
     def _rule_answer(self, rule):
         answer = {"rule": _brief(rule), "history_matches": self.history_matches(rule), "counts": self.rules.counts()}
         hints = []
-        if not answer["history_matches"]:
+        if not answer["history_matches"] and rule["action"] == "events":
+            hints.append("no recorded sse or websocket stream matches this condition yet; check host and path with "
+                         "list_flows and kind sse or websocket")
+        elif not answer["history_matches"]:
             hints.append("no recorded request matches this condition yet; check host and path with list_flows "
                          "(CONNECT records do not count: rules apply to decrypted requests only)")
         earlier = self.rules.shadowed_by(rule["id"])
@@ -443,6 +465,13 @@ class ProxyService:
             if rule.get("body") and not rule["body"].endswith(("\n\n", "\r\n\r\n", "\r\r")):
                 hints.append("body does not end with an empty line: its last event reaches the app only after the "
                              "next event is sent")
+        if rule["action"] == "events" and rule["enabled"]:
+            hint = ("the rule changes streams the app opens from now on: a stream that is already open stays as it "
+                    "is, so make the app reconnect")
+            if "close" in rule and "times" not in rule:
+                hint += ("; without times every new stream is closed again and the app reconnects in a loop: "
+                         "times=1 breaks one stream")
+            hints.append(hint)
         if limits_speed(rule) and rule["enabled"]:
             if "host" in rule:
                 hints.append("connections the app opened before this rule stay HTTP/2 and are slowed as a whole: "
@@ -498,6 +527,8 @@ class ProxyService:
             self.streams.close_rules([rule_id])
         if self.speeds is not None:
             self.speeds.change_rule(rule_id, rule_limits(rule))
+        if self.events is not None:
+            self.events.change_rule(rule_id, rule)
         return self._rule_answer(rule)
 
     def delete_rule(self, arguments):
@@ -514,9 +545,11 @@ class ProxyService:
         log.info("rules deleted: %s", ", ".join(removed) if removed else "none")
         if self.streams is not None:
             self.streams.close_rules(removed)
-        if self.speeds is not None:
-            for removed_id in removed:
+        for removed_id in removed:
+            if self.speeds is not None:
                 self.speeds.change_rule(removed_id, None)
+            if self.events is not None:
+                self.events.change_rule(removed_id, None)
         return {"removed": removed, "counts": self.rules.counts()}
 
     def read_log(self, arguments):

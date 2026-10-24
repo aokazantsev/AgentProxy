@@ -13,7 +13,7 @@ from .streamtap import NO_BODY_STATUSES
 log = logging.getLogger("agentproxy.rules")
 
 FILE_NAME = "rules.json"
-ACTIONS = ("respond", "rewrite", "drop", "delay", "sse")
+ACTIONS = ("respond", "rewrite", "drop", "delay", "sse", "events")
 TERMINAL_ACTIONS = ("respond", "drop", "sse")
 MATCH_FIELDS = ("host", "path", "method", "url_regex")
 VIEW_FIELDS = ("id", "created", "hits", "remaining", "active", "last_applied", "last_error")
@@ -26,6 +26,7 @@ ACTION_FIELDS = {
     "drop": (),
     "delay": (),
     "sse": ("headers", "body"),
+    "events": ("event_contains", "direction", "replace", "event_data", "close"),
 }
 REWRITE_CHANGES = ACTION_FIELDS["rewrite"]
 BODY_CHANGES = ("response_body", "replace")
@@ -41,11 +42,16 @@ MANAGED_HEADERS = ("content-length", "transfer-encoding", "x-agentproxy-proxied"
 STREAM_FIXED_HEADERS = ("content-type", "content-encoding")
 HOP_BY_HOP_HEADERS = ("connection", "keep-alive", "proxy-connection", "upgrade", "te", "trailer")
 MAX_MATCHED_URL = 8192
+DIRECTIONS = ("incoming", "outgoing")
+CLOSE_MOMENTS = ("before", "after")
+EVENT_CHANGES = ("replace", "event_data", "close")
+REQUEST_ONLY_FIELDS = ("delay_ms",) + SPEED_FIELDS
 CONTROL_CHARACTERS = re.compile("[\x00-\x08\x0a-\x1f\x7f]")
 HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 TRUE_WORDS = ("true", "1", "yes")
 FALSE_WORDS = ("false", "0", "no")
 PLAN_MARK = "agentproxy_rule_plan"
+EVENTS_MARK = "agentproxy_event_rules"
 APPLIED_MARK = "agentproxy_rules"
 NO_REQUEST_STREAM_MARK = "agentproxy_no_request_stream"
 NO_RESPONSE_STREAM_MARK = "agentproxy_no_response_stream"
@@ -248,7 +254,34 @@ def normalize(raw, check_files=True):
         rule["replace"] = _replacements(values["replace"])
     if action == "rewrite" and not any(name in rule for name in REWRITE_CHANGES):
         raise RuleError("action rewrite needs at least one of {0}".format(", ".join(REWRITE_CHANGES)))
+    if action == "events":
+        _event_fields(rule, values)
     return rule
+
+
+def _event_fields(rule, values):
+    slowed = [name for name in REQUEST_ONLY_FIELDS if name in rule]
+    if slowed:
+        raise RuleError("{0} is not used with action events: it slows requests, not events; add a separate delay "
+                        "rule".format(", ".join(slowed)))
+    if "event_contains" in values:
+        rule["event_contains"] = _text("event_contains", values["event_contains"])
+    if "direction" in values:
+        if values["direction"] not in DIRECTIONS:
+            raise RuleError("direction must be one of {0}".format(", ".join(DIRECTIONS)))
+        rule["direction"] = values["direction"]
+    if "event_data" in values:
+        if not isinstance(values["event_data"], str) or len(values["event_data"]) > MAX_TEXT:
+            raise RuleError("event_data must be a string up to {0} characters".format(MAX_TEXT))
+        rule["event_data"] = _unicode("event_data", values["event_data"])
+    if "close" in values:
+        if values["close"] not in CLOSE_MOMENTS:
+            raise RuleError("close must be one of {0}".format(", ".join(CLOSE_MOMENTS)))
+        rule["close"] = values["close"]
+    if "event_data" in rule and "replace" in rule:
+        raise RuleError("use either event_data or replace, not both")
+    if not any(name in rule for name in EVENT_CHANGES):
+        raise RuleError("action events needs at least one of {0}".format(", ".join(EVENT_CHANGES)))
 
 
 def _answers_always(rule):
@@ -286,6 +319,10 @@ def matches(rule, host, path, method, url):
 
 def limits_speed(rule):
     return any(name in rule for name in SPEED_FIELDS)
+
+
+def closes_streams(rule):
+    return rule["action"] == "events" and "close" in rule
 
 
 def changes_body(rule):
@@ -580,7 +617,7 @@ class RuleSet:
         now = time.time()
         with self._lock:
             for rule in self._rules:
-                if not rule["enabled"] or not matches(rule, host, path, method, url):
+                if rule["action"] == "events" or not rule["enabled"] or not matches(rule, host, path, method, url):
                     continue
                 state = self._state.setdefault(rule["id"], {"hits": 0})
                 if "times" in rule and state["hits"] >= rule["times"]:
@@ -590,6 +627,21 @@ class RuleSet:
                 chosen.append(copy.deepcopy(rule))
                 if rule["action"] in TERMINAL_ACTIONS:
                     break
+        return chosen
+
+    def plan_events(self, host, path, method, url):
+        chosen = []
+        now = time.time()
+        with self._lock:
+            for rule in self._rules:
+                if rule["action"] != "events" or not rule["enabled"] or not matches(rule, host, path, method, url):
+                    continue
+                state = self._state.setdefault(rule["id"], {"hits": 0})
+                if "times" in rule and state["hits"] >= rule["times"]:
+                    continue
+                state["hits"] += 1
+                state["last_applied"] = now
+                chosen.append(copy.deepcopy(rule))
         return chosen
 
     def may_answer(self, host):
@@ -604,11 +656,11 @@ class RuleSet:
                     return True
         return False
 
-    def may_limit(self, host):
+    def needs_http1(self, host):
         lowered = host.lower()
         with self._lock:
             for rule in self._rules:
-                if not rule["enabled"] or not limits_speed(rule) or "host" not in rule:
+                if not rule["enabled"] or not (limits_speed(rule) or closes_streams(rule)) or "host" not in rule:
                     continue
                 if "times" in rule and self._state.get(rule["id"], {}).get("hits", 0) >= rule["times"]:
                     continue

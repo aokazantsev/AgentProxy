@@ -42,18 +42,18 @@ def test_delay_action_needs_a_wait_or_a_limit():
     assert normalize({"action": "delay", "path": "/a", "download_kbps": 8})["action"] == "delay"
 
 
-def test_may_limit_needs_an_active_host_rule(rules):
+def test_needs_http1_requires_an_active_host_rule(rules):
     rules.add({"action": "delay", "path": "/img", "download_kbps": 100})
-    assert not rules.may_limit("cdn.example.com")
+    assert not rules.needs_http1("cdn.example.com")
     off = rules.add({"action": "delay", "host": "cdn.example.com", "download_kbps": 100, "enabled": False})
-    assert not rules.may_limit("cdn.example.com")
+    assert not rules.needs_http1("cdn.example.com")
     rules.delete(off["id"])
     rules.add({"action": "delay", "host": "CDN.example.com", "download_kbps": 100, "times": 1})
-    assert rules.may_limit("cdn.example.com.")
+    assert rules.needs_http1("cdn.example.com.")
     rules.plan("cdn.example.com", "/x", "GET", "https://cdn.example.com/x")
-    assert not rules.may_limit("cdn.example.com")
+    assert not rules.needs_http1("cdn.example.com")
     rules.add({"action": "rewrite", "host": "api.example.com", "status": 201})
-    assert not rules.may_limit("api.example.com")
+    assert not rules.needs_http1("api.example.com")
 
 
 @pytest.fixture

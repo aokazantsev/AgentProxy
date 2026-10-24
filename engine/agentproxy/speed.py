@@ -112,6 +112,7 @@ class PacedWriter:
         self._on_progress = on_progress
         self.pace = None
         self.on_idle = None
+        self.close_after_write = False
         self._backlog = Backlog()
         self._ending = None
         self._pumping = False
@@ -126,6 +127,9 @@ class PacedWriter:
         return self._pumping
 
     def write(self, data):
+        if self.close_after_write:
+            self.close_after_write = False
+            asyncio.get_running_loop().call_soon(self.close)
         if not self._pumping and not _limited(self.pace):
             self._writer.write(data)
             return

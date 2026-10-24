@@ -3,7 +3,7 @@ import time
 import uuid
 
 from .guard import OWN_PORT_MARK
-from .rules import APPLIED_MARK, NO_REQUEST_STREAM_MARK, NO_RESPONSE_STREAM_MARK
+from .rules import APPLIED_MARK, EVENTS_MARK, NO_REQUEST_STREAM_MARK, NO_RESPONSE_STREAM_MARK
 from .sse import MAX_EVENT_BYTES, SseTap
 from .store import ENGINE_STOPPED, FlowRecord
 from .streamtap import NO_BODY_STATUSES, StreamTap, should_stream, should_stream_request
@@ -189,6 +189,13 @@ class Recorder:
             self._add_event(live, OUTGOING if message.from_client else INCOMING,
                             "text" if message.is_text else "binary", message.content, note=", ".join(notes) or None,
                             timestamp=message.timestamp)
+        self._add_rule_notes(live, flow)
+
+    def _add_rule_notes(self, live, flow):
+        changer = flow.metadata.get(EVENTS_MARK)
+        if changer is not None:
+            for note in changer.take_notes():
+                self._add_event(live, INCOMING, "note", b"", note=note)
 
     def websocket_end(self, flow):
         live = self.streams.get(flow.id)
@@ -234,11 +241,21 @@ class Recorder:
         live = self._open_stream(flow, "sse")
         if live is None:
             return False
+        editor = flow.response.stream if callable(flow.response.stream) else None
         live.tap = SseTap(flow.response.headers.get("content-encoding"),
                           lambda event: self._sse_event(live, event),
                           lambda reason: self._add_event(live, INCOMING, "note", b"", note=reason))
-        flow.response.stream = live.tap
+        flow.response.stream = live.tap if editor is None else self._after_editor(flow, live, editor)
         return True
+
+    def _after_editor(self, flow, live, editor):
+        def stream(chunk):
+            data = editor(chunk)
+            if data:
+                live.tap(data)
+            self._add_rule_notes(live, flow)
+            return data
+        return stream
 
     def _open_stream(self, flow, kind):
         if flow.metadata.get(OWN_PORT_MARK):

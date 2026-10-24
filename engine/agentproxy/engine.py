@@ -19,6 +19,7 @@ from .charles import PAUSED_FOR, CharlesYield, charles_running
 from .claude import integration
 from .flowlog import FlowLog
 from .guard import OwnPortsGuard
+from .eventrules import EventStreams
 from .injector import StreamLookup, WebSocketInjector
 from .monitorpins import MonitorPins
 from .recorder import Recorder
@@ -142,12 +143,14 @@ async def serve(current, data_dir, parent_pid):
     await streams.start()
     speeds = SpeedLimits()
     install_speed_limits(speeds)
-    master.addons.add(Rewriter(rules, streams, speeds))
+    events = EventStreams()
+    master.addons.add(Rewriter(rules, streams, speeds, events))
     recorder = Recorder(store, current.max_body_bytes, FlowLog())
     master.addons.add(recorder)
     service.injector = WebSocketInjector(master, recorder)
     service.streams = StreamLookup(streams, recorder)
     service.speeds = speeds
+    service.events = events
     loop = asyncio.get_running_loop()
 
     def shutdown():

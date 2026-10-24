@@ -98,6 +98,8 @@ def describe_rule(rule):
     for name in ("download_kbps", "upload_kbps"):
         if name in rule:
             parts.append("{0} {1}".format(name, rule[name]))
+    if "close" in rule:
+        parts.append("close " + rule["close"])
     if not rule.get("enabled", True):
         parts.append("disabled")
     return ", ".join(parts)

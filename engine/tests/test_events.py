@@ -477,7 +477,7 @@ def test_rate_limit_resets_every_second_and_counts_what_it_skipped(store, monkey
     monkeypatch.setattr(recorder_module, "MAX_EVENTS_PER_SECOND", 3)
     seq = stream(store, 1, "websocket")
     live = recorder_module.LiveStream(seq)
-    flow = SimpleNamespace(id="ws-1", websocket=SimpleNamespace(messages=[]))
+    flow = SimpleNamespace(id="ws-1", metadata={}, websocket=SimpleNamespace(messages=[]))
     recorder.streams[flow.id] = live
     for index in range(5):
         flow.websocket.messages.append(FakeMessage(str(index).encode()))
@@ -498,7 +498,7 @@ def test_websocket_message_is_cut_to_the_event_limit(store):
     from agentproxy.sse import MAX_EVENT_BYTES
     recorder = recorder_module.Recorder(store, 1024)
     seq = stream(store, 1, "websocket")
-    flow = SimpleNamespace(id="ws-2", websocket=SimpleNamespace(messages=[FakeMessage(b"m" * (MAX_EVENT_BYTES + 10))]))
+    flow = SimpleNamespace(id="ws-2", metadata={}, websocket=SimpleNamespace(messages=[FakeMessage(b"m" * (MAX_EVENT_BYTES + 10))]))
     recorder.streams[flow.id] = recorder_module.LiveStream(seq)
     recorder.websocket_message(flow)
     event = store.events(seq, EventFilter(), 1)[0]
@@ -577,7 +577,7 @@ def test_rate_limit_counts_bytes_too(store, monkeypatch):
     monkeypatch.setattr(recorder_module.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(recorder_module, "MAX_BYTES_PER_SECOND", 1000)
     seq = stream(store, 1, "websocket")
-    flow = SimpleNamespace(id="ws-3", websocket=SimpleNamespace(messages=[]))
+    flow = SimpleNamespace(id="ws-3", metadata={}, websocket=SimpleNamespace(messages=[]))
     recorder.streams[flow.id] = recorder_module.LiveStream(seq)
 
     def send(size):
@@ -604,7 +604,7 @@ def test_rate_limit_counts_only_the_recorded_part_of_large_messages(store, monke
     monkeypatch.setattr(recorder_module.time, "monotonic", lambda: 1000.0)
     monkeypatch.setattr(recorder_module, "MAX_BYTES_PER_SECOND", 2 * MAX_EVENT_BYTES)
     seq = stream(store, 1, "websocket")
-    flow = SimpleNamespace(id="ws-4", websocket=SimpleNamespace(messages=[]))
+    flow = SimpleNamespace(id="ws-4", metadata={}, websocket=SimpleNamespace(messages=[]))
     recorder.streams[flow.id] = recorder_module.LiveStream(seq)
     for _ in range(2):
         flow.websocket.messages.append(FakeMessage(b"m" * (MAX_EVENT_BYTES + 10)))
