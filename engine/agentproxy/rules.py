@@ -18,7 +18,8 @@ TERMINAL_ACTIONS = ("respond", "drop", "sse")
 MATCH_FIELDS = ("host", "path", "method", "url_regex")
 VIEW_FIELDS = ("id", "created", "hits", "remaining", "active", "last_applied", "last_error")
 HOST_WITH_PORT = re.compile(r"^(?:[^:\[\]]*|\[.*\]):\d+$")
-COMMON_FIELDS = ("name", "enabled", "action", "delay_ms", "times") + MATCH_FIELDS
+SPEED_FIELDS = ("download_kbps", "upload_kbps")
+COMMON_FIELDS = ("name", "enabled", "action", "delay_ms") + SPEED_FIELDS + ("times",) + MATCH_FIELDS
 ACTION_FIELDS = {
     "respond": ("status", "headers", "body", "body_file", "content_type"),
     "rewrite": ("status", "request_headers", "response_headers", "response_body", "replace"),
@@ -31,6 +32,7 @@ BODY_CHANGES = ("response_body", "replace")
 ALL_FIELDS = COMMON_FIELDS + tuple(sorted({name for names in ACTION_FIELDS.values() for name in names}))
 MAX_RULES = 200
 MAX_DELAY_MS = 300000
+MAX_KBPS = 1000000
 MAX_TIMES = 1000000
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_REPLACEMENTS = 100
@@ -202,8 +204,11 @@ def normalize(raw, check_files=True):
     rule["enabled"] = _flag("enabled", values.get("enabled", True))
     if "delay_ms" in values:
         rule["delay_ms"] = _number("delay_ms", values["delay_ms"], 0, MAX_DELAY_MS)
-    if action == "delay" and not rule.get("delay_ms"):
-        raise RuleError("action delay needs delay_ms > 0")
+    for name in SPEED_FIELDS:
+        if name in values:
+            rule[name] = _number(name, values[name], 1, MAX_KBPS)
+    if action == "delay" and not rule.get("delay_ms") and not limits_speed(rule):
+        raise RuleError("action delay needs delay_ms > 0, download_kbps or upload_kbps")
     if "times" in values:
         rule["times"] = _number("times", values["times"], 1, MAX_TIMES)
     if "status" in values:
@@ -277,6 +282,10 @@ def matches(rule, host, path, method, url):
     if "url_regex" in rule and not re.search(rule["url_regex"], url[:MAX_MATCHED_URL]):
         return False
     return True
+
+
+def limits_speed(rule):
+    return any(name in rule for name in SPEED_FIELDS)
 
 
 def changes_body(rule):
@@ -592,6 +601,18 @@ class RuleSet:
                 if "times" in rule and self._state.get(rule["id"], {}).get("hits", 0) >= rule["times"]:
                     continue
                 if "host" in rule and rule["host"].lower() in lowered:
+                    return True
+        return False
+
+    def may_limit(self, host):
+        lowered = host.lower()
+        with self._lock:
+            for rule in self._rules:
+                if not rule["enabled"] or not limits_speed(rule) or "host" not in rule:
+                    continue
+                if "times" in rule and self._state.get(rule["id"], {}).get("hits", 0) >= rule["times"]:
+                    continue
+                if rule["host"].lower() in lowered:
                     return True
         return False
 

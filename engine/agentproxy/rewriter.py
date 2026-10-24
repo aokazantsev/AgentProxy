@@ -8,7 +8,8 @@ import time
 from .bodies import CHARSET, SLOW_CHARSETS, TEXT_CHARSETS
 from .guard import OWN_PORT_MARK
 from .rules import (APPLIED_MARK, MAX_DELAY_MS, MAX_FILE_BYTES, NO_REQUEST_STREAM_MARK,
-                    NO_RESPONSE_STREAM_MARK, PLAN_MARK, TERMINAL_ACTIONS, RuleError, changes_body)
+                    NO_RESPONSE_STREAM_MARK, PLAN_MARK, TERMINAL_ACTIONS, RuleError, changes_body, limits_speed)
+from .speed import SCOPE_CONNECTION, SCOPE_REQUEST, rule_limits
 from .streamhost import DEFAULT_HEADERS as DEFAULT_STREAM_HEADERS, LOOPBACK, STREAM_HEADER, StreamRefused
 from .streamtap import IDENTITY_ENCODINGS, NO_BODY_STATUSES, decoded_pieces
 
@@ -24,6 +25,10 @@ PLAIN_TYPES = ("text/plain", "application/octet-stream")
 RESPOND_ERROR_MARK = "agentproxy_respond_error"
 DELAY_MARK = "agentproxy_delay"
 ORIGIN_MARK = "agentproxy_stream_origin"
+SPEED_MARK = "agentproxy_speed"
+NO_LINK = "speed limit not applied: the client connection is not TCP"
+HTTP1 = b"http/1.1"
+HTTP2 = b"h2"
 BUFFERING_ACTIONS = ("respond", "sse")
 MIME_TYPES = mimetypes.MimeTypes()
 ORDER_MARKED_CHARSETS = {"utf-16": (b"\xff\xfe", b"\xfe\xff"),
@@ -286,10 +291,12 @@ class BodyEditor:
 
 
 class Rewriter:
-    def __init__(self, rule_set, streams=None):
+    def __init__(self, rule_set, streams=None, speeds=None):
         self.rules = rule_set
         self.streams = streams
+        self.speeds = speeds
         self.lazy_clients = set()
+        self.http1_clients = set()
         self.edits = asyncio.Semaphore(PARALLEL_EDITS)
 
     def http_connect(self, flow):
@@ -303,13 +310,47 @@ class Rewriter:
             self.lazy_clients.add(flow.client_conn.id)
 
     def tls_clienthello(self, data):
-        if data.context.client.id not in self.lazy_clients:
+        client = data.context.client
+        offers = tuple(client.alpn_offers or ())
+        if (self.speeds is not None and client.sni and HTTP2 in offers and HTTP1 in offers
+                and self.rules.may_limit(client.sni)):
+            client.alpn_offers = tuple(offer for offer in offers if offer != HTTP2)
+            self.http1_clients.add(client.id)
+        if client.id not in self.lazy_clients:
             return
-        self.lazy_clients.discard(data.context.client.id)
+        self.lazy_clients.discard(client.id)
         data.establish_server_tls_first = False
+
+    def tls_start_client(self, tls_start):
+        client_id = tls_start.context.client.id
+        if client_id not in self.http1_clients:
+            return
+        self.http1_clients.discard(client_id)
+        settings = tls_start.ssl_conn.get_app_data() if tls_start.ssl_conn is not None else None
+        if isinstance(settings, dict):
+            settings["http2"] = False
 
     def client_disconnected(self, client):
         self.lazy_clients.discard(client.id)
+        self.http1_clients.discard(client.id)
+
+    def _limit_speed(self, flow, plan):
+        link = self.speeds.get(flow.client_conn.id) if self.speeds is not None else None
+        limited = [rule for rule in plan if limits_speed(rule)]
+        whole_connection = flow.request.is_http2
+        if not limited:
+            if link is not None and not whole_connection:
+                link.lift()
+            return
+        if link is None:
+            for rule in limited:
+                _entry(flow, rule)["skipped"] = NO_LINK
+            return
+        scope = SCOPE_CONNECTION if whole_connection else SCOPE_REQUEST
+        link.limit({rule["id"]: rule_limits(rule) for rule in limited}, scope)
+        flow.metadata[SPEED_MARK] = link
+        for rule in limited:
+            _entry(flow, rule)["limited"] = scope
 
     async def requestheaders(self, flow):
         if flow.metadata.get(OWN_PORT_MARK):
@@ -317,10 +358,12 @@ class Rewriter:
         request = flow.request
         plan = self.rules.plan(request.pretty_host, request.path, request.method, request.pretty_url)
         if not plan:
+            self._limit_speed(flow, plan)
             return
         flow.metadata[PLAN_MARK] = plan
         flow.metadata[APPLIED_MARK] = [dict({"id": rule["id"], "action": rule["action"]},
                                             **({"name": rule["name"]} if "name" in rule else {})) for rule in plan]
+        self._limit_speed(flow, plan)
         for rule in plan:
             if "request_headers" in rule:
                 _set_headers(request.headers, rule["request_headers"])
@@ -353,6 +396,9 @@ class Rewriter:
         flow.kill()
 
     async def request(self, flow):
+        link = flow.metadata.get(SPEED_MARK)
+        if link is not None:
+            link.lift_upload()
         plan = flow.metadata.get(PLAN_MARK)
         if not plan or flow.error is not None:
             return

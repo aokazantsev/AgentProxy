@@ -22,6 +22,7 @@ from .injector import StreamLookup, WebSocketInjector
 from .monitorpins import MonitorPins
 from .recorder import Recorder
 from .rewriter import Rewriter
+from .speed import SpeedLimits, install as install_speed_limits
 from .rules import MAX_FILE_BYTES, RuleSet
 from .service import ProxyService
 from .store import FlowStore
@@ -124,11 +125,14 @@ async def serve(current, data_dir, parent_pid):
     master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
     streams = StreamHost()
     await streams.start()
-    master.addons.add(Rewriter(rules, streams))
+    speeds = SpeedLimits()
+    install_speed_limits(speeds)
+    master.addons.add(Rewriter(rules, streams, speeds))
     recorder = Recorder(store, current.max_body_bytes, FlowLog())
     master.addons.add(recorder)
     service.injector = WebSocketInjector(master, recorder)
     service.streams = StreamLookup(streams, recorder)
+    service.speeds = speeds
     loop = asyncio.get_running_loop()
 
     def shutdown():

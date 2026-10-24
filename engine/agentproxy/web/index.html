@@ -317,6 +317,7 @@ function rulesText(rules) {
   return (rules || []).map((rule) => rule.id + " " + rule.action + (rule.name ? " — " + rule.name : "") +
     (rule.error ? ", ошибка: " + rule.error : "") + (rule.skipped ? ", " + rule.skipped : "") +
     (rule.replaced !== undefined ? ", замен: " + rule.replaced : "") +
+    (rule.limited ? ", скорость ограничена: " + (rule.limited === "request" ? "запрос" : "соединение целиком") : "") +
     (rule.not_found ? ", не найдено: " + rule.not_found.join(" | ") : "")).join("\n");
 }
 function headersText(headers) { return (headers || []).map((pair) => pair[0] + ": " + pair[1]).join("\n"); }

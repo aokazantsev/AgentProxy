@@ -8,10 +8,10 @@ from agentproxy.service import FLOW_KINDS, RULE_PROPERTIES, RULES_REFERENCE, TOO
 ENGINE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agentproxy")
 CLAUDE_DIR = os.path.join(ENGINE_DIR, "claude")
 SKILL_MAX_CHARS = 9500
-RULES_MAX_CHARS = 10000
+RULES_MAX_CHARS = 11000
 COPY_WINDOW_WORDS = 6
 ANSWER_FIELDS = {
-    "rewriter.py": ("skipped", "replaced", "not_found", "error"),
+    "rewriter.py": ("skipped", "replaced", "not_found", "error", "limited"),
     "service.py": ("history_matches", "hint", "counts", "events_before", "closed", "note"),
     "rules.py": ("problem",),
     "bodies.py": ("truncated",),

@@ -36,6 +36,8 @@ def _entry_text(entry):
         parts.append("replaced={0}".format(entry["replaced"]))
     if entry.get("not_found"):
         parts.append("not_found={0}".format(len(entry["not_found"])))
+    if entry.get("limited"):
+        parts.append("limited=" + entry["limited"])
     for name in ("error", "skipped"):
         if entry.get(name):
             parts.append("{0}={1}".format(name, clean(entry[name], REASON_CHARS)))
@@ -93,6 +95,9 @@ def describe_rule(rule):
         parts.append("host " + clean(rule["host"], HOST_CHARS))
     if "method" in rule:
         parts.append("method " + clean(rule["method"], 20))
+    for name in ("download_kbps", "upload_kbps"):
+        if name in rule:
+            parts.append("{0} {1}".format(name, rule[name]))
     if not rule.get("enabled", True):
         parts.append("disabled")
     return ", ".join(parts)

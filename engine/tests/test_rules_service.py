@@ -307,7 +307,7 @@ def test_scenario_with_times_before_the_mock_gets_no_hint(service):
 
 def test_delay_behind_a_mock_is_pointed_to_delay_ms(service):
     service.add_rule({"action": "respond", "path": "/pay", "body": "{}"})
-    assert "set delay_ms on r1" in service.add_rule({"action": "delay", "path": "/pay", "delay_ms": 10})["hint"]
+    assert "set delay_ms, download_kbps or upload_kbps on r1" in service.add_rule({"action": "delay", "path": "/pay", "delay_ms": 10})["hint"]
 
 
 @pytest.mark.parametrize("change", [{"action": "respond", "body": "{}", "status": None}, {"enabled": True}])
@@ -468,7 +468,7 @@ def test_copy_of_the_earlier_rule_is_told_to_finish_the_move(service):
 def test_shadowed_delay_is_told_to_move_its_delay_to_the_earlier_rule(service):
     service.add_rule({"action": "respond", "path": "/pay", "body": "{}"})
     delayed = service.add_rule({"action": "delay", "path": "/pay/now", "delay_ms": 3000})["hint"]
-    assert "for a slow answer set delay_ms on r1 instead" in delayed
+    assert "for a slow answer set delay_ms, download_kbps or upload_kbps on r1 instead" in delayed
     dropped = service.add_rule({"action": "drop", "path": "/pay/later"})["hint"]
     assert "rule r1 (respond) is earlier" in dropped and "delay_ms" not in dropped
 

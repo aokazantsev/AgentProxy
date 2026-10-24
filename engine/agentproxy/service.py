@@ -12,7 +12,8 @@ from .bodies import render
 from .device import DeviceControl, DeviceError
 from .flowlog import clean, describe_rule
 from .injector import InjectError
-from .rules import VIEW_FIELDS, RuleError, RuleNotFound, matches
+from .rules import VIEW_FIELDS, RuleError, RuleNotFound, limits_speed, matches
+from .speed import rule_limits
 from .store import EventFilter, FlowFilter
 from .streamhost import StreamRefused, build_frame
 
@@ -166,7 +167,7 @@ RULE_PROPERTIES = {
                "description": "respond: answer from the proxy, the server is not contacted (map local, error "
                               "response); rewrite: change request headers on the way out and the response on "
                               "the way back, the request body stays; drop: abort the request without an answer "
-                              "(HTTP/2: stream reset); delay: only wait delay_ms; sse: the proxy itself serves an "
+                              "(HTTP/2: stream reset); delay: only slow down (delay_ms, download_kbps, upload_kbps); sse: the proxy itself serves an "
                               "open Server-Sent Events stream, the server is not contacted, and send_event writes "
                               "events into it. For an unreachable HTTPS host "
                               "respond, drop and sse need a host condition, url_regex alone is not enough: without host "
@@ -184,6 +185,27 @@ RULE_PROPERTIES = {
                                                 "recorded with its body; the wait ends "
                                                 "when the client disconnects; delays of all matching rules add up, "
                                                 "total at most 300000"},
+    "download_kbps": {"type": "integer", "description": "Any action: limit the speed of the answer to the client, "
+                                                     "kilobits per second, 1..1000000 (e.g. 500 for a slow mobile "
+                                                     "network), to test progress and loaders; delay_ms adds the wait "
+                                                     "before the answer. The speed is shared by everything the rule "
+                                                     "slows at once, all requests and connections, like one slow "
+                                                     "network; a request under several matching rules goes at the "
+                                                     "slowest, and only that rule counts its bytes. A read "
+                                                     "timeout of the app fires only on a pause without bytes: over "
+                                                     "HTTPS data arrives in TLS records of 16 KB, each takes at least "
+                                                     "131 / download_kbps seconds, longer while the rule slows several "
+                                                     "transfers at once; over plain HTTP pauses stay short. Changing the speed applies at once, "
+                                                     "to answers already on the way too. The limit is "
+                                                     "exact on HTTP/1.1; for hosts in the host condition of such a "
+                                                     "rule the proxy offers new client connections HTTP/1.1 only. On "
+                                                     "HTTP/2 (no host condition, a connection opened before the rule, "
+                                                     "a client without HTTP/1.1) the whole connection is slowed until "
+                                                     "it closes or the rule is disabled or deleted; the flow's rules entry shows "
+                                                     "limited: request or connection"},
+    "upload_kbps": {"type": "integer", "description": "Any action: limit the speed at which the request body is "
+                                                   "read from the client, kilobits per second, 1..1000000, to test "
+                                                   "upload progress; scope as with download_kbps"},
     "times": {"type": "integer", "description": "Apply only to the first N matching requests; after that the rule "
                                                "stays but no longer matches. Rules are checked in order, so a respond "
                                                "rule with status 500 and times=2 followed by a mock gives two "
@@ -275,6 +297,7 @@ class ProxyService:
         self.proxy_running = False
         self.injector = None
         self.streams = None
+        self.speeds = None
         self.tool_calls = {}
         self.device = DeviceControl(lambda: self.settings, lambda: self.proxy_running)
 
@@ -403,7 +426,8 @@ class ProxyService:
                     "does not apply while {0} is enabled; to put {0} after this one, take it whole with list_rules "
                     "id={0}, add it as a new rule, then delete {0}".format(earlier["id"], earlier["action"]))
             if rule["action"] == "delay":
-                hint += "; for a slow answer set delay_ms on {0} instead".format(earlier["id"])
+                hint += "; for a slow answer set delay_ms, download_kbps or upload_kbps on {0} instead".format(
+                    earlier["id"])
             hints.append(hint)
         later = self.rules.shadowing(rule["id"])
         if later:
@@ -415,6 +439,13 @@ class ProxyService:
             if rule.get("body") and not rule["body"].endswith(("\n\n", "\r\n\r\n", "\r\r")):
                 hints.append("body does not end with an empty line: its last event reaches the app only after the "
                              "next event is sent")
+        if limits_speed(rule) and rule["enabled"]:
+            if "host" in rule:
+                hints.append("connections the app opened before this rule stay HTTP/2 and are slowed as a whole: "
+                             "restart the app for a limit on the matching requests only")
+            else:
+                hints.append("without a host condition HTTP/2 connections stay HTTP/2 and are slowed as a whole, "
+                             "all their requests: add host to slow only the matching requests")
         if rule.get("remaining") == 0 and rule["enabled"]:
             hints.append("the rule has used all its times; pass reset_hits=true to start it again")
         if hints:
@@ -461,6 +492,8 @@ class ProxyService:
                  describe_rule(rule))
         if self.streams is not None and (not rule["enabled"] or rule["action"] != "sse"):
             self.streams.close_rules([rule_id])
+        if self.speeds is not None:
+            self.speeds.change_rule(rule_id, rule_limits(rule))
         return self._rule_answer(rule)
 
     def delete_rule(self, arguments):
@@ -477,6 +510,9 @@ class ProxyService:
         log.info("rules deleted: %s", ", ".join(removed) if removed else "none")
         if self.streams is not None:
             self.streams.close_rules(removed)
+        if self.speeds is not None:
+            for removed_id in removed:
+                self.speeds.change_rule(removed_id, None)
         return {"removed": removed, "counts": self.rules.counts()}
 
     def read_log(self, arguments):
