@@ -88,6 +88,7 @@ namespace AgentProxy
 
         private void Check()
         {
+            bool downloading = false;
             try
             {
                 UpdateRelease release = UpdateChecker.FetchLatest();
@@ -99,10 +100,19 @@ namespace AgentProxy
                     return;
                 }
                 Report("Есть версия " + release.VersionText + ", скачиваю установщик (" + (release.Size / 1024 / 1024.0).ToString("0.0") + " МБ)…", null);
-                string path = UpdateChecker.Download(release);
+                downloading = true;
+                bool reused;
+                string path = UpdateChecker.Download(release, out reused);
                 downloadedRelease = release;
-                AppLog.Append("update downloaded: " + path + (release.Sha256 != null ? ", sha256 verified" : ", no sha256 in release"));
-                Usage.Hit("update.download");
+                if (reused)
+                {
+                    AppLog.Append("update already downloaded: " + path + ", sha256 verified");
+                }
+                else
+                {
+                    AppLog.Append("update downloaded: " + path + (release.Sha256 != null ? ", sha256 verified" : ", no sha256 in release"));
+                    Usage.Hit("update.download");
+                }
                 Report("Скачана версия " + release.VersionText
                     + (release.Sha256 != null ? ", контрольная сумма сверена с GitHub" : ", в релизе нет контрольной суммы — файл не сверен")
                     + ". «Установить сейчас» запустит установщик: он поставит её поверх текущей и запустит программу заново, "
@@ -110,8 +120,8 @@ namespace AgentProxy
             }
             catch (Exception error)
             {
-                AppLog.Append("update check failed: " + UpdateChecker.DescribeForLog(error));
-                Report("Не удалось проверить обновление: " + error.Message
+                AppLog.Append((downloading ? "update download failed: " : "update check failed: ") + UpdateChecker.DescribeForLog(error));
+                Report((downloading ? "Не удалось скачать обновление: " : "Не удалось проверить обновление: ") + error.Message
                     + Environment.NewLine + "Последняя версия всегда есть на " + AppIdentity.GitHubUrl + "/releases/latest", null);
             }
         }

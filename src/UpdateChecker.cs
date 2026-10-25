@@ -16,6 +16,7 @@ namespace AgentProxy
         private const int RequestTimeoutMs = 15 * 1000;
         private const int DownloadTimeoutMs = 120 * 1000;
         private const int BufferSize = 81920;
+        private static readonly object DownloadLock = new object();
         private static readonly Guid DownloadsFolderId = new Guid("374DE290-123F-4565-9164-39C4925E467B");
 
         public static Version CurrentVersion
@@ -87,22 +88,44 @@ namespace AgentProxy
             return Path.Combine(Path.Combine(downloadsDirectory, AppIdentity.Name + "-" + versionText), AppIdentity.Name + "Setup.exe");
         }
 
-        public static string Download(UpdateRelease release)
+        public static string Download(UpdateRelease release, out bool reused)
         {
             string target = InstallerPath(DownloadsDirectory(), release.VersionText);
-            Directory.CreateDirectory(Path.GetDirectoryName(target));
-            string partial = target + ".part";
-            HttpWebRequest request = CreateRequest(release.DownloadUrl, DownloadTimeoutMs);
-            using (var response = (HttpWebResponse)request.GetResponse())
-            using (Stream source = response.GetResponseStream())
-            using (var output = new FileStream(partial, FileMode.Create, FileAccess.Write))
+            lock (DownloadLock)
             {
-                source.CopyTo(output, BufferSize);
+                reused = IsVerifiedCopy(target, release);
+                if (reused) return target;
+                Directory.CreateDirectory(Path.GetDirectoryName(target));
+                string partial = target + ".part";
+                HttpWebRequest request = CreateRequest(release.DownloadUrl, DownloadTimeoutMs);
+                using (var response = (HttpWebResponse)request.GetResponse())
+                using (Stream source = response.GetResponseStream())
+                using (var output = new FileStream(partial, FileMode.Create, FileAccess.Write))
+                {
+                    source.CopyTo(output, BufferSize);
+                }
+                Verify(partial, release);
+                if (File.Exists(target)) File.Delete(target);
+                File.Move(partial, target);
+                return target;
             }
-            Verify(partial, release);
-            if (File.Exists(target)) File.Delete(target);
-            File.Move(partial, target);
-            return target;
+        }
+
+        private static bool IsVerifiedCopy(string path, UpdateRelease release)
+        {
+            if (release.Sha256 == null || !File.Exists(path)) return false;
+            try
+            {
+                return Sha256Of(path) == release.Sha256;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
         }
 
         private static HttpWebRequest CreateRequest(string url, int timeoutMs)

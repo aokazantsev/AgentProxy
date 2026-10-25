@@ -189,6 +189,7 @@ namespace AgentProxy
         {
             if (RunningApp.IsUninstalling())
             {
+                SetupLog.Append("install refused: uninstall is running");
                 MessageBox.Show(this, "Сейчас идёт удаление " + AppIdentity.Name + ". Заверши его — ответь в окне удаления и дождись сообщения о результате, — затем нажми «Установить» ещё раз.",
                     Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
@@ -196,6 +197,7 @@ namespace AgentProxy
             string problem = InstallTarget.Validate(folderBox.Text);
             if (problem != null)
             {
+                SetupLog.Append("install refused: folder " + folderBox.Text + ": " + problem);
                 MessageBox.Show(this, problem, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -258,12 +260,15 @@ namespace AgentProxy
         private void Finish(Installation installation, Exception failure)
         {
             installing = false;
+            foreach (string note in installation.Notes) SetupLog.Append("note: " + note);
             if (failure != null)
             {
                 SetupLog.Append("failed: " + failure);
-                status.Text = "Ошибка: " + failure.Message;
+                string error = failure.Message;
+                if (installation.LeftProgramStopped) error += Environment.NewLine + Environment.NewLine + "Если " + AppIdentity.Name + " был запущен, установщик его закрыл и не запустил снова: исправь причину и повтори установку.";
+                status.Text = "Ошибка: " + error;
                 SetEditable(true);
-                MessageBox.Show(this, failure.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(this, error, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
             string message = AppIdentity.Name + " установлен и запущен — значок в трее.";

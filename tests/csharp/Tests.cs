@@ -85,6 +85,10 @@ namespace AgentProxy.Tests
                 Run("settings written only when changed or broken", SettingsNeedsWrite);
                 Run("broken settings kept aside on save", SettingsBrokenKeptOnSave);
                 Run("silent setup usage statistics option", SilentUsageStatistics);
+                Run("setup log header once per run", SetupLogHeaderOncePerRun);
+                Run("setup log keeps previous runs", SetupLogKeepsPreviousRuns);
+                Run("setup log moves a large journal aside", SetupLogMovesLargeJournal);
+                Run("downloaded copy reused only with matching sha256", DownloadedCopyReuse);
                 Console.WriteLine(passed + " passed, " + failed + " failed");
                 return failed == 0 ? 0 : 1;
             }
@@ -110,6 +114,8 @@ namespace AgentProxy.Tests
             Redirect(typeof(CrashReportConsent), "FilePath", "crash-reports-consent.txt");
             Redirect(typeof(EngineLogTail), "FilePath", "engine.log");
             Redirect(typeof(EngineRuntimeInfo), "FilePath", "engine-runtime.json");
+            Redirect(typeof(SetupLog), "FilePath", "setup.log");
+            Redirect(typeof(SetupLog), "PreviousFilePath", "setup.old.log");
         }
 
         private static void Redirect(Type type, string field, string name)
@@ -1053,6 +1059,90 @@ namespace AgentProxy.Tests
             Throws<ArgumentException>(() => SilentSetup.Parse(new[] { "/silent", "/fast" }, Options(), "C:\\T", true), "unknown flag");
             Throws<ArgumentException>(() => SilentSetup.Parse(new[] { "/option:nope=1" }, Options(), "C:\\T", true), "unknown option");
             Throws<ArgumentException>(() => SilentSetup.Parse(new[] { "/option:claude=yes" }, Options(), "C:\\T", true), "bad value");
+        }
+
+        private static void ResetSetupLog()
+        {
+            SetStaticField(typeof(SetupLog), "started", false);
+            foreach (string path in new[] { SetupLog.FilePath, SetupLog.PreviousFilePath })
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+
+        private static string[] SetupLogLines()
+        {
+            return File.ReadAllLines(SetupLog.FilePath);
+        }
+
+        private static void SetupLogHeaderOncePerRun()
+        {
+            ResetSetupLog();
+            SetupLog.Append("first");
+            SetupLog.Start();
+            SetupLog.Append("second");
+            string[] lines = SetupLogLines();
+            Equal(3, lines.Length, "lines: " + string.Join("|", lines));
+            True(lines[0].Contains("  === " + AppIdentity.Name + " " + AppIdentity.Version + ", "), "header goes first even before Start: " + lines[0]);
+            True(lines[1].EndsWith("  first") && lines[2].EndsWith("  second"), "lines after the header: " + string.Join("|", lines));
+        }
+
+        private static void SetupLogKeepsPreviousRuns()
+        {
+            ResetSetupLog();
+            SetupLog.Start();
+            SetupLog.Append("first run");
+            SetStaticField(typeof(SetupLog), "started", false);
+            SetupLog.Start();
+            SetupLog.Append("second run");
+            string[] lines = SetupLogLines();
+            Equal(4, lines.Length, "lines: " + string.Join("|", lines));
+            True(lines[1].EndsWith("  first run"), "previous run kept");
+            True(lines[2].Contains("  === "), "second run starts with its header");
+            True(!File.Exists(SetupLog.PreviousFilePath), "small journal not moved");
+        }
+
+        private static void SetupLogMovesLargeJournal()
+        {
+            ResetSetupLog();
+            File.WriteAllText(SetupLog.PreviousFilePath, "older");
+            string large = new string('x', 512 * 1024 + 1);
+            File.WriteAllText(SetupLog.FilePath, large);
+            SetupLog.Start();
+            Equal((long)large.Length, new FileInfo(SetupLog.PreviousFilePath).Length, "large journal moved over the older copy");
+            Equal(1, SetupLogLines().Length, "new journal starts with the header");
+            ResetSetupLog();
+            File.WriteAllText(SetupLog.FilePath, new string('x', 512 * 1024));
+            SetupLog.Start();
+            True(!File.Exists(SetupLog.PreviousFilePath), "journal of exactly 512 KB stays");
+        }
+
+        private static bool IsVerifiedCopy(string path, string sha256)
+        {
+            return (bool)CallStatic(typeof(UpdateChecker), "IsVerifiedCopy", path, new UpdateRelease("0.2", "u", 3, sha256));
+        }
+
+        private static void DownloadedCopyReuse()
+        {
+            string path = SandboxFile("AgentProxySetup.exe");
+            const string abcHash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+            File.WriteAllText(path, "abc");
+            try
+            {
+                Equal(true, IsVerifiedCopy(path, abcHash), "same sha256 is reused");
+                Equal(false, IsVerifiedCopy(path, new string('0', 64)), "other sha256 is downloaded again");
+                Equal(false, IsVerifiedCopy(path, null), "release without sha256 is downloaded again");
+                using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    Equal(false, IsVerifiedCopy(path, abcHash), "locked file is downloaded again");
+                }
+                File.Delete(path);
+                Equal(false, IsVerifiedCopy(path, abcHash), "no file");
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
         }
 
         private static string SandboxFile(string name)

@@ -131,6 +131,7 @@ namespace AgentProxy
             }
             catch (Exception error)
             {
+                foreach (string note in installation.Notes) SetupLog.Append("note: " + note);
                 SetupLog.Append("silent install failed: " + error);
                 if (HasFlag(args, NotifyFlag)) ReportFailure(request.TargetDirectory, error);
                 return ExitFailed;

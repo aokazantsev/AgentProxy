@@ -7,25 +7,64 @@ namespace AgentProxy
 {
     internal static class SetupLog
     {
+        private const long MaxBytes = 512 * 1024;
+
+        private static bool started;
+
         public static readonly string FilePath = Path.Combine(Path.GetTempPath(), AppIdentity.Name + "-setup.log");
+        public static readonly string PreviousFilePath = Path.Combine(Path.GetTempPath(), AppIdentity.Name + "-setup.old.log");
 
         public static void Start()
         {
-            Write("=== " + AppIdentity.Name + " " + AppIdentity.Version + ", " + Environment.UserName + ", elevated=" + IsElevated(), false);
+            if (started) return;
+            started = true;
+            if (IsTooLarge()) MoveToPrevious();
+            Write("=== " + AppIdentity.Name + " " + AppIdentity.Version + ", " + Environment.UserName + ", elevated=" + IsElevated());
         }
 
         public static void Append(string line)
         {
-            Write(line, true);
+            Start();
+            Write(line);
         }
 
-        private static void Write(string line, bool append)
+        private static bool IsTooLarge()
         {
             try
             {
-                string text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + line + Environment.NewLine;
-                if (append) File.AppendAllText(FilePath, text, new UTF8Encoding(false));
-                else File.WriteAllText(FilePath, text, new UTF8Encoding(false));
+                var file = new FileInfo(FilePath);
+                return file.Exists && file.Length > MaxBytes;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        private static void MoveToPrevious()
+        {
+            try
+            {
+                File.Delete(PreviousFilePath);
+                File.Move(FilePath, PreviousFilePath);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        private static void Write(string line)
+        {
+            try
+            {
+                File.AppendAllText(FilePath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + line + Environment.NewLine, new UTF8Encoding(false));
             }
             catch (IOException)
             {

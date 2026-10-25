@@ -9,6 +9,7 @@ namespace AgentProxy
         private readonly InstallRequest request;
         private readonly Action<int, string> report;
         private readonly List<string> notes = new List<string>();
+        private bool programStopped;
 
         public Installation(InstallRequest request, Action<int, string> report)
         {
@@ -21,6 +22,11 @@ namespace AgentProxy
             get { return notes; }
         }
 
+        public bool LeftProgramStopped
+        {
+            get { return programStopped; }
+        }
+
         public void Run()
         {
             string target = request.TargetDirectory;
@@ -31,6 +37,7 @@ namespace AgentProxy
             if (RunningApp.IsUninstalling()) throw new InvalidOperationException("Сейчас идёт удаление " + AppIdentity.Name + ". Дождись его окончания и повтори установку.");
             report(0, "Останавливаю запущенный " + AppIdentity.Name + "…");
             if (!RunningApp.Stop()) throw new InvalidOperationException(AppIdentity.Name + " не закрывается. Закрой его в трее и повтори установку; если он запущен у другого пользователя Windows — закрой его там.");
+            programStopped = true;
 
             SetupProfile.BeforeExtract(request, report, notes);
             report(10, "Распаковка файлов…");
@@ -48,6 +55,7 @@ namespace AgentProxy
 
             report(97, "Запуск…");
             SetupProfile.Launch(executable);
+            programStopped = false;
             SetupLog.Append("launched " + executable);
             report(100, "Готово.");
         }
