@@ -70,7 +70,7 @@ namespace AgentProxy
             if (release.Size > 0 && new FileInfo(path).Length != release.Size) problem = "файл скачался не полностью";
             else if (release.Sha256 != null && Sha256Of(path) != release.Sha256) problem = "контрольная сумма скачанного файла не совпала с опубликованной на GitHub";
             if (problem == null) return;
-            File.Delete(path);
+            DeleteQuietly(path);
             throw new IOException(problem);
         }
 
@@ -97,17 +97,39 @@ namespace AgentProxy
                 if (reused) return target;
                 Directory.CreateDirectory(Path.GetDirectoryName(target));
                 string partial = target + ".part";
-                HttpWebRequest request = CreateRequest(release.DownloadUrl, DownloadTimeoutMs);
-                using (var response = (HttpWebResponse)request.GetResponse())
-                using (Stream source = response.GetResponseStream())
-                using (var output = new FileStream(partial, FileMode.Create, FileAccess.Write))
+                try
                 {
-                    source.CopyTo(output, BufferSize);
+                    HttpWebRequest request = CreateRequest(release.DownloadUrl, DownloadTimeoutMs);
+                    using (var response = (HttpWebResponse)request.GetResponse())
+                    using (Stream source = response.GetResponseStream())
+                    using (var output = new FileStream(partial, FileMode.Create, FileAccess.Write))
+                    {
+                        source.CopyTo(output, BufferSize);
+                    }
+                    Verify(partial, release);
+                    if (File.Exists(target)) File.Delete(target);
+                    File.Move(partial, target);
                 }
-                Verify(partial, release);
-                if (File.Exists(target)) File.Delete(target);
-                File.Move(partial, target);
+                catch
+                {
+                    DeleteQuietly(partial);
+                    throw;
+                }
                 return target;
+            }
+        }
+
+        private static void DeleteQuietly(string path)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
             }
         }
 

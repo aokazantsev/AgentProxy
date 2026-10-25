@@ -17,7 +17,7 @@ namespace AgentProxy
             {
                 if (!isFirstInstance)
                 {
-                    SetupLog.Append("another setup is already running");
+                    SetupLog.AppendWithoutHeader("another " + AppIdentity.Name + " " + AppIdentity.Version + " setup is already running, this one exits");
                     if (!silent) MessageBox.Show("Установка " + AppIdentity.Name + " уже идёт.", AppIdentity.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return SilentSetup.ExitFailed;
                 }

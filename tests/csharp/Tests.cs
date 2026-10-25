@@ -88,7 +88,11 @@ namespace AgentProxy.Tests
                 Run("setup log header once per run", SetupLogHeaderOncePerRun);
                 Run("setup log keeps previous runs", SetupLogKeepsPreviousRuns);
                 Run("setup log moves a large journal aside", SetupLogMovesLargeJournal);
+                Run("setup log line of a second setup has no header", SetupLogLineWithoutHeader);
                 Run("downloaded copy reused only with matching sha256", DownloadedCopyReuse);
+                Run("rejected download held by another process keeps the verification text", RejectedLockedDownloadKeepsReason);
+                Run("partial download removed quietly", PartialDownloadRemovedQuietly);
+                Run("failed download leaves no partial file", FailedDownloadLeavesNoPartial);
                 Console.WriteLine(passed + " passed, " + failed + " failed");
                 return failed == 0 ? 0 : 1;
             }
@@ -1117,6 +1121,18 @@ namespace AgentProxy.Tests
             True(!File.Exists(SetupLog.PreviousFilePath), "journal of exactly 512 KB stays");
         }
 
+        private static void SetupLogLineWithoutHeader()
+        {
+            ResetSetupLog();
+            string large = new string('x', 512 * 1024 + 1);
+            File.WriteAllText(SetupLog.FilePath, large + Environment.NewLine);
+            SetupLog.AppendWithoutHeader("another setup");
+            True(!File.Exists(SetupLog.PreviousFilePath), "running journal is not moved aside");
+            string[] lines = SetupLogLines();
+            Equal(2, lines.Length, "lines: " + lines.Length);
+            True(lines[1].EndsWith("  another setup") && !lines[1].Contains("==="), "one line without a header: " + lines[1]);
+        }
+
         private static bool IsVerifiedCopy(string path, string sha256)
         {
             return (bool)CallStatic(typeof(UpdateChecker), "IsVerifiedCopy", path, new UpdateRelease("0.2", "u", 3, sha256));
@@ -1142,6 +1158,96 @@ namespace AgentProxy.Tests
             finally
             {
                 if (File.Exists(path)) File.Delete(path);
+            }
+        }
+
+        private static void RejectedLockedDownloadKeepsReason()
+        {
+            string path = SandboxFile("AgentProxySetup.exe.part");
+            File.WriteAllText(path, "abc");
+            try
+            {
+                const string abcHash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+                using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    string sizeReason = null;
+                    try
+                    {
+                        UpdateChecker.Verify(path, new UpdateRelease("0.2", "u", 4, abcHash));
+                    }
+                    catch (IOException error)
+                    {
+                        sizeReason = error.Message;
+                    }
+                    Equal("файл скачался не полностью", sizeReason, "size mismatch reason");
+                    string hashReason = null;
+                    try
+                    {
+                        UpdateChecker.Verify(path, new UpdateRelease("0.2", "u", 3, new string('0', 64)));
+                    }
+                    catch (IOException error)
+                    {
+                        hashReason = error.Message;
+                    }
+                    True(hashReason != null && hashReason.StartsWith("контрольная сумма"), "hash mismatch reason: " + hashReason);
+                }
+                True(File.Exists(path), "held file is left in place");
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+
+        private static void PartialDownloadRemovedQuietly()
+        {
+            string path = SandboxFile("AgentProxySetup.exe.part");
+            File.WriteAllText(path, "abc");
+            CallStatic(typeof(UpdateChecker), "DeleteQuietly", path);
+            True(!File.Exists(path), "partial file removed");
+            CallStatic(typeof(UpdateChecker), "DeleteQuietly", path);
+            File.WriteAllText(path, "abc");
+            using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                CallStatic(typeof(UpdateChecker), "DeleteQuietly", path);
+            }
+            True(File.Exists(path), "locked partial file is left without an error");
+            File.Delete(path);
+        }
+
+        private static void FailedDownloadLeavesNoPartial()
+        {
+            int port = FreePort();
+            var listener = new System.Net.HttpListener();
+            listener.Prefixes.Add("http://127.0.0.1:" + port + "/");
+            listener.Start();
+            string versionText = "0.0." + new Random().Next(100000, 999999);
+            string target = UpdateChecker.InstallerPath((string)CallStatic(typeof(UpdateChecker), "DownloadsDirectory"), versionText);
+            string folder = Path.GetDirectoryName(target);
+            try
+            {
+                listener.BeginGetContext(result =>
+                {
+                    System.Net.HttpListenerContext context = listener.EndGetContext(result);
+                    byte[] body = new byte[] { 97, 98, 99 };
+                    context.Response.ContentLength64 = body.Length;
+                    context.Response.OutputStream.Write(body, 0, body.Length);
+                    context.Response.Close();
+                }, null);
+                Directory.CreateDirectory(folder);
+                File.WriteAllText(target, "old");
+                var release = new UpdateRelease(versionText, "http://127.0.0.1:" + port + "/AgentProxySetup.exe", 3, null);
+                using (new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    bool reused;
+                    Throws<IOException>(() => UpdateChecker.Download(release, out reused), "locked target fails the download");
+                }
+                True(!File.Exists(target + ".part"), "partial file removed after the failure");
+            }
+            finally
+            {
+                listener.Stop();
+                if (Directory.Exists(folder)) Directory.Delete(folder, true);
             }
         }
 

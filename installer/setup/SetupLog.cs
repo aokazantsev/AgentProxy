@@ -28,6 +28,11 @@ namespace AgentProxy
             Write(line);
         }
 
+        public static void AppendWithoutHeader(string line)
+        {
+            Write(line);
+        }
+
         private static bool IsTooLarge()
         {
             try
