@@ -118,7 +118,7 @@ def test_sse_close_after_delivers_the_event_and_breaks_the_stream(engine):
         assert events[2]["type"] == "note" and "rule {0} closed the stream after incoming event 2".format(
             rule) in events[2]["note"]
         assert len(events) == 3
-        assert rule_entry(flow, rule)["closed"] == "after incoming event 2"
+        assert rule_entry(flow, rule)["closed"] == "after incoming event 2 (counting incoming events with data, without send_event messages; not n of list_events)"
     finally:
         feed.shutdown()
 
@@ -246,7 +246,7 @@ def test_websocket_close_before_drops_the_message_and_breaks_the_connection(engi
         assert events[2]["data"] == "stop" and events[2]["note"] == "dropped"
         assert events[3]["type"] == "note" and "closed the stream before outgoing event 2" in events[3]["note"]
         assert all(event["data"] != "stop" or event["direction"] == "outgoing" for event in events)
-        assert rule_entry(flow, rule)["closed"] == "before outgoing event 2"
+        assert rule_entry(flow, rule)["closed"] == "before outgoing event 2 (counting outgoing events with data, without send_event messages; not n of list_events)"
     finally:
         target["loop"].call_soon_threadsafe(target["loop"].stop)
 

@@ -16,6 +16,7 @@ from .rules import VIEW_FIELDS, RuleError, RuleNotFound, closes_streams, limits_
 from .speed import rule_limits
 from .store import EventFilter, FlowFilter
 from .streamhost import StreamRefused, build_frame
+from .streamtap import IDENTITY_ENCODINGS
 
 log = logging.getLogger("agentproxy.service")
 
@@ -451,21 +452,37 @@ class ProxyService:
     def clear_flows(self, arguments):
         return {"removed": self.store.clear()}
 
-    def history_matches(self, rule):
+    def history_matches(self, rule, editable_only=True):
         flow_filter = FlowFilter(host=rule.get("host"), path=rule.get("path"), method=rule.get("method"))
         summaries = self.store.query(flow_filter, min(self.settings.max_flows, HISTORY_SCAN_LIMIT))
         kinds = _stream_kinds(rule)
         return sum(1 for summary in summaries if summary["method"] != "CONNECT"
                    and (kinds is None or summary.get("kind", "http") in kinds)
-                   and matches(rule, summary["host"], summary["path"], summary["method"], summary["url"]))
+                   and matches(rule, summary["host"], summary["path"], summary["method"], summary["url"])
+                   and (kinds is None or not editable_only or summary["kind"] != "sse" or self._editable_sse(summary)))
+
+    def _editable_sse(self, summary):
+        if any(entry.get("action") == "sse" for entry in summary.get("rules") or []):
+            return False
+        if summary["status"] is None or not 200 <= summary["status"] < 300:
+            return False
+        encodings = [value for name, value in self.store.response_headers(summary["seq"])
+                     if name.lower() == "content-encoding"]
+        return all(value.strip().lower() in IDENTITY_ENCODINGS for value in encodings)
 
     def _rule_answer(self, rule, updated=False):
         answer = {"rule": _brief(rule), "history_matches": self.history_matches(rule), "counts": self.rules.counts()}
         hints = []
         if not answer["history_matches"] and rule["action"] == "events":
-            kinds = " or ".join(_stream_kinds(rule))
-            hints.append("no recorded {0} stream matches this condition yet; check host and path with list_flows and "
-                         "kind {0}".format(kinds))
+            unchanged = self.history_matches(rule, editable_only=False)
+            if unchanged:
+                hints.append("{0} recorded SSE streams match this condition, but the rule does not change such "
+                             "streams: compressed (add a rewrite rule with request_headers Accept-Encoding: identity), "
+                             "served by an sse rule, or answered with a status other than 2xx".format(unchanged))
+            else:
+                kinds = " or ".join(_stream_kinds(rule))
+                hints.append("no recorded {0} stream matches this condition yet; check host and path with list_flows "
+                             "and kind {0}".format(kinds))
         elif not answer["history_matches"]:
             hints.append("no recorded request matches this condition yet; check host and path with list_flows "
                          "(CONNECT records do not count: rules apply to decrypted requests only)")
@@ -646,7 +663,7 @@ class ProxyService:
         device.pop("problem_kind", None)
         return result
 
-    def send_event(self, arguments):
+    async def send_event(self, arguments):
         summary = self._flow_ref(arguments.get("flow"))
         if not summary["open"]:
             raise ToolError("flow {0} is closed: send into an open stream (list_flows with open=true), or make the app "
@@ -680,7 +697,7 @@ class ProxyService:
         before = self._stream(summary["seq"])["event_count"]
         last_seq = self.store.last_seq()
         try:
-            self.injector.send(summary["seq"], direction == "incoming", content, text is not None)
+            await self.injector.send(summary["seq"], direction == "incoming", content, text is not None)
         except InjectError as error:
             raise ToolError(str(error))
         return {"sent": True, "flow": summary["seq"], "direction": direction, "type": "text" if text is not None else "binary",

@@ -549,11 +549,11 @@ def test_websocket_send_answers_last_seq_taken_before_sending(service, store):
     seq = store.insert(make_record(1, kind="websocket", open=True))
 
     class Injector:
-        def send(self, *args):
+        async def send(self, *args):
             store.insert(make_record(2))
 
     service.injector = Injector()
-    answer = service.send_event({"flow": str(seq), "data": "ping"})
+    answer = asyncio.run(service.send_event({"flow": str(seq), "data": "ping"}))
     assert answer["last_seq"] == seq
     found = asyncio.run(service.wait_for_flow({"since_seq": answer["last_seq"], "timeout_seconds": 1}))
     assert found["flow"]["id"] == "flow-2"
@@ -594,3 +594,20 @@ def test_text_arguments_must_be_valid_unicode(service, store):
 def test_blank_and_null_arguments_take_defaults(service, store):
     store.insert(make_record(1))
     assert len(service.list_flows({"limit": "", "failed_only": None})["flows"]) == 1
+
+
+def test_events_rule_does_not_count_streams_it_would_not_change(service, store):
+    store.insert(make_record(1, path="/feed", kind="sse", response_headers=[["Content-Encoding", "gzip"]]))
+    store.insert(make_record(2, path="/feed", kind="sse", rules=[{"id": "r9", "action": "sse"}]))
+    store.insert(make_record(3, path="/feed", kind="sse", status=404))
+    store.insert(make_record(4, path="/feed", kind="sse", response_headers=[["content-encoding", "identity"]]))
+    store.insert(make_record(5, path="/feed", kind="websocket", status=101))
+    assert service.add_rule({"action": "events", "path": "/feed", "close": "after"})["history_matches"] == 2
+
+
+def test_events_rule_names_why_matching_streams_do_not_count(service, store):
+    store.insert(make_record(1, path="/feed", kind="sse", response_headers=[["Content-Encoding", "gzip"]]))
+    answer = service.add_rule({"action": "events", "path": "/feed", "replace": [{"find": "a", "with": "b"}]})
+    assert answer["history_matches"] == 0
+    assert "1 recorded SSE streams match this condition" in answer["hint"] and "Accept-Encoding: identity" in answer["hint"]
+    assert "check host and path" not in answer["hint"]

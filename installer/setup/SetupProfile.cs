@@ -94,19 +94,9 @@ namespace AgentProxy
             };
         }
 
-        public static bool IsUpdate()
-        {
-            return IsUpdate(UninstallRegistration.InstalledLocation());
-        }
-
-        public static bool IsUpdate(string installedLocation)
-        {
-            return installedLocation != null && File.Exists(Path.Combine(installedLocation, AppIdentity.ExecutableName));
-        }
-
         private static bool ClaudeWanted()
         {
-            return !IsUpdate() || File.Exists(Path.Combine(AppIdentity.DataDirectory, "claude-integration.json"));
+            return !InstallTarget.IsUpdate() || File.Exists(Path.Combine(AppIdentity.DataDirectory, "claude-integration.json"));
         }
 
         public static void BeforeExtract(InstallRequest request, Action<int, string> report, List<string> notes)
@@ -155,8 +145,7 @@ namespace AgentProxy
         private static void RemovePreviousLocation(string target, List<string> notes)
         {
             string previous = UninstallRegistration.InstalledLocation();
-            if (previous == null || !IsDifferentLocation(previous, target)) return;
-            if (!File.Exists(Path.Combine(previous, AppIdentity.ExecutableName))) return;
+            if (!InstallTarget.IsUpdate(previous) || !IsDifferentLocation(previous, target)) return;
             string problem = FolderRemoval.Delete(previous, () => EngineProcesses.StopAll(previous));
             SetupLog.Append("previous location " + previous + ": " + (problem ?? "removed"));
             notes.Add(problem == null

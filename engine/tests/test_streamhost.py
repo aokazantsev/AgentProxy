@@ -415,7 +415,7 @@ def test_websocket_sending_ignores_empty_sse_fields(arguments):
     summary = {"seq": 3, "kind": "websocket", "open": True}
     service._flow_ref = lambda value: summary
     with pytest.raises(ToolError) as refusal:
-        service.send_event(dict(arguments, flow="3", data="x"))
+        asyncio.run(service.send_event(dict(arguments, flow="3", data="x")))
     assert "only for SSE" not in str(refusal.value)
 
 

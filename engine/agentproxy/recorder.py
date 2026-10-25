@@ -1,12 +1,14 @@
+import asyncio
 import logging
 import time
 import uuid
+from collections import deque
 
 from .guard import OWN_PORT_MARK
 from .rules import APPLIED_MARK, EVENTS_MARK, NO_REQUEST_STREAM_MARK, NO_RESPONSE_STREAM_MARK
 from .sse import MAX_EVENT_BYTES, SseTap
 from .store import ENGINE_STOPPED, FlowRecord
-from .streamtap import NO_BODY_STATUSES, StreamTap, should_stream, should_stream_request
+from .streamtap import IDENTITY_ENCODINGS, NO_BODY_STATUSES, StreamTap, should_stream, should_stream_request
 
 log = logging.getLogger("agentproxy.recorder")
 
@@ -23,6 +25,10 @@ SKIPPED_NOTE = ("{0} events not recorded: the stream sent more than {1} events o
                 "the other side)")
 LIMIT_NOTE = ("more than {0} events or {1} MB this second: the rest of the second is not recorded, a note with their count "
               "follows")
+UNPACKING_AT_ONCE = 2
+INJECTION_DELIVERED = "delivered"
+INJECTION_DROPPED = "dropped"
+INJECTION_CLOSED = "closed"
 
 
 def is_event_stream(request, response):
@@ -44,10 +50,15 @@ class LiveStream:
         self.count = 0
         self.bytes = 0
         self.skipped = 0
+        self.injections = deque()
 
 
 def _headers(headers):
     return [[name, value] for name, value in headers.items(multi=True)]
+
+
+def _encoded(message):
+    return message is not None and (message.headers.get("content-encoding") or "").strip().lower() not in IDENTITY_ENCODINGS
 
 
 def _content_length(message):
@@ -146,6 +157,15 @@ class Recorder:
         self.taps = {}
         self.request_taps = {}
         self.streams = {}
+        self.unpacking = asyncio.Semaphore(UNPACKING_AT_ONCE)
+
+    async def _record(self, flow, tap=None, error=None, request_tap=None):
+        packed_request = _encoded(flow.request) and (request_tap is not None or bool(flow.request.raw_content))
+        packed_response = _encoded(flow.response) and (tap is not None or bool(flow.response.raw_content))
+        if not (packed_request or packed_response):
+            return build_record(flow, self.body_limit, tap, error, request_tap)
+        async with self.unpacking:
+            return await asyncio.to_thread(build_record, flow, self.body_limit, tap, error, request_tap)
 
     def requestheaders(self, flow):
         if flow.metadata.get(NO_REQUEST_STREAM_MARK):
@@ -156,10 +176,10 @@ class Recorder:
             self.request_taps[flow.id] = tap
             flow.request.stream = tap
 
-    def responseheaders(self, flow):
+    async def responseheaders(self, flow):
         if flow.metadata.get(NO_RESPONSE_STREAM_MARK):
             return
-        if is_event_stream(flow.request, flow.response) and self._open_event_stream(flow):
+        if is_event_stream(flow.request, flow.response) and await self._open_event_stream(flow):
             return
         if callable(flow.response.stream):
             return
@@ -173,10 +193,10 @@ class Recorder:
     def tcp_message(self, flow):
         flow.messages.clear()
 
-    def response(self, flow):
-        if is_websocket_handshake(flow) and self._open_stream(flow, "websocket") is not None:
+    async def response(self, flow):
+        if is_websocket_handshake(flow) and await self._open_stream(flow, "websocket") is not None:
             return
-        self._save(flow)
+        await self._save(flow)
 
     def websocket_message(self, flow):
         messages = list(flow.websocket.messages)
@@ -185,6 +205,8 @@ class Recorder:
         if live is None:
             return
         for message in messages:
+            if message.injected and live.injections:
+                self._settle_injection(live, INJECTION_DROPPED if message.dropped else INJECTION_DELIVERED)
             if not self._admit(live, len(message.content)):
                 continue
             notes = [name for name, active in (("injected", message.injected), ("dropped", message.dropped)) if active]
@@ -196,10 +218,21 @@ class Recorder:
     def _add_rule_notes(self, live, flow):
         changer = flow.metadata.get(EVENTS_MARK)
         if changer is not None:
-            for note in changer.take_notes():
-                self._add_event(live, INCOMING, "note", b"", note=note)
+            for direction, note in changer.take_notes():
+                self._add_event(live, direction, "note", b"", note=note)
 
-    def websocket_end(self, flow):
+    def expect_injection(self, flow_id):
+        waiter = asyncio.get_running_loop().create_future()
+        self.streams[flow_id].injections.append(waiter)
+        return waiter
+
+    @staticmethod
+    def _settle_injection(live, outcome):
+        waiter = live.injections.popleft()
+        if not waiter.done():
+            waiter.set_result(outcome)
+
+    async def websocket_end(self, flow):
         live = self.streams.get(flow.id)
         if live is not None:
             socket = flow.websocket
@@ -208,7 +241,7 @@ class Recorder:
             self._add_event(live, OUTGOING if socket.closed_by_client else INCOMING, "close",
                             (socket.close_reason or "").encode("utf-8", "replace"),
                             name=str(code) if code is not None else None, timestamp=socket.timestamp_end)
-        self._save(flow)
+        await self._save(flow)
 
     def done(self):
         try:
@@ -216,12 +249,12 @@ class Recorder:
         except Exception:
             log.exception("open streams not closed")
 
-    def error(self, flow):
+    async def error(self, flow):
         if flow.request is not None:
-            self._save(flow)
+            await self._save(flow)
 
-    def http_connect_error(self, flow):
-        self._save(flow, connect_failure(flow.response))
+    async def http_connect_error(self, flow):
+        await self._save(flow, connect_failure(flow.response))
 
     def tls_failed_client(self, data):
         server = data.context.server
@@ -239,8 +272,8 @@ class Recorder:
             except Exception:
                 log.exception("TLS failure not logged")
 
-    def _open_event_stream(self, flow):
-        live = self._open_stream(flow, "sse")
+    async def _open_event_stream(self, flow):
+        live = await self._open_stream(flow, "sse")
         if live is None:
             return False
         editor = flow.response.stream if callable(flow.response.stream) else None
@@ -259,11 +292,11 @@ class Recorder:
             return data
         return stream
 
-    def _open_stream(self, flow, kind):
+    async def _open_stream(self, flow, kind):
         if flow.metadata.get(OWN_PORT_MARK):
             return None
         try:
-            record = build_record(flow, self.body_limit, request_tap=self.request_taps.get(flow.id))
+            record = await self._record(flow, request_tap=self.request_taps.get(flow.id))
             record.kind = kind
             record.open = True
             record.duration_ms = None
@@ -326,14 +359,14 @@ class Recorder:
         self._add_event(live, INCOMING, event.kind, event.data, size=event.size, name=event.name,
                         event_id=event.event_id, truncated=event.truncated, note=", ".join(notes) or None)
 
-    def _finish_stream(self, flow, live, error, request_tap):
+    async def _finish_stream(self, flow, live, error, request_tap):
         if live.tap is not None:
             try:
                 live.tap.finish()
             except Exception:
                 log.exception("stream %s not closed cleanly", flow.id)
         self._report_skipped(live)
-        record = build_record(flow, self.body_limit, error=error, request_tap=request_tap)
+        record = await self._record(flow, error=error, request_tap=request_tap)
         record.open = False
         record.response_body = b""
         record.response_body_size = live.tap.wire_size if live.tap is not None else 0
@@ -341,25 +374,28 @@ class Recorder:
         ended = socket.timestamp_end if socket is not None and socket.timestamp_end else time.time()
         if flow.request.timestamp_start:
             record.duration_ms = int((ended - flow.request.timestamp_start) * 1000)
-        flow.metadata[STREAM_DONE_MARK] = True
         return self.store.finish(record)
 
-    def _save(self, flow, error=None):
+    async def _save(self, flow, error=None):
         tap = self.taps.pop(flow.id, None)
         request_tap = self.request_taps.pop(flow.id, None)
         live = self.streams.pop(flow.id, None)
+        if live is not None:
+            while live.injections:
+                self._settle_injection(live, INJECTION_CLOSED)
         if flow.metadata.get(OWN_PORT_MARK) or flow.metadata.get(STREAM_DONE_MARK):
             return
         if live is not None:
+            flow.metadata[STREAM_DONE_MARK] = True
             try:
-                seq = self._finish_stream(flow, live, error, request_tap)
+                seq = await self._finish_stream(flow, live, error, request_tap)
             except Exception:
                 log.exception("flow %s not recorded", flow.id)
                 return
             self._log_saved(flow, seq, error)
             return
         try:
-            seq = self.store.insert(build_record(flow, self.body_limit, tap, error, request_tap))
+            seq = self.store.insert(await self._record(flow, tap, error, request_tap))
         except Exception:
             log.exception("flow %s not recorded", flow.id)
             return

@@ -456,6 +456,11 @@ class FlowStore:
                 "SELECT {0} FROM flows WHERE seq = ?".format(", ".join(SUMMARY_COLUMNS)), (seq,)).fetchone()
         return _row(row) if row else None
 
+    def response_headers(self, seq):
+        with self._lock:
+            row = self._db.execute("SELECT response_headers FROM flows WHERE seq = ?", (seq,)).fetchone()
+        return json.loads(row[0] or "[]") if row else []
+
     def find_summary(self, flow_id):
         with self._lock:
             row = self._db.execute(

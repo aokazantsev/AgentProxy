@@ -322,7 +322,7 @@ def limits_speed(rule):
 
 
 def closes_streams(rule):
-    return rule["action"] == "events" and "close" in rule
+    return rule["action"] == "events" and "close" in rule and rule.get("direction") != "outgoing"
 
 
 def changes_body(rule):

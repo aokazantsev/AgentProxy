@@ -12,6 +12,7 @@ BINARY_SKIPPED = "binary messages are not changed; event_contains never matches 
 TOO_LARGE = "an event is larger than {0} MB: it and the rest of the stream passed unchanged".format(
     MAX_BLOCK_BYTES // (1024 * 1024))
 CLOSED_NOTE = "rule {0} closed the stream {1}"
+CLOSED_AT = "{0} {1} event {2} (counting {1} events with data, without send_event messages; not n of list_events)"
 WHOLE_CONNECTION = "; the app's whole HTTP/2 connection was closed, with its other requests"
 
 
@@ -107,9 +108,9 @@ class EventChanger:
             entry["error"] = problem
             return False
         self.closed = True
-        moment = "{0} {1} event {2}".format(rule["close"], direction, self.counted[direction])
+        moment = CLOSED_AT.format(rule["close"], direction, self.counted[direction])
         entry["closed"] = moment + (WHOLE_CONNECTION if self.whole_connection else "")
-        self.notes.append(CLOSED_NOTE.format(rule["id"], entry["closed"]))
+        self.notes.append((direction, CLOSED_NOTE.format(rule["id"], entry["closed"])))
         return rule["close"] == "before"
 
     def take_notes(self):

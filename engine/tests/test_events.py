@@ -610,3 +610,21 @@ def test_rate_limit_counts_only_the_recorded_part_of_large_messages(store, monke
         flow.websocket.messages.append(FakeMessage(b"m" * (MAX_EVENT_BYTES + 10)))
         recorder.websocket_message(flow)
     assert [e["type"] for e in store.events(seq, EventFilter(), 10)] == ["text", "text"]
+
+
+def test_note_of_a_close_on_an_outgoing_message_is_outgoing(store):
+    from types import SimpleNamespace
+    from agentproxy import recorder as recorder_module
+    from agentproxy.eventrules import OUTGOING
+    from agentproxy.rules import EVENTS_MARK
+    from test_eventrules import changer, events_rule
+    recorder = recorder_module.Recorder(store, 1024)
+    seq = stream(store, 1, "websocket")
+    events = changer(events_rule(direction="outgoing", close="before"))
+    events.handle(OUTGOING, "bye")
+    flow = SimpleNamespace(id="ws-5", metadata={EVENTS_MARK: events}, websocket=SimpleNamespace(messages=[]))
+    recorder.streams[flow.id] = recorder_module.LiveStream(seq)
+    recorder.websocket_message(flow)
+    note = store.events(seq, EventFilter(), 10)[-1]
+    assert note["type"] == "note" and note["direction"] == "outgoing"
+    assert "closed the stream before outgoing event 1" in note["note"]

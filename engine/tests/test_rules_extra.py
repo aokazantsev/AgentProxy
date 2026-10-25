@@ -99,7 +99,7 @@ def test_rewrite_without_body_changes_keeps_the_response_streaming(rules, store,
     response.headers.update(headers)
     flow.response = response
     rewriter.responseheaders(flow)
-    recorder.responseheaders(flow)
+    run(recorder.responseheaders(flow))
     event_stream = "Content-Type" in headers
     assert isinstance(flow.response.stream, SseTap if event_stream else StreamTap)
     if event_stream:

@@ -51,6 +51,9 @@ namespace AgentProxy.Tests
                 Run("install target refusals", TargetRefusals);
                 Run("uninstaller owns registration", OwnsRegistration);
                 Run("dead registration is not an update", DeadRegistrationIsNotUpdate);
+                Run("autostart default follows the update condition", AutostartDefaultFollowsTheUpdateCondition);
+                Run("restart stops in the background and starts once", RestartStopsInTheBackgroundAndStartsOnce);
+                Run("exit during a restart waits for the engine to stop", ExitDuringARestartWaitsForTheEngineToStop);
                 Run("tray reads claude status from engine cli", EngineCliClaudeRoundTrip);
                 Run("json writer keeps doubles and refuses dates", JsonWriterNumbersAndDates);
                 Run("json writer round trip", JsonWriterRoundTrip);
@@ -144,7 +147,7 @@ namespace AgentProxy.Tests
         {
             string path = Path.Combine(Sandbox, "journal-scroll.log");
             File.WriteAllText(path, new string('w', 3000) + "\n" + JournalLines("a", 400));
-            using (var form = new System.Windows.Forms.Form())
+            using (var form = new QuietForm())
             {
                 form.StartPosition = System.Windows.Forms.FormStartPosition.Manual;
                 form.Location = new System.Drawing.Point(-3000, -3000);
@@ -190,6 +193,13 @@ namespace AgentProxy.Tests
                 box.Hide();
                 True(!JournalAppendShows(source, path, "g"), "a tab left scrolled up keeps its place while hidden");
                 box.Show();
+                SendMessage(box.Handle, 0x115, (IntPtr)7, IntPtr.Zero);
+                True(JournalTickShows(source, "g"), "back at the bottom after the hidden tab it catches up");
+
+                File.AppendAllText(path, new string('z', 3000));
+                source.Refresh(false, 1 << 20);
+                System.Windows.Forms.Application.DoEvents();
+                True(JournalAppendShows(source, path, "h"), "a last line longer than 1024 characters keeps the journal at the end");
             }
         }
 
@@ -718,16 +728,80 @@ namespace AgentProxy.Tests
             }
         }
 
+        private static void AutostartDefaultFollowsTheUpdateCondition()
+        {
+            string root = Path.Combine(Sandbox, "upd-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            Equal(true, InstallTarget.AutostartByDefault(null, false), "no registration is a new install");
+            Equal(true, InstallTarget.AutostartByDefault(root, false), "dead registration is a new install");
+            File.WriteAllText(Path.Combine(root, AppIdentity.ExecutableName), "x");
+            Equal(false, InstallTarget.AutostartByDefault(root, false), "update keeps autostart off");
+            Equal(true, InstallTarget.AutostartByDefault(root, true), "update keeps autostart on");
+        }
+
+        private static void ExitDuringARestartWaitsForTheEngineToStop()
+        {
+            string missing = Path.Combine(Sandbox, "no-install-" + Guid.NewGuid().ToString("N"));
+            var info = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "PING.EXE"), "-n 60 127.0.0.1");
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            var child = System.Diagnostics.Process.Start(info);
+            var watcher = System.Diagnostics.Process.GetProcessById(child.Id);
+            try
+            {
+                using (var engine = new EngineSupervisor(missing))
+                {
+                    typeof(EngineSupervisor).GetField("process", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(engine, child);
+                    engine.Restart();
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
+                    engine.Stop();
+                    True(clock.ElapsedMilliseconds < 12000, "exit does not wait longer than the stop itself");
+                    True(watcher.HasExited, "exit returns only after the engine stopped by a restart is gone");
+                }
+            }
+            finally
+            {
+                if (!watcher.HasExited) watcher.Kill();
+            }
+        }
+
+        private static void RestartStopsInTheBackgroundAndStartsOnce()
+        {
+            string missing = Path.Combine(Sandbox, "no-install-" + Guid.NewGuid().ToString("N"));
+            File.WriteAllText(Path.Combine(Sandbox, "log.txt"), "");
+            using (var engine = new EngineSupervisor(missing))
+            {
+                engine.Restart();
+                engine.Restart();
+                Equal(EngineState.Starting, engine.State, "restart answers at once without waiting for the stop");
+                DateTime until = DateTime.UtcNow.AddSeconds(5);
+                while (engine.State == EngineState.Starting && DateTime.UtcNow < until)
+                {
+                    System.Windows.Forms.Application.DoEvents();
+                    System.Threading.Thread.Sleep(10);
+                }
+                Equal(EngineState.Crashed, engine.State, "start runs after the stop finished");
+                for (int i = 0; i < 20; i++) { System.Windows.Forms.Application.DoEvents(); System.Threading.Thread.Sleep(10); }
+                string log = File.ReadAllText(Path.Combine(Sandbox, "log.txt"));
+                Equal(1, Regex.Matches(log, "engine missing").Count, "two quick restarts start the engine once");
+
+                engine.Restart();
+                engine.Stop();
+                for (int i = 0; i < 50; i++) { System.Windows.Forms.Application.DoEvents(); System.Threading.Thread.Sleep(10); }
+                Equal(EngineState.Stopped, engine.State, "exit during a restart does not start the engine again");
+            }
+        }
+
         private static void DeadRegistrationIsNotUpdate()
         {
             string root = Path.Combine(Path.GetTempPath(), "AgentProxyUpdate-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             try
             {
-                Equal(false, SetupProfile.IsUpdate(null), "no registration");
-                Equal(false, SetupProfile.IsUpdate(root), "registration without program");
+                Equal(false, InstallTarget.IsUpdate(null), "no registration");
+                Equal(false, InstallTarget.IsUpdate(root), "registration without program");
                 File.WriteAllText(Path.Combine(root, AppIdentity.ExecutableName), "x");
-                Equal(true, SetupProfile.IsUpdate(root), "installed program");
+                Equal(true, InstallTarget.IsUpdate(root), "installed program");
             }
             finally
             {

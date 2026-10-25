@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -134,8 +135,8 @@ def test_close_before_keeps_the_event_and_everything_after_from_the_app():
     assert edit(editor, b"data: 1\n\ndata: 2\n\ndata: 3\n\n", b"data: 4\n\n") == b"data: 1\n\n"
     assert closer.calls == ["before"]
     entry = editor.changer.flow.metadata[APPLIED_MARK][0]
-    assert entry["closed"] == "before incoming event 2"
-    assert editor.changer.take_notes() == ["rule r1 closed the stream before incoming event 2"]
+    assert entry["closed"] == "before incoming event 2 (counting incoming events with data, without send_event messages; not n of list_events)"
+    assert editor.changer.take_notes() == [("incoming", "rule r1 closed the stream before incoming event 2 (counting incoming events with data, without send_event messages; not n of list_events)")]
 
 
 def test_close_after_delivers_the_event():
@@ -173,7 +174,7 @@ def test_binary_messages_are_only_closed():
     assert events.handle(INCOMING, None) == (None, True)
     entries = {entry["id"]: entry for entry in events.flow.metadata[APPLIED_MARK]}
     assert "binary" in entries["r1"]["skipped"] and "closed" not in entries["r2"]
-    assert entries["r3"]["closed"] == "after incoming event 1"
+    assert entries["r3"]["closed"] == "after incoming event 1 (counting incoming events with data, without send_event messages; not n of list_events)"
 
 
 def test_changed_and_deleted_rules_apply_to_open_streams():
@@ -373,7 +374,7 @@ def test_send_event_is_refused_after_an_events_rule_closed_the_connection():
     flow = SimpleNamespace(live=True, websocket=object(), metadata={EVENTS_MARK: events})
     injector = WebSocketInjector(master=None, recorder=SimpleNamespace(live_websocket=lambda seq: flow))
     with pytest.raises(InjectError, match="events rule closed"):
-        injector.send(1, True, b"late", True)
+        asyncio.run(injector.send(1, True, b"late", True))
 
 
 def test_outgoing_rule_does_not_take_sse_streams(rules):
@@ -415,3 +416,15 @@ def test_only_successful_identity_streams_are_edited(rules, status, encoding, ed
     assert isinstance(flow.response.stream, SseEditor) is edited
     skipped = [entry.get("skipped", "") for entry in flow.metadata.get(APPLIED_MARK, [])]
     assert all("x" * 40 not in text for text in skipped)
+
+
+def test_close_on_an_outgoing_message_notes_the_outgoing_direction():
+    events = changer(events_rule(direction="outgoing", close="after"))
+    events.handle(OUTGOING, "bye")
+    assert events.take_notes() == [(OUTGOING, "rule r1 closed the stream after outgoing event 1 (counting outgoing "
+                                              "events with data, without send_event messages; not n of list_events)")]
+
+
+def test_outgoing_closing_rule_does_not_ask_for_http1(rules):
+    rules.add({"action": "events", "host": "rt.example.com", "direction": "outgoing", "close": "after"})
+    assert not rules.needs_http1("rt.example.com")

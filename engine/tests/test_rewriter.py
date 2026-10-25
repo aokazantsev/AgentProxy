@@ -59,7 +59,7 @@ def test_recorder_does_not_stream_what_rules_need_whole(rules):
     assert not flow.request.stream
     run(rewriter.request(flow))
     rewriter.responseheaders(flow)
-    recorder.responseheaders(flow)
+    run(recorder.responseheaders(flow))
     assert not flow.response.stream
     assert build_record(flow, 10).rules == [{"id": "r1", "action": "respond"}]
 
@@ -179,7 +179,7 @@ def test_body_without_length_is_buffered_and_edited(rules):
     del flow.response.headers["content-length"]
     flow.response.headers["transfer-encoding"] = "chunked"
     rewriter.responseheaders(flow)
-    recorder.responseheaders(flow)
+    run(recorder.responseheaders(flow))
     assert not flow.response.stream
     run(rewriter.response(flow))
     assert flow.response.raw_content == b'{"fine": true}'

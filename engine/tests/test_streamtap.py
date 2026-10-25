@@ -1,5 +1,7 @@
+import asyncio
 import gzip
 import os
+import threading
 import time
 import tracemalloc
 import zlib
@@ -10,6 +12,7 @@ import zstandard
 from mitmproxy.test import tflow
 
 from agentproxy import recorder
+from agentproxy.store import FlowFilter
 from agentproxy.streamtap import COUNTED_BYTES_LIMIT, MAX_MEMBERS, OUTPUT_STEP, StreamTap, should_stream, should_stream_request
 
 
@@ -336,3 +339,144 @@ def test_endless_zstd_frames_stop_at_the_limit():
     tap(b"")
     body, size = tap.body()
     assert body == b"x" * MAX_MEMBERS and size > len(body)
+
+
+def test_compressed_bodies_are_unpacked_off_the_event_loop(store, monkeypatch):
+    import asyncio
+    import threading
+    threads = []
+    original = recorder.build_record
+    monkeypatch.setattr(recorder, "build_record",
+                        lambda *args: threads.append(threading.current_thread()) or original(*args))
+    keeper = recorder.Recorder(store, 1000)
+    plain = tflow.tflow(resp=True)
+    packed = tflow.tflow(resp=True)
+    packed.response.headers["content-encoding"] = "gzip"
+    packed.response.raw_content = gzip.compress(b"x" * 5000)
+    asyncio.run(keeper.response(plain))
+    asyncio.run(keeper.response(packed))
+    assert threads[0] is threading.main_thread() and threads[1] is not threading.main_thread()
+    from agentproxy.store import FlowFilter
+    newest = store.query(FlowFilter(), 1)[0]
+    assert newest["response_body_size"] == 5000
+
+
+def test_stream_that_errors_while_its_record_is_unpacked_is_recorded_once(store):
+    import asyncio
+    flow = tflow.twebsocketflow()
+    flow.request.headers["content-encoding"] = "gzip"
+    flow.request.raw_content = gzip.compress(b"q" * 100)
+    keeper = recorder.Recorder(store, 1000)
+
+    async def scenario():
+        await keeper.response(flow)
+        await asyncio.gather(keeper.websocket_end(flow), keeper.error(flow))
+
+    asyncio.run(scenario())
+    assert store.count() == 1
+    from agentproxy.store import FlowFilter
+    assert store.query(FlowFilter(), 1)[0]["open"] is False
+
+
+def test_compressed_request_body_is_unpacked_off_the_event_loop(store, monkeypatch):
+    import asyncio
+    import threading
+    threads = []
+    original = recorder.build_record
+    monkeypatch.setattr(recorder, "build_record",
+                        lambda *args: threads.append(threading.current_thread()) or original(*args))
+    flow = tflow.tflow(resp=True)
+    flow.request.headers["content-encoding"] = "gzip"
+    flow.request.raw_content = gzip.compress(b"q" * 5000)
+    asyncio.run(recorder.Recorder(store, 10000).response(flow))
+    assert threads and threads[0] is not threading.main_thread()
+    from agentproxy.store import FlowFilter
+    assert store.query(FlowFilter(), 1)[0]["request_body_size"] == 5000
+
+
+def test_no_more_than_two_bodies_are_unpacked_at_once(store, monkeypatch):
+    import asyncio
+    import threading
+    active = []
+    peak = []
+    lock = threading.Lock()
+    original = recorder.build_record
+
+    def slow(*args):
+        with lock:
+            active.append(1)
+            peak.append(len(active))
+        time.sleep(0.05)
+        with lock:
+            active.pop()
+        return original(*args)
+
+    monkeypatch.setattr(recorder, "build_record", slow)
+    keeper = recorder.Recorder(store, 1000)
+    flows = []
+    for _ in range(5):
+        flow = tflow.tflow(resp=True)
+        flow.response.headers["content-encoding"] = "gzip"
+        flow.response.raw_content = gzip.compress(b"x" * 100)
+        flows.append(flow)
+
+    async def scenario():
+        await asyncio.gather(*(keeper.response(flow) for flow in flows))
+
+    asyncio.run(scenario())
+    assert max(peak) == recorder.UNPACKING_AT_ONCE and store.count() == 5
+
+
+def threads_of_build_record(monkeypatch):
+    threads = []
+    original = recorder.build_record
+    monkeypatch.setattr(recorder, "build_record",
+                        lambda *args: threads.append(threading.current_thread()) or original(*args))
+    return threads
+
+
+def test_large_compressed_response_read_through_the_tap_is_unpacked_off_the_event_loop(store, monkeypatch):
+    threads = threads_of_build_record(monkeypatch)
+    keeper = recorder.Recorder(store, 1000)
+    flow = tflow.tflow(resp=True)
+    body = os.urandom(4000)
+    packed = gzip.compress(body)
+    flow.response.headers["content-encoding"] = "gzip"
+    flow.response.headers["content-length"] = str(len(packed))
+    asyncio.run(keeper.responseheaders(flow))
+    assert callable(flow.response.stream)
+    flow.response.stream(packed)
+    flow.response.raw_content = None
+    asyncio.run(keeper.response(flow))
+    assert threads and threads[-1] is not threading.main_thread()
+    assert store.query(FlowFilter(), 1)[0]["response_body_size"] > 1000
+
+
+def test_large_compressed_request_read_through_the_tap_is_unpacked_off_the_event_loop(store, monkeypatch):
+    threads = threads_of_build_record(monkeypatch)
+    keeper = recorder.Recorder(store, 1000)
+    flow = tflow.tflow(resp=True)
+    body = os.urandom(4000)
+    packed = gzip.compress(body)
+    flow.request.headers["content-encoding"] = "gzip"
+    flow.request.headers["content-length"] = str(len(packed))
+    keeper.requestheaders(flow)
+    assert callable(flow.request.stream)
+    flow.request.stream(packed)
+    flow.request.raw_content = None
+    asyncio.run(keeper.response(flow))
+    assert threads and threads[-1] is not threading.main_thread()
+    assert store.query(FlowFilter(), 1)[0]["request_body_size"] > 1000
+
+
+def test_compressed_stream_without_a_body_opens_and_closes_on_the_event_loop(store, monkeypatch):
+    threads = threads_of_build_record(monkeypatch)
+    keeper = recorder.Recorder(store, 1000)
+    flow = tflow.tflow(resp=True)
+    flow.response.headers["content-type"] = "text/event-stream"
+    flow.response.headers["content-encoding"] = "gzip"
+    flow.response.raw_content = None
+    asyncio.run(keeper.responseheaders(flow))
+    asyncio.run(keeper.response(flow))
+    assert len(threads) == 2 and all(thread is threading.main_thread() for thread in threads)
+    assert store.query(FlowFilter(), 1)[0]["open"] is False

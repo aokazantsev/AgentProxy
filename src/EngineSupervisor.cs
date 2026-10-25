@@ -31,6 +31,9 @@ namespace AgentProxy
         private bool disposed;
         private int healthInFlight;
         private int crashReported;
+        private int stopsInFlight;
+        private int backgroundStops;
+        private bool restartAfterStop;
 
         public EngineState State { get; private set; }
         public string Detail { get; private set; }
@@ -64,22 +67,48 @@ namespace AgentProxy
         public void Restart()
         {
             AppLog.Append("engine restart requested");
-            StopProcess();
+            healthTimer.Stop();
+            restartTimer.Stop();
+            restartAfterStop = true;
+            SetState(EngineState.Starting, null);
+            Process current = process;
+            process = null;
+            int apiPort = Settings != null ? Settings.ApiPort : 0;
+            stopsInFlight++;
+            Interlocked.Increment(ref backgroundStops);
+            ThreadPool.QueueUserWorkItem(state =>
+            {
+                StopProcess(current, apiPort);
+                Interlocked.Decrement(ref backgroundStops);
+                ui.Post(ignored => StopFinished(), null);
+            });
+        }
+
+        private void StopFinished()
+        {
+            stopsInFlight--;
+            if (stopsInFlight > 0 || !restartAfterStop || stopping || disposed) return;
+            restartAfterStop = false;
             Start();
         }
 
         public void Stop()
         {
             stopping = true;
+            restartAfterStop = false;
             healthTimer.Stop();
             restartTimer.Stop();
-            StopProcess();
+            Process current = process;
+            process = null;
+            StopProcess(current, Settings != null ? Settings.ApiPort : 0);
+            DateTime until = DateTime.UtcNow.AddMilliseconds(3 * StopWaitMs);
+            while (Volatile.Read(ref backgroundStops) > 0 && DateTime.UtcNow < until) Thread.Sleep(50);
             SetState(EngineState.Stopped, null);
         }
 
         private void Launch()
         {
-            if (disposed || stopping || process != null) return;
+            if (disposed || stopping || process != null || stopsInFlight > 0) return;
             Settings = EngineSettings.Load();
             string python = EngineCli.PythonPath(installDirectory);
             if (!File.Exists(python))
@@ -230,16 +259,14 @@ namespace AgentProxy
             else SetState(EngineState.ProxyNotListening, "прокси не слушает порт " + Settings.ProxyPort);
         }
 
-        private void StopProcess()
+        private static void StopProcess(Process current, int apiPort)
         {
-            Process current = process;
-            process = null;
             if (current == null) return;
             try
             {
                 if (!current.HasExited)
                 {
-                    EngineRuntimeInfo.RequestShutdown(Settings.ApiPort, EngineRuntimeInfo.FilePath);
+                    EngineRuntimeInfo.RequestShutdown(apiPort, EngineRuntimeInfo.FilePath);
                     if (!current.WaitForExit(StopWaitMs))
                     {
                         AppLog.Append("engine did not stop in time, killing");

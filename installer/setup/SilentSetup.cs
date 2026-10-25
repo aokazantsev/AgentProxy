@@ -106,7 +106,7 @@ namespace AgentProxy
             InstallRequest request;
             try
             {
-                bool autostart = !SetupProfile.IsUpdate() || Autostart.IsEnabled();
+                bool autostart = InstallTarget.AutostartByDefault(UninstallRegistration.InstalledLocation(), Autostart.IsEnabled());
                 request = Parse(args, SetupProfile.Options(), InstallTarget.DefaultDirectory(), autostart);
             }
             catch (ArgumentException error)

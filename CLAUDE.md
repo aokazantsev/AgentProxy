@@ -6,13 +6,15 @@
 
 - Две части. **Программа в трее** (`src\*.cs`, C# 5, .NET Framework 4.8): значок, меню, журнал, настройки, обновление,
   отчёты о сбоях, присмотр за движком (`EngineSupervisor`: запуск, проверка `/api/status` каждые 5 с, перезапуск с
-  паузами `RestartPolicy`). **Движок** (`engine\agentproxy`, Python 3.13 встроенный): mitmproxy, история запросов в
+  паузами `RestartPolicy`; «Перезапустить движок» и смена настроек останавливают движок в пуле потоков, `Launch` ждёт,
+  пока `stopsInFlight` не обнулится, «Выход» останавливает синхронно и дожидается фоновой остановки). **Движок** (`engine\agentproxy`, Python 3.13 встроенный): mitmproxy, история запросов в
   SQLite, HTTP API и MCP на tornado, интеграция с Claude Code, командная строка.
 - Движок запускается как `runtime\python\python.exe -I -m agentproxy --parent-pid <pid трея>` и сам выходит, когда
   трей умер. Коды выхода: 0 — штатно, 1 — падение, 3 — порт занят, 4 — нет папки данных.
 - `Recorder` пишет завершённые запросы, сбои `CONNECT` и отказ клиента от сертификата прокси; ответы и тела запросов больше
   `max_body_bytes` пропускает потоком и сохраняет только начало тела. Поток держит только сжатый префикс
-  тела до лимита (`StreamTap`), распаковка — один раз при записи, с ограничениями: не больше 64 МБ на выходе, окно zstd
+  тела до лимита (`StreamTap`), распаковка — один раз при записи (сжатое тело — `build_record` в `asyncio.to_thread`, не больше двух
+  сразу, хуки записи async; `STREAM_DONE_MARK` ставится до ожидания, иначе `error` во время распаковки дал бы вторую запись), с ограничениями: не больше 64 МБ на выходе, окно zstd
   до 8 МБ, не больше 1000 членов gzip или кадров zstd (остаток считается в размер сжатым). Неизвестная кодировка или поломка до первого распакованного байта — тело хранится как пришло, как у mitmproxy;
   поломка или обрыв дальше — хранится распакованное начало с пометкой обрыва (размер на 1 больше). Повреждённый
   `flows.db` откладывается в `flows.db.broken`, история начинается заново. Запросы и CONNECT к своим портам защита
@@ -44,7 +46,9 @@
   пересканируется. `_prune` при открытых потоках больше половины предела сначала режет старые события самого большого из них.
   Колонки `flows` и таблица `events` добавляются без смены версии схемы (откат на 0.9 историю не теряет). Открытые при
   старте или остановке потоки закрываются с `ENGINE_STOPPED`. `send_event`: `Recorder.live_websocket` отдаёт живой `flow`,
-  `WebSocketInjector` зовёт команду mitmproxy `inject.websocket`, сообщение проходит хук `websocket_message` с `injected`.
+  `WebSocketInjector` зовёт команду mitmproxy `inject.websocket`, сообщение проходит хук `websocket_message` с `injected`;
+  `send` ждёт его прохода (`Recorder.expect_injection`, очередь `LiveStream.injections` по порядку отправки, до 5 с): выброшенное
+  правилом или не дошедшее до конца соединения — отказ, а не `sent: true`.
   В SSE настоящего сервера писать нельзя: mitmproxy не даёт вставить данные в открытый потоковый ответ; SSE-поток из правила `sse`
   (`streamhost.py`, `StreamHost`) — см. ниже. `wait_for_event` слушает `FlowStore`
   (`add_event_listener`; `(seq, None)` — поток закончился). Правила на событиях — пункт «События (1.0)» ниже.
@@ -118,14 +122,16 @@
   концом. Ведущие строки-комментарии незаконченного блока (пинги без пустой строки) отдаются сразу. Освобождение `EventStreams` — по `EVENTS_MARK` в `response`, `error` и `websocket_end`. `Recorder._open_event_stream`
   ставит `SseTap` после редактора — в истории изменённые события. WebSocket — `Rewriter.websocket_message` (раньше
   `Recorder`) меняет `message.text` или зовёт `drop()`, отправленное `send_event` не трогает (после обрыва
-  `WebSocketInjector` отказывает, а успевшее в окно до отказа отбрасывается). Обрыв: убить поток в пути
+  `WebSocketInjector` отказывает, а успевшее в окно до отказа отбрасывается и `send_event` отвечает отказом). Обрыв: убить поток в пути
   mitmproxy не умеет (`flow.kill` смотрится только между хуками), поэтому закрывается `writer` клиентского соединения
   из `SpeedLimits` (обёртка есть у каждого TCP-клиента): `before` — `call_soon`, `after` —
   `PacedWriter.close_after_write`, закрытие после следующей записи (у исходящего сообщения WebSocket запись идёт
   серверу, поэтому `after` по нему — тоже `call_soon`). Между хуком WebSocket и записью сообщения mitmproxy
   отдаёт управление циклу событий: `call_soon` закрывал раньше доставки. Запасное закрытие — через 1 с. Хост из `host`
-  правила с `close` переводится на HTTP/1.1 (`RuleSet.needs_http1`, общий с правилами скорости). Пометку об обрыве
-  `Recorder` пишет событием `note` (`take_notes`); строка `rules #seq` журнала несёт `changed` и `closed`.
+  правила с `close` переводится на HTTP/1.1 (`RuleSet.needs_http1`, общий с правилами скорости; `direction: outgoing` — нет,
+  WebSocket через mitmproxy и так HTTP/1.1). `history_matches` считает только потоки, которые правило правит (`_editable_sse`). Пометку об обрыве
+  `Recorder` пишет событием `note` с направлением обрыва (`take_notes` — пары направление, текст); номер в `closed` — счёт событий с
+  данными этого направления, не `n` истории (текст это говорит); строка `rules #seq` журнала несёт `changed` и `closed`.
 - Правила подмены: `rules.py` (`normalize`, `RuleSet` — `rules.json` атомарной записью, счётчики `hits` только в
   памяти; битый или не UTF-8 файл откладывается в `rules.json.<время>.broken`, нечитаемый — правила выключены и не
   меняются, чтобы не затереть файл) и аддон `rewriter.py` между `OwnPortsGuard` и `Recorder`. План правил строится в
@@ -242,7 +248,8 @@
 
 Проект — один из четырёх pet-проектов (AgentVpnGuard, DevMonitor, AgentGlow, AgentProxy), они устроены одинаково.
 
-- **Общие файлы** взяты у AgentGlow 2.x с заменой `namespace` (с AgentGlow 3.0 у него и AgentVpnGuard часть из них ушла
+- **Общие файлы** взяты у AgentGlow 2.x с заменой `namespace` (с 1.1 AgentProxy впереди соседей по `InstallTarget.IsUpdate`/
+  `AutostartByDefault` и автозапуску в `SetupForm` — перенести в остальные три проекта; с AgentGlow 3.0 у него и AgentVpnGuard часть из них ушла
   вперёд — `Installation`, `RunningApp`, `AboutForm`, `AppLog`, `UserDataPaths`; переносить по решению треда AgentProxy): `installer\setup\{SetupForm, Installation, InstallTarget,
   Payload, SetupOption, SetupField, InstallRequest, SetupLog}.cs`, `installer\common\RunningApp.cs`,
   `src\{AboutForm, CrashReportConsent, CrashUploader, CrashReport, AppLog, UserDataPaths, Autostart}.cs`,

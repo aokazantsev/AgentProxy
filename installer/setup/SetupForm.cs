@@ -95,7 +95,7 @@ namespace AgentProxy
                 if (option.Details != null) AddDetails(content, option);
             }
             autostartBox.Text = "Запускать при входе в Windows";
-            autostartBox.Checked = UninstallRegistration.InstalledLocation() == null || Autostart.IsEnabled();
+            autostartBox.Checked = InstallTarget.AutostartByDefault(UninstallRegistration.InstalledLocation(), Autostart.IsEnabled());
             autostartBox.AutoSize = true;
             autostartBox.Margin = new Padding(0, 4, 0, 0);
             content.Controls.Add(autostartBox);
