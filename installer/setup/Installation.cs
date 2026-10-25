@@ -30,7 +30,7 @@ namespace AgentProxy
 
             if (RunningApp.IsUninstalling()) throw new InvalidOperationException("Сейчас идёт удаление " + AppIdentity.Name + ". Дождись его окончания и повтори установку.");
             report(0, "Останавливаю запущенный " + AppIdentity.Name + "…");
-            if (!RunningApp.Stop()) throw new InvalidOperationException(AppIdentity.Name + " не закрывается. Закрой его в трее и повтори установку.");
+            if (!RunningApp.Stop()) throw new InvalidOperationException(AppIdentity.Name + " не закрывается. Закрой его в трее и повтори установку; если он запущен у другого пользователя Windows — закрой его там.");
 
             SetupProfile.BeforeExtract(request, report, notes);
             report(10, "Распаковка файлов…");

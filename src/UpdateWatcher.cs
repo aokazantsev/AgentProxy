@@ -29,7 +29,7 @@ namespace AgentProxy
             }
             catch (Exception error)
             {
-                AppLog.Append("auto update check failed: " + error.Message);
+                AppLog.Append("auto update check failed: " + UpdateChecker.DescribeForLog(error));
             }
         }
 
@@ -46,7 +46,7 @@ namespace AgentProxy
             }
             catch (Exception error)
             {
-                if (failureLogged != DateTime.Today) AppLog.Append("auto update check failed: " + error.Message);
+                if (failureLogged != DateTime.Today) AppLog.Append("auto update check failed: " + UpdateChecker.DescribeForLog(error));
                 failureLogged = DateTime.Today;
                 return;
             }

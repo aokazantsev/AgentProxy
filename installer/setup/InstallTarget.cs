@@ -21,9 +21,9 @@ namespace AgentProxy
             return installed != null && File.Exists(Path.Combine(installed, AppIdentity.ExecutableName));
         }
 
-        public static bool AutostartByDefault(string installed, bool enabled)
+        public static bool AutostartByDefault(string installed, Func<bool> enabled)
         {
-            return !IsUpdate(installed) || enabled;
+            return !IsUpdate(installed) || enabled();
         }
 
         public static string Validate(string directory)

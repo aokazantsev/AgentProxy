@@ -95,7 +95,7 @@ namespace AgentProxy
                 if (option.Details != null) AddDetails(content, option);
             }
             autostartBox.Text = "Запускать при входе в Windows";
-            autostartBox.Checked = InstallTarget.AutostartByDefault(UninstallRegistration.InstalledLocation(), Autostart.IsEnabled());
+            autostartBox.Checked = InstallTarget.AutostartByDefault(UninstallRegistration.InstalledLocation(), Autostart.IsEnabled);
             autostartBox.AutoSize = true;
             autostartBox.Margin = new Padding(0, 4, 0, 0);
             content.Controls.Add(autostartBox);
@@ -246,7 +246,7 @@ namespace AgentProxy
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (installing && e.CloseReason == CloseReason.UserClosing)
+            if (installing && (e.CloseReason == CloseReason.UserClosing || e.CloseReason == CloseReason.WindowsShutDown))
             {
                 e.Cancel = true;
                 status.Text = "Дождись окончания установки…";

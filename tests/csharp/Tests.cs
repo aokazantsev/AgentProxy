@@ -52,6 +52,12 @@ namespace AgentProxy.Tests
                 Run("uninstaller owns registration", OwnsRegistration);
                 Run("dead registration is not an update", DeadRegistrationIsNotUpdate);
                 Run("autostart default follows the update condition", AutostartDefaultFollowsTheUpdateCondition);
+                Run("read-only files are removed", ReadOnlyFilesAreRemoved);
+                Run("network errors are logged without addresses", NetworkErrorsAreLoggedWithoutAddresses);
+                Run("http errors are logged with code", HttpErrorsAreLoggedWithCode);
+                Run("stop closes every running copy", StopKillsEveryCopy);
+                Run("kill stops a process and tolerates an exited one", KillStopsAndToleratesExited);
+                Run("read-only cleanup skips a junction root", ReadOnlyCleanupOfAJunctionRoot);
                 Run("restart stops in the background and starts once", RestartStopsInTheBackgroundAndStartsOnce);
                 Run("exit during a restart waits for the engine to stop", ExitDuringARestartWaitsForTheEngineToStop);
                 Run("tray reads claude status from engine cli", EngineCliClaudeRoundTrip);
@@ -420,6 +426,142 @@ namespace AgentProxy.Tests
             Throws<InvalidDataException>(() => UpdateChecker.ParseLatest("{}"), "missing tag");
         }
 
+        private static void HttpErrorsAreLoggedWithCode()
+        {
+            int port = FreePort();
+            var listener = new System.Net.HttpListener();
+            listener.Prefixes.Add("http://127.0.0.1:" + port + "/");
+            listener.Start();
+            try
+            {
+                listener.BeginGetContext(result =>
+                {
+                    System.Net.HttpListenerContext context = listener.EndGetContext(result);
+                    context.Response.StatusCode = 503;
+                    context.Response.Close();
+                }, null);
+                Exception caught = null;
+                try
+                {
+                    var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create("http://127.0.0.1:" + port + "/releases/latest");
+                    request.Proxy = null;
+                    using (request.GetResponse())
+                    {
+                    }
+                }
+                catch (System.Net.WebException error)
+                {
+                    caught = error;
+                }
+                True(caught != null, "request failed");
+                Equal("network error ProtocolError, HTTP 503", UpdateChecker.DescribeForLog(caught), "logged");
+            }
+            finally
+            {
+                listener.Stop();
+            }
+        }
+
+        private static void StopKillsEveryCopy()
+        {
+            string name = "AgentProxyStopTest" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            string folder = Path.Combine(Path.GetTempPath(), name);
+            Directory.CreateDirectory(folder);
+            string exe = Path.Combine(folder, name + ".exe");
+            File.Copy(Path.Combine(Environment.SystemDirectory, "PING.EXE"), exe);
+            try
+            {
+                True(RunningApp.Stop(name), "nothing to stop");
+                for (int i = 0; i < 2; i++)
+                {
+                    var info = new System.Diagnostics.ProcessStartInfo(exe, "-n 60 127.0.0.1");
+                    info.UseShellExecute = false;
+                    info.CreateNoWindow = true;
+                    System.Diagnostics.Process.Start(info).Dispose();
+                }
+                Equal(2, System.Diagnostics.Process.GetProcessesByName(name).Length, "two copies running");
+                True(RunningApp.Stop(name), "stopped");
+                Equal(0, System.Diagnostics.Process.GetProcessesByName(name).Length, "no copies left");
+            }
+            finally
+            {
+                foreach (System.Diagnostics.Process left in System.Diagnostics.Process.GetProcessesByName(name))
+                {
+                    using (left)
+                    {
+                        left.Kill();
+                        left.WaitForExit(5000);
+                    }
+                }
+                Directory.Delete(folder, true);
+            }
+        }
+
+        private static void KillStopsAndToleratesExited()
+        {
+            MethodInfo kill = typeof(RunningApp).GetMethod("Kill", BindingFlags.Static | BindingFlags.NonPublic);
+            var info = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "PING.EXE"), "-n 60 127.0.0.1");
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            using (System.Diagnostics.Process child = System.Diagnostics.Process.Start(info))
+            {
+                try
+                {
+                    True((bool)kill.Invoke(null, new object[] { child }), "live process stopped");
+                    True(child.HasExited, "exited when Kill returns");
+                    True((bool)kill.Invoke(null, new object[] { child }), "already exited counts as stopped");
+                }
+                finally
+                {
+                    if (!child.HasExited) child.Kill();
+                }
+            }
+        }
+
+        private static void ReadOnlyCleanupOfAJunctionRoot()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "AgentProxyJunctionRoot-" + Guid.NewGuid().ToString("N"));
+            string outside = root + "-outside";
+            Directory.CreateDirectory(root);
+            Directory.CreateDirectory(outside);
+            string foreign = Path.Combine(outside, "keep.txt");
+            File.WriteAllText(foreign, "x");
+            File.SetAttributes(foreign, FileAttributes.ReadOnly);
+            string link = Path.Combine(root, "link");
+            var info = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/c mklink /J \"" + link + "\" \"" + outside + "\"");
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            using (System.Diagnostics.Process mklink = System.Diagnostics.Process.Start(info)) mklink.WaitForExit();
+            File.SetAttributes(link, File.GetAttributes(link) | FileAttributes.ReadOnly);
+            try
+            {
+                FolderRemoval.DeleteContentsExcept(root, AppIdentity.UninstallerName);
+                True(File.Exists(foreign), "foreign file kept");
+                True((File.GetAttributes(foreign) & FileAttributes.ReadOnly) != 0, "foreign file stays read-only");
+            }
+            finally
+            {
+                if (Directory.Exists(link))
+                {
+                    File.SetAttributes(link, FileAttributes.Directory | FileAttributes.ReparsePoint);
+                    Directory.Delete(link);
+                }
+                File.SetAttributes(foreign, FileAttributes.Normal);
+                Directory.Delete(outside, true);
+                Directory.Delete(root, true);
+            }
+        }
+
+        private static void NetworkErrorsAreLoggedWithoutAddresses()
+        {
+            var inner = new System.Net.Sockets.SocketException(10061);
+            var proxy = new System.Net.WebException("The proxy name could not be resolved: 'corp-proxy.example.com'", inner, System.Net.WebExceptionStatus.ProxyNameResolutionFailure, null);
+            string logged = UpdateChecker.DescribeForLog(proxy);
+            Equal("network error ProxyNameResolutionFailure", logged, "network error");
+            True(logged.IndexOf("corp-proxy", StringComparison.Ordinal) < 0, "proxy name hidden");
+            True(UpdateChecker.DescribeForLog(new InvalidDataException("no tag")).Contains("InvalidDataException: no tag"), "other errors keep type and text");
+        }
+
         private static void InstallerPathInOwnFolder()
         {
             Equal(@"C:\D\AgentProxy-0.2\AgentProxySetup.exe", UpdateChecker.InstallerPath(@"C:\D", "0.2"), "path");
@@ -610,6 +752,39 @@ namespace AgentProxy.Tests
             }
         }
 
+        private static void ReadOnlyFilesAreRemoved()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "AgentProxyReadOnly-" + Guid.NewGuid().ToString("N"));
+            string nested = Path.Combine(root, "data", "deep");
+            Directory.CreateDirectory(nested);
+            string nestedFile = Path.Combine(nested, "log.txt");
+            string topFile = Path.Combine(root, "settings.txt");
+            File.WriteAllText(nestedFile, "x");
+            File.WriteAllText(topFile, "x");
+            File.SetAttributes(nestedFile, FileAttributes.ReadOnly);
+            File.SetAttributes(topFile, FileAttributes.ReadOnly);
+            File.SetAttributes(nested, FileAttributes.Directory | FileAttributes.ReadOnly);
+            try
+            {
+                Equal<string>(null, FolderRemoval.DeleteContentsExcept(root, AppIdentity.UninstallerName), "contents");
+                Equal(0, Directory.GetFileSystemEntries(root).Length, "entries left");
+                Directory.CreateDirectory(nested);
+                File.WriteAllText(nestedFile, "x");
+                File.SetAttributes(nested, FileAttributes.Directory | FileAttributes.ReadOnly);
+                Equal<string>(null, FolderRemoval.Delete(root, null), "folder with a read-only subfolder");
+                Equal(false, Directory.Exists(root), "folder exists");
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                {
+                    foreach (string path in Directory.GetFiles(root, "*", SearchOption.AllDirectories)) File.SetAttributes(path, FileAttributes.Normal);
+                    foreach (string path in Directory.GetDirectories(root, "*", SearchOption.AllDirectories)) File.SetAttributes(path, FileAttributes.Directory);
+                    Directory.Delete(root, true);
+                }
+            }
+        }
+
         private static void InstallFolderRecognition()
         {
             string root = Path.Combine(Path.GetTempPath(), "AgentProxyFolder-" + Guid.NewGuid().ToString("N"));
@@ -732,11 +907,12 @@ namespace AgentProxy.Tests
         {
             string root = Path.Combine(Sandbox, "upd-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            Equal(true, InstallTarget.AutostartByDefault(null, false), "no registration is a new install");
-            Equal(true, InstallTarget.AutostartByDefault(root, false), "dead registration is a new install");
+            Equal(true, InstallTarget.AutostartByDefault(null, () => false), "no registration is a new install");
+            Equal(true, InstallTarget.AutostartByDefault(root, () => false), "dead registration is a new install");
+            Equal(true, InstallTarget.AutostartByDefault(root, () => { throw new InvalidOperationException("queried"); }), "new install does not query autostart");
             File.WriteAllText(Path.Combine(root, AppIdentity.ExecutableName), "x");
-            Equal(false, InstallTarget.AutostartByDefault(root, false), "update keeps autostart off");
-            Equal(true, InstallTarget.AutostartByDefault(root, true), "update keeps autostart on");
+            Equal(false, InstallTarget.AutostartByDefault(root, () => false), "update keeps autostart off");
+            Equal(true, InstallTarget.AutostartByDefault(root, () => true), "update keeps autostart on");
         }
 
         private static void ExitDuringARestartWaitsForTheEngineToStop()

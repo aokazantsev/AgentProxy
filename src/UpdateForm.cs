@@ -110,7 +110,7 @@ namespace AgentProxy
             }
             catch (Exception error)
             {
-                AppLog.Append("update check failed: " + error);
+                AppLog.Append("update check failed: " + UpdateChecker.DescribeForLog(error));
                 Report("Не удалось проверить обновление: " + error.Message
                     + Environment.NewLine + "Последняя версия всегда есть на " + AppIdentity.GitHubUrl + "/releases/latest", null);
             }

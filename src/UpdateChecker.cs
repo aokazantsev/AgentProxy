@@ -29,6 +29,14 @@ namespace AgentProxy
             return new Version(parsed.Major, parsed.Minor, Math.Max(0, parsed.Build), Math.Max(0, parsed.Revision));
         }
 
+        public static string DescribeForLog(Exception error)
+        {
+            var network = error as WebException;
+            if (network == null) return error.ToString();
+            var response = network.Response as HttpWebResponse;
+            return "network error " + network.Status + (response != null ? ", HTTP " + (int)response.StatusCode : "");
+        }
+
         public static UpdateRelease FetchLatest()
         {
             string url = ApiPrefix + AppIdentity.GitHubUrl.Substring(GitHubPrefix.Length) + "/releases/latest";
