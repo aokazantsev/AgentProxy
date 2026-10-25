@@ -248,8 +248,7 @@
 
 Проект — один из четырёх pet-проектов (AgentVpnGuard, DevMonitor, AgentGlow, AgentProxy), они устроены одинаково.
 
-- **Общие файлы** взяты у AgentGlow 2.x с заменой `namespace` (с 1.1 AgentProxy впереди соседей по `InstallTarget.IsUpdate`/
-  `AutostartByDefault` и автозапуску в `SetupForm` — перенести в остальные три проекта; с AgentGlow 3.0 у него и AgentVpnGuard часть из них ушла
+- **Общие файлы** взяты у AgentGlow 2.x с заменой `namespace` (с AgentGlow 3.0 у него и AgentVpnGuard часть из них ушла
   вперёд — `Installation`, `RunningApp`, `AboutForm`, `AppLog`, `UserDataPaths`; переносить по решению треда AgentProxy): `installer\setup\{SetupForm, Installation, InstallTarget,
   Payload, SetupOption, SetupField, InstallRequest, SetupLog}.cs`, `installer\common\RunningApp.cs`,
   `src\{AboutForm, CrashReportConsent, CrashUploader, CrashReport, AppLog, UserDataPaths, Autostart}.cs`,
@@ -270,7 +269,7 @@
 - **Осознанные отличия:** установка без прав (папка пользователя, `UninstallRegistration` пишет в HKCU, манифесты
   `asInvoker`); тихий режим установщика и деинсталлятора (`SilentSetup`, `CommandLine`); `Update{Checker,Form,Release}.cs` —
   общие с AgentVpnGuard, AgentGlow и DevMonitor (сверка sha256 по `digest` релиза, установщик в
-  `Загрузки\AgentProxy-<версия>\`, «Установить сейчас» через ShellExecute), своё — `AppIdentity.UpdateSetupArguments`
+  `Загрузки\AgentProxy-<версия>\`, «Установить сейчас» через ShellExecute), `InstallTarget.IsUpdate` — запись и exe в папке (у соседей — `InstallFolder.IsOurs`: метка или exe), `AutostartByDefault` и строка автозапуска в `SetupForm` — одинаковые у всех четырёх; своё — `AppIdentity.UpdateSetupArguments`
   (`/silent /notify`) и `UpdateKeeps`.
 - Папку установки установщик и деинсталлятор считают своей только по маркеру `AgentProxy.install`, который пишет
   установщик, или по совпадению с записью в «Приложениях» — голого `AgentProxy.exe` мало: в репозитории он есть после
