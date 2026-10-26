@@ -21,10 +21,20 @@ namespace AgentProxy
         public bool YieldToCharles;
         public bool Parsed;
         private Dictionary<string, object> raw = new Dictionary<string, object>();
+        private bool keepBrokenFile;
 
         public static EngineSettings Load()
         {
             return Parse(File.Exists(FilePath) ? ReadText(FilePath) : null);
+        }
+
+        public static EngineSettings LoadOver(EngineSettings shown)
+        {
+            EngineSettings current = Load();
+            if (current.Parsed || !shown.Parsed) return current;
+            EngineSettings copy = Parse(shown.ToJson());
+            copy.keepBrokenFile = true;
+            return copy;
         }
 
         public static EngineSettings Parse(string json)
@@ -70,10 +80,30 @@ namespace AgentProxy
             return null;
         }
 
-        public bool NeedsWrite(int proxyPort, int apiPort, bool verifyUpstream, bool yieldToCharles)
+        public bool TakeChanges(EngineSettings shown, int proxyPort, int apiPort, bool verifyUpstream, bool yieldToCharles)
         {
-            return proxyPort != ProxyPort || apiPort != ApiPort || verifyUpstream != VerifyUpstream || yieldToCharles != YieldToCharles
-                || !Parsed && File.Exists(FilePath);
+            bool write = !Parsed && File.Exists(FilePath);
+            if (proxyPort != shown.ProxyPort && proxyPort != ProxyPort)
+            {
+                ProxyPort = proxyPort;
+                write = true;
+            }
+            if (apiPort != shown.ApiPort && apiPort != ApiPort)
+            {
+                ApiPort = apiPort;
+                write = true;
+            }
+            if (verifyUpstream != shown.VerifyUpstream && verifyUpstream != VerifyUpstream)
+            {
+                VerifyUpstream = verifyUpstream;
+                write = true;
+            }
+            if (yieldToCharles != shown.YieldToCharles && yieldToCharles != YieldToCharles)
+            {
+                YieldToCharles = yieldToCharles;
+                write = true;
+            }
+            return write;
         }
 
         public string ToJson()
@@ -89,12 +119,13 @@ namespace AgentProxy
         public void Save()
         {
             UserDataPaths.Ensure();
-            if (!Parsed && File.Exists(FilePath)) File.Copy(FilePath, FilePath + ".broken", true);
+            if ((!Parsed || keepBrokenFile) && File.Exists(FilePath)) File.Copy(FilePath, FilePath + ".broken", true);
             string temporary = FilePath + ".tmp";
             File.WriteAllText(temporary, ToJson(), new UTF8Encoding(false));
             if (File.Exists(FilePath)) File.Replace(temporary, FilePath, null);
             else File.Move(temporary, FilePath);
             Parsed = true;
+            keepBrokenFile = false;
         }
 
         private static int Port(Dictionary<string, object> values, string key, int fallback)

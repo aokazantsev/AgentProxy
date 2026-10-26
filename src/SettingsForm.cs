@@ -19,7 +19,7 @@ namespace AgentProxy
         private readonly Action saved;
         private readonly Action optionsChanged;
         private readonly Func<bool> engineDown;
-        private readonly EngineSettings settings;
+        private readonly EngineSettings shown;
 
         public static void ShowSingle(Action saved, Action optionsChanged, Func<bool> engineDown)
         {
@@ -38,7 +38,7 @@ namespace AgentProxy
             this.saved = saved;
             this.optionsChanged = optionsChanged;
             this.engineDown = engineDown;
-            settings = EngineSettings.Load();
+            shown = EngineSettings.Load();
             Text = "Настройки " + AppIdentity.Name;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -52,10 +52,10 @@ namespace AgentProxy
 
             var layout = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, Padding = new Padding(16) };
             Controls.Add(layout);
-            proxyPort.Value = settings.ProxyPort;
-            apiPort.Value = settings.ApiPort;
-            verifyUpstream.Checked = settings.VerifyUpstream;
-            yieldToCharles.Checked = settings.YieldToCharles;
+            proxyPort.Value = shown.ProxyPort;
+            apiPort.Value = shown.ApiPort;
+            verifyUpstream.Checked = shown.VerifyUpstream;
+            yieldToCharles.Checked = shown.YieldToCharles;
             AddRow(layout, "Порт прокси", proxyPort);
             AddRow(layout, "Порт API и MCP", apiPort);
             layout.Controls.Add(verifyUpstream);
@@ -116,16 +116,19 @@ namespace AgentProxy
                 MessageBox.Show(this, problem, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            bool writeSettings = settings.NeedsWrite(proxy, api, verifyUpstream.Checked, yieldToCharles.Checked);
+            EngineSettings current = EngineSettings.LoadOver(shown);
+            bool writeSettings = current.TakeChanges(shown, proxy, api, verifyUpstream.Checked, yieldToCharles.Checked);
             if (writeSettings)
             {
-                settings.ProxyPort = proxy;
-                settings.ApiPort = api;
-                settings.VerifyUpstream = verifyUpstream.Checked;
-                settings.YieldToCharles = yieldToCharles.Checked;
+                problem = EngineSettings.Validate(current.ProxyPort, current.ApiPort);
+                if (problem != null)
+                {
+                    MessageBox.Show(this, problem + " Порты в " + EngineSettings.FilePath + " поменялись, пока было открыто окно.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
                 try
                 {
-                    settings.Save();
+                    current.Save();
                 }
                 catch (Exception error)
                 {
@@ -133,8 +136,8 @@ namespace AgentProxy
                     MessageBox.Show(this, "Не удалось сохранить настройки: " + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
-                AppLog.Append("settings saved: proxy " + proxy + ", api " + api + ", verify upstream " + settings.VerifyUpstream
-                    + ", yield to charles " + settings.YieldToCharles);
+                AppLog.Append("settings saved: proxy " + current.ProxyPort + ", api " + current.ApiPort + ", verify upstream " + current.VerifyUpstream
+                    + ", yield to charles " + current.YieldToCharles);
             }
             string optionsProblem = SaveOptions();
             if (optionsProblem != null)
@@ -145,7 +148,9 @@ namespace AgentProxy
             AppLog.Append("options: auto update " + AutoUpdateCheck.IsEnabled + ", usage statistics " + UsageConsent.IsGiven);
             Usage.Hit("settings.save");
             Close();
-            if (writeSettings || engineDown()) saved();
+            bool changedInWindow = proxy != shown.ProxyPort || api != shown.ApiPort || verifyUpstream.Checked != shown.VerifyUpstream
+                || yieldToCharles.Checked != shown.YieldToCharles;
+            if (writeSettings || changedInWindow || engineDown()) saved();
             optionsChanged();
         }
 

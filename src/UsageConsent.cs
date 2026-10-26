@@ -30,7 +30,11 @@ namespace AgentProxy
         {
             Directory.CreateDirectory(AppIdentity.DataDirectory);
             File.WriteAllText(FilePath, given ? Given : Refused);
-            if (!given && File.Exists(CountersPath)) File.Delete(CountersPath);
+            if (given) return;
+            foreach (string counters in new[] { CountersPath, CountersPath + ".tmp" })
+            {
+                if (File.Exists(counters)) File.Delete(counters);
+            }
         }
 
         private static string Read()

@@ -29,6 +29,7 @@ namespace AgentProxy
         private EngineState notifiedState = EngineState.Starting;
         private EngineState charlesState = EngineState.Starting;
         private Action balloonClick;
+        private bool statisticsNoticePending;
 
         public TrayApplication()
         {
@@ -49,15 +50,14 @@ namespace AgentProxy
             };
             tray.BalloonTipClicked += OnBalloonClicked;
             tray.Visible = true;
-            bool announceStatistics = UsageConsent.IsGiven && !File.Exists(StatisticsNoticePath);
             engine.Changed += (sender, e) => UpdateView();
             claude.Changed += (sender, e) => UpdateView();
             UpdateView();
+            statisticsNoticePending = UsageConsent.IsGiven && !File.Exists(StatisticsNoticePath);
             engine.Start();
             claude.Refresh();
             UpdateUsageState();
             Usage.Start();
-            if (announceStatistics) ShowStatisticsBalloon();
             UpdateWatcher.Start(version => ui.Post(state => ShowUpdateBalloon(version), null));
         }
 
@@ -129,6 +129,7 @@ namespace AgentProxy
             tray.Text = tooltip.Length > TooltipLimit ? tooltip.Substring(0, TooltipLimit) : tooltip;
             NotifyProblem(state);
             NotifyCharles(state);
+            NotifyStatistics(state);
             UpdateEngineUsageState(state, settings);
         }
 
@@ -165,6 +166,13 @@ namespace AgentProxy
                 Usage.Hit("update.notify_open");
                 UpdateForm.ShowSingle();
             });
+        }
+
+        private void NotifyStatistics(EngineState state)
+        {
+            if (!statisticsNoticePending || state == EngineState.Starting || state == EngineState.Stopped) return;
+            statisticsNoticePending = false;
+            if (UsageConsent.IsGiven) ShowStatisticsBalloon();
         }
 
         private void ShowStatisticsBalloon()

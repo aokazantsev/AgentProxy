@@ -78,11 +78,23 @@ namespace AgentProxy.Tests
                 Run("usage re-enabled starts from scratch", UsageConsentReenabled);
                 Run("usage state change unmarks today", UsageStateUnmarksToday);
                 Run("usage send without consent keeps nothing", UsageSendWithoutConsent);
+                Run("usage send marks answered days", UsageSendMarksAnsweredDays);
+                Run("usage refusal during a send stops the rest", UsageRefusalDuringSend);
+                Run("usage day changes at midnight", UsageMidnight);
+                Run("usage counters written through a temporary file", UsageTemporaryFile);
+                Run("usage consent on keeps counters", UsageConsentOnKeepsCounters);
+                Run("usage stale temporary file", UsageStaleTemporaryFile);
+                Run("usage file held without delete share", UsageHeldFile);
+                Run("usage consent file off during send", UsageConsentFileOffDuringSend);
+                Run("settings manual yield kept", SettingsManualYieldKept);
+                Run("settings unchanged field already in file", SettingsAlreadyInFile);
+                Run("setup consent write failure", SetupConsentWriteFailure);
+                Run("usage answer after a hit during send", UsageHitDuringSend);
                 Run("update check stamp and due time", UpdateCheckDue);
                 Run("update watcher keeps switch and interval", UpdateWatcherSkips);
                 Run("tool call usage reaches counters", ToolCallUsageApply);
                 Run("auto update check switch", AutoUpdateCheckSwitch);
-                Run("settings written only when changed or broken", SettingsNeedsWrite);
+                Run("settings take only fields changed in the window", SettingsTakeChanges);
                 Run("broken settings kept aside on save", SettingsBrokenKeptOnSave);
                 Run("silent setup usage statistics option", SilentUsageStatistics);
                 Run("setup log header once per run", SetupLogHeaderOncePerRun);
@@ -120,6 +132,7 @@ namespace AgentProxy.Tests
             Redirect(typeof(EngineRuntimeInfo), "FilePath", "engine-runtime.json");
             Redirect(typeof(SetupLog), "FilePath", "setup.log");
             Redirect(typeof(SetupLog), "PreviousFilePath", "setup.old.log");
+            SetStaticField(typeof(Usage), "Endpoint", "http://127.0.0.1:9/usage");
         }
 
         private static void Redirect(Type type, string field, string name)
@@ -1455,6 +1468,20 @@ namespace AgentProxy.Tests
             Equal(false, (bool)StaticField(typeof(Usage), "loaded"), "counters to be read again");
             True(!File.Exists(SandboxFile("usage-days.txt")), "counters removed");
             Equal("off", File.ReadAllText(SandboxFile("usage-statistics.txt")), "refusal saved");
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            File.SetAttributes(SandboxFile("usage-days.txt"), FileAttributes.ReadOnly);
+            try
+            {
+                Throws<UnauthorizedAccessException>(() => Usage.SetConsent(false), "counters not removed");
+                Equal(0, UsageDays().Count, "days forgotten even when the counters stay on disk");
+                Equal(false, UsageConsent.IsGiven, "refusal saved before the failure");
+            }
+            finally
+            {
+                File.SetAttributes(SandboxFile("usage-days.txt"), FileAttributes.Normal);
+            }
         }
 
         private static void UsageSaveAfterRefusal()
@@ -1505,10 +1532,297 @@ namespace AgentProxy.Tests
         {
             ResetUsage();
             UsageDays()[Today()] = new UsageDay { Version = AppIdentity.Version };
-            CallStatic(typeof(Usage), "SendPending");
+            List<string> bodies = ServeUsage(new[] { 200 }, null, () => CallStatic(typeof(Usage), "SendPending"));
+            Equal(0, bodies.Count, "nothing posted");
             Equal(0, UsageDays().Count, "days forgotten");
             True(!File.Exists(SandboxFile("usage-days.txt")), "no counters file");
             True(!File.Exists(SandboxFile("usage-id.txt")), "no install id");
+        }
+
+        private static void UsageSendMarksAnsweredDays()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            File.WriteAllLines(SandboxFile("usage-days.txt"), new[] { DaysAgo(1) + "\t0\tmenu.about=2\t0.10", DaysAgo(2) + "\t1\tmenu.about=1\t0.10" });
+            Usage.Hit("menu.exit");
+            Usage.SetState("rules", 2);
+            List<string> bodies = ServeUsage(new[] { 200 }, null, () => CallStatic(typeof(Usage), "SendPending"));
+            Equal(2, bodies.Count, "unsent days posted: " + string.Join(" | ", bodies.ToArray()));
+            True(bodies[0].Contains("\"day\":\"" + DaysAgo(1) + "\"") && bodies[0].Contains("\"state\":{}"), "past day without state: " + bodies[0]);
+            True(bodies[1].Contains("\"day\":\"" + Today() + "\"") && bodies[1].Contains("\"rules\":\"2\""), "today with state: " + bodies[1]);
+            foreach (string line in DaysLines()) True(line.Contains("\t1\t"), "marked: " + line);
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.exit");
+            bodies = ServeUsage(new[] { 503 }, null, () => CallStatic(typeof(Usage), "SendPending"));
+            Equal(1, bodies.Count, "posted once");
+            True(DaysLines()[0].Contains("\t0\t"), "retry answer leaves the day unsent");
+        }
+
+        private static void UsageRefusalDuringSend()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            File.WriteAllLines(SandboxFile("usage-days.txt"), new[] { DaysAgo(1) + "\t0\tmenu.about=2\t0.10" });
+            Usage.Hit("menu.exit");
+            List<string> bodies = ServeUsage(new[] { 200 }, index => Usage.SetConsent(false), () => CallStatic(typeof(Usage), "SendPending"));
+            Equal(1, bodies.Count, "second day not posted after refusal");
+            True(!File.Exists(SandboxFile("usage-days.txt")), "no counters written back");
+            ResetUsage();
+            UsageConsent.Set(true);
+            File.WriteAllLines(SandboxFile("usage-days.txt"), new[] { DaysAgo(1) + "\t0\tmenu.about=2\t0.10" });
+            Usage.Hit("menu.exit");
+            bodies = ServeUsage(new[] { 200 }, index =>
+            {
+                Usage.SetConsent(false);
+                Usage.SetConsent(true);
+                Usage.Hit("menu.about");
+            }, () => CallStatic(typeof(Usage), "SendPending"));
+            Equal(1, bodies.Count, "packets of forgotten counters not posted after re-enabling");
+            Equal(Today() + "\t0\tmenu.about=1\t" + AppIdentity.Version, string.Join("|", DaysLines()), "new counters not marked by the old send");
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.exit");
+            bodies = ServeUsage(new[] { 200 }, index =>
+            {
+                Usage.SetConsent(false);
+                Usage.SetConsent(true);
+                Usage.Hit("menu.about");
+            }, () => CallStatic(typeof(Usage), "SendPending"));
+            Equal(1, bodies.Count, "today posted once");
+            Equal(Today() + "\t0\tmenu.about=1\t" + AppIdentity.Version, string.Join("|", DaysLines()), "same revision of new counters not marked by the old answer");
+        }
+
+        private static void UsageMidnight()
+        {
+            object clock = StaticField(typeof(Usage), "clock");
+            DateTime evening = DateTime.Today.AddDays(-1).AddHours(23).AddMinutes(59);
+            try
+            {
+                ResetUsage();
+                UsageConsent.Set(true);
+                SetStaticField(typeof(Usage), "clock", (Func<DateTime>)(() => evening));
+                Usage.Hit("menu.about");
+                Usage.SetState("rules", 2);
+                SetStaticField(typeof(Usage), "clock", (Func<DateTime>)(() => evening.AddMinutes(2)));
+                Usage.Hit("menu.exit");
+                Equal(DaysAgo(1) + "\t0\tmenu.about=1\t" + AppIdentity.Version + "|" + Today() + "\t0\tmenu.exit=1\t" + AppIdentity.Version,
+                    string.Join("|", DaysLines()), "each day counted on its own");
+                List<string> bodies = ServeUsage(new[] { 200 }, null, () => CallStatic(typeof(Usage), "SendPending"));
+                Equal(2, bodies.Count, "both days posted");
+                True(bodies[0].Contains("\"day\":\"" + DaysAgo(1) + "\"") && bodies[0].Contains("\"state\":{}"), "yesterday without state: " + bodies[0]);
+                True(bodies[1].Contains("\"day\":\"" + Today() + "\"") && bodies[1].Contains("\"rules\":\"2\""), "state goes with the new day: " + bodies[1]);
+                SetStaticField(typeof(Usage), "clock", (Func<DateTime>)(() => evening.AddDays(8)));
+                Usage.Hit("menu.about");
+                Equal(1, DaysLines().Length, "days older than a week dropped by the clock: " + string.Join("|", DaysLines()));
+            }
+            finally
+            {
+                SetStaticField(typeof(Usage), "clock", clock);
+            }
+        }
+
+        private static void UsageConsentOnKeepsCounters()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            UsageConsent.Set(true);
+            Equal(Today() + "\t0\tmenu.about=1\t" + AppIdentity.Version, string.Join("|", DaysLines()), "repeated consent keeps unsent counters");
+            Usage.SetConsent(true);
+            Usage.Hit("menu.about");
+            Equal(Today() + "\t0\tmenu.about=2\t" + AppIdentity.Version, string.Join("|", DaysLines()), "consent from settings keeps counters");
+        }
+
+        private static void UsageStaleTemporaryFile()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            File.WriteAllText(SandboxFile("usage-days.txt.tmp"), "left by a killed process");
+            Usage.Hit("menu.about");
+            True(!File.Exists(SandboxFile("usage-days.txt.tmp")), "temporary file of a killed process taken by the next save");
+            Equal(Today() + "\t0\tmenu.about=2\t" + AppIdentity.Version, string.Join("|", DaysLines()), "stale temporary file not read");
+        }
+
+        private static void UsageHeldFile()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            using (new FileStream(SandboxFile("usage-days.txt"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                Usage.Hit("menu.about");
+                Equal(Today() + "\t0\tmenu.about=1\t" + AppIdentity.Version, string.Join("|", DaysLines()), "file not replaced while it cannot be swapped");
+            }
+            True(File.ReadAllText(AppLog.FilePath).Contains("usage statistics: counters not saved"), "failure logged");
+            Usage.Hit("menu.about");
+            Equal(Today() + "\t0\tmenu.about=3\t" + AppIdentity.Version, string.Join("|", DaysLines()), "counted in memory and written on the next save");
+            True(!File.Exists(SandboxFile("usage-days.txt.tmp")), "no temporary file left");
+        }
+
+        private static void UsageConsentFileOffDuringSend()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            File.WriteAllLines(SandboxFile("usage-days.txt"), new[] { DaysAgo(1) + "\t0\tmenu.about=2\t0.10" });
+            Usage.Hit("menu.exit");
+            List<string> bodies = ServeUsage(new[] { 200 }, index => File.WriteAllText(SandboxFile("usage-statistics.txt"), "off"), () => CallStatic(typeof(Usage), "SendPending"));
+            Equal(1, bodies.Count, "refusal written to the file stops the rest");
+        }
+
+        private static void UsageHitDuringSend()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.exit");
+            List<string> bodies = ServeUsage(new[] { 200 }, index => Usage.Hit("menu.about"), () => CallStatic(typeof(Usage), "SendPending"));
+            Equal(1, bodies.Count, "posted once");
+            Equal(Today() + "\t0\tmenu.exit=1,menu.about=1\t" + AppIdentity.Version, string.Join("|", DaysLines()), "event counted during the send keeps the day unsent");
+        }
+
+        private static void SettingsManualYieldKept()
+        {
+            File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9000, \"api_port\": 9001, \"verify_upstream\": false}");
+            EngineSettings shown = EngineSettings.Load();
+            File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9000, \"api_port\": 9001, \"verify_upstream\": false, \"yield_to_charles\": true}");
+            Equal(false, EngineSettings.Load().TakeChanges(shown, 9000, 9001, false, false), "manual yield edit kept when the window changed nothing");
+            EngineSettings current = EngineSettings.Load();
+            Equal(true, current.TakeChanges(shown, 9002, 9001, false, false), "proxy changed over a manual yield edit");
+            Equal(true, current.YieldToCharles, "manual yield to charles kept");
+            File.Delete(EngineSettings.FilePath);
+        }
+
+        private static void SettingsAlreadyInFile()
+        {
+            File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9000, \"api_port\": 9001, \"verify_upstream\": false}");
+            EngineSettings shown = EngineSettings.Load();
+            File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9000, \"api_port\": 9003, \"verify_upstream\": true, \"yield_to_charles\": true}");
+            Equal(false, EngineSettings.Load().TakeChanges(shown, 9000, 9003, true, true), "window changes already in the file need no write");
+            File.Delete(EngineSettings.FilePath);
+        }
+
+        private static void SetupConsentWriteFailure()
+        {
+            ResetUsage();
+            string target = Path.Combine(Sandbox, "setup-target");
+            Directory.CreateDirectory(target);
+            string consent = SandboxFile("usage-statistics.txt");
+            File.WriteAllText(consent, "on");
+            File.SetAttributes(consent, FileAttributes.ReadOnly);
+            try
+            {
+                var request = new InstallRequest { TargetDirectory = target };
+                string message = null;
+                try
+                {
+                    SetupProfile.BeforeExtract(request, (step, text) => { }, new List<string>());
+                }
+                catch (InvalidOperationException error)
+                {
+                    message = error.Message;
+                }
+                True(message != null && message.Contains("статистике использования") && message.Contains(AppIdentity.DataDirectory), "setup stops with the folder and reason: " + message);
+                Equal("on", File.ReadAllText(consent), "consent file untouched");
+            }
+            finally
+            {
+                File.SetAttributes(consent, FileAttributes.Normal);
+                Directory.Delete(target, true);
+            }
+        }
+
+        private static void UsageTemporaryFile()
+        {
+            ResetUsage();
+            UsageConsent.Set(true);
+            Usage.Hit("menu.about");
+            Usage.Hit("menu.about");
+            True(!File.Exists(SandboxFile("usage-days.txt.tmp")), "no temporary file left");
+            Equal(Today() + "\t0\tmenu.about=2\t" + AppIdentity.Version, string.Join("|", DaysLines()), "replaced in place");
+            File.WriteAllText(SandboxFile("usage-days.txt.tmp"), "left by a killed process");
+            UsageConsent.Set(false);
+            True(!File.Exists(SandboxFile("usage-days.txt.tmp")), "refusal removes the temporary file");
+        }
+
+        private static List<string> ServeUsage(int[] statuses, Action<int> received, Action send)
+        {
+            var bodies = new List<string>();
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            object endpoint = StaticField(typeof(Usage), "Endpoint");
+            SetStaticField(typeof(Usage), "Endpoint", "http://127.0.0.1:" + ((System.Net.IPEndPoint)listener.LocalEndpoint).Port + "/usage");
+            var server = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    for (int index = 0; ; index++)
+                    {
+                        using (System.Net.Sockets.TcpClient client = listener.AcceptTcpClient())
+                        {
+                            System.Net.Sockets.NetworkStream stream = client.GetStream();
+                            string body = ReadRequestBody(stream);
+                            lock (bodies) bodies.Add(body);
+                            if (received != null) received(index);
+                            byte[] answer = System.Text.Encoding.ASCII.GetBytes("HTTP/1.1 " + statuses[Math.Min(index, statuses.Length - 1)]
+                                + " X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            stream.Write(answer, 0, answer.Length);
+                        }
+                    }
+                }
+                catch (System.Net.Sockets.SocketException)
+                {
+                }
+                catch (IOException)
+                {
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            });
+            server.IsBackground = true;
+            server.Start();
+            try
+            {
+                send();
+            }
+            finally
+            {
+                listener.Stop();
+                server.Join(5000);
+                SetStaticField(typeof(Usage), "Endpoint", endpoint);
+            }
+            lock (bodies) return new List<string>(bodies);
+        }
+
+        private static string ReadRequestBody(Stream stream)
+        {
+            var head = new List<byte>();
+            while (head.Count < 4 || head[head.Count - 4] != 13 || head[head.Count - 3] != 10 || head[head.Count - 2] != 13 || head[head.Count - 1] != 10)
+            {
+                int next = stream.ReadByte();
+                if (next < 0) throw new IOException("request ended early");
+                head.Add((byte)next);
+            }
+            string headers = System.Text.Encoding.ASCII.GetString(head.ToArray());
+            if (headers.IndexOf("Expect: 100-continue", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                byte[] proceed = System.Text.Encoding.ASCII.GetBytes("HTTP/1.1 100 Continue\r\n\r\n");
+                stream.Write(proceed, 0, proceed.Length);
+            }
+            Match length = Regex.Match(headers, @"Content-Length:\s*(\d+)", RegexOptions.IgnoreCase);
+            var body = new byte[length.Success ? int.Parse(length.Groups[1].Value, CultureInfo.InvariantCulture) : 0];
+            int read = 0;
+            while (read < body.Length)
+            {
+                int count = stream.Read(body, read, body.Length - read);
+                if (count <= 0) throw new IOException("body ended early");
+                read += count;
+            }
+            return System.Text.Encoding.UTF8.GetString(body);
         }
 
         private static void UpdateCheckDue()
@@ -1568,19 +1882,53 @@ namespace AgentProxy.Tests
             True(!File.Exists(flag), "flag file removed");
         }
 
-        private static void SettingsNeedsWrite()
+        private static void SettingsTakeChanges()
         {
             File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9000, \"api_port\": 9001, \"verify_upstream\": false}");
-            EngineSettings stored = EngineSettings.Load();
-            Equal(false, stored.NeedsWrite(9000, 9001, false, false), "same values");
-            Equal(true, stored.NeedsWrite(9002, 9001, false, false), "proxy port changed");
-            Equal(true, stored.NeedsWrite(9000, 9002, false, false), "api port changed");
-            Equal(true, stored.NeedsWrite(9000, 9001, true, false), "verify changed");
-            Equal(true, stored.NeedsWrite(9000, 9001, false, true), "yield to charles changed");
+            EngineSettings shown = EngineSettings.Load();
+            Equal(false, EngineSettings.Load().TakeChanges(shown, 9000, 9001, false, false), "same values");
+            Equal(true, EngineSettings.Load().TakeChanges(shown, 9002, 9001, false, false), "proxy port changed");
+            Equal(true, EngineSettings.Load().TakeChanges(shown, 9000, 9002, false, false), "api port changed");
+            Equal(true, EngineSettings.Load().TakeChanges(shown, 9000, 9001, true, false), "verify changed");
+            Equal(true, EngineSettings.Load().TakeChanges(shown, 9000, 9001, false, true), "yield to charles changed");
+            File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9000, \"api_port\": 9005, \"verify_upstream\": true, \"note\": \"manual\"}");
+            Equal(false, EngineSettings.Load().TakeChanges(shown, 9000, 9001, false, false), "manual edit kept when the window changed nothing");
+            EngineSettings current = EngineSettings.Load();
+            Equal(true, current.TakeChanges(shown, 9002, 9001, false, false), "window change over a manual edit");
+            Equal(9002, current.ProxyPort, "changed in the window");
+            Equal(9005, current.ApiPort, "manual api port kept");
+            Equal(true, current.VerifyUpstream, "manual verify kept");
+            current.Save();
+            EngineSettings saved = EngineSettings.Load();
+            Equal(9002, saved.ProxyPort, "saved proxy port");
+            Equal(9005, saved.ApiPort, "saved manual api port");
+            True(File.ReadAllText(EngineSettings.FilePath).Contains("\"note\":\"manual\""), "manual key kept");
+            File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9002, \"api_port\": 9001}");
+            Equal(false, EngineSettings.Load().TakeChanges(shown, 9002, 9001, false, false), "window change already in the file");
             File.WriteAllText(EngineSettings.FilePath, "{broken");
-            Equal(true, EngineSettings.Load().NeedsWrite(EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true, false), "broken file rewritten");
+            Equal(true, EngineSettings.Load().TakeChanges(EngineSettings.Load(), EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true, false), "broken file rewritten");
             File.Delete(EngineSettings.FilePath);
-            Equal(false, EngineSettings.Load().NeedsWrite(EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true, false), "no file, defaults");
+            Equal(false, EngineSettings.Load().TakeChanges(EngineSettings.Load(), EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true, false), "no file, defaults");
+            File.WriteAllText(EngineSettings.FilePath, "{\"proxy_port\": 9000, \"api_port\": 9001, \"verify_upstream\": false, \"adb_path\": \"C:\\\\adb.exe\"}");
+            shown = EngineSettings.Load();
+            File.WriteAllText(EngineSettings.FilePath, "{broken after the window opened");
+            current = EngineSettings.LoadOver(shown);
+            Equal(true, current.TakeChanges(shown, 9000, 9001, true, false), "window change over a file broken later");
+            Equal(9000, current.ProxyPort, "shown proxy port kept, not the default");
+            Equal(9001, current.ApiPort, "shown api port kept, not the default");
+            True(current.ToJson().Contains("adb_path"), "shown keys kept");
+            current.Save();
+            Equal("{broken after the window opened", File.ReadAllText(EngineSettings.FilePath + ".broken"), "file broken later kept aside");
+            Equal(9000, EngineSettings.Load().ProxyPort, "shown values written");
+            File.Delete(EngineSettings.FilePath + ".broken");
+            File.Delete(EngineSettings.FilePath);
+            current = EngineSettings.LoadOver(shown);
+            Equal(false, current.TakeChanges(shown, 9000, 9001, false, false), "file removed, window unchanged");
+            Equal(9000, current.ProxyPort, "removed file falls back to the shown values");
+            File.WriteAllText(EngineSettings.FilePath, "{broken");
+            EngineSettings brokenAtOpen = EngineSettings.Load();
+            Equal(true, EngineSettings.LoadOver(brokenAtOpen).TakeChanges(brokenAtOpen, EngineSettings.DefaultProxyPort, EngineSettings.DefaultApiPort, true, false), "broken at open stays rewritten");
+            File.Delete(EngineSettings.FilePath);
         }
 
         private static void SettingsBrokenKeptOnSave()

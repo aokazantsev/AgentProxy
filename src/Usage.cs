@@ -11,20 +11,22 @@ namespace AgentProxy
 {
     internal static class Usage
     {
-        private const string Endpoint = AppIdentity.SiteUrl + "usage";
         private const int FirstSendMs = 60 * 1000;
         private const int SendIntervalMs = 60 * 60 * 1000;
         private const int TimeoutMs = 10 * 1000;
         private const int KeepDays = 6;
         private const string DayFormat = "yyyy-MM-dd";
 
+        private static readonly string Endpoint = AppIdentity.SiteUrl + "usage";
         private static readonly string IdPath = Path.Combine(AppIdentity.DataDirectory, "usage-id.txt");
         private static readonly string DaysPath = Path.Combine(AppIdentity.DataDirectory, "usage-days.txt");
         private static readonly object Sync = new object();
         private static readonly Dictionary<string, UsageDay> Days = new Dictionary<string, UsageDay>();
         private static readonly Dictionary<string, string> State = new Dictionary<string, string>();
+        private static Func<DateTime> clock = () => DateTime.Now;
         private static Timer timer;
         private static bool loaded;
+        private static int generation;
         private static string lastReadFailure;
         private static string installId;
         private static string lastOutcome;
@@ -78,8 +80,14 @@ namespace AgentProxy
         {
             lock (Sync)
             {
-                UsageConsent.Set(given);
-                if (!given) Forget();
+                try
+                {
+                    UsageConsent.Set(given);
+                }
+                finally
+                {
+                    if (!given) Forget();
+                }
             }
         }
 
@@ -104,10 +112,12 @@ namespace AgentProxy
             }
             var packets = new List<KeyValuePair<string, string>>();
             var revisions = new Dictionary<string, int>();
+            int packedGeneration;
             lock (Sync)
             {
                 Load();
                 if (!loaded) return;
+                packedGeneration = generation;
                 string today = Today();
                 if (!Days.ContainsKey(today))
                 {
@@ -123,11 +133,11 @@ namespace AgentProxy
             }
             foreach (KeyValuePair<string, string> packet in packets)
             {
-                if (!UsageConsent.IsGiven) return;
+                if (!StillAllowed(packedGeneration)) return;
                 int status = Post(packet.Value);
                 Report(status == 200 ? "sent" : "answer " + status);
                 if (!IsFinalAnswer(status)) return;
-                MarkSent(packet.Key, revisions[packet.Key]);
+                MarkSent(packet.Key, revisions[packet.Key], packedGeneration);
             }
         }
 
@@ -136,12 +146,25 @@ namespace AgentProxy
             return status == 200 || status == 400 || status == 413;
         }
 
+        private static bool StillAllowed(int packedGeneration)
+        {
+            lock (Sync)
+            {
+                return packedGeneration == generation && UsageConsent.IsGiven;
+            }
+        }
+
         internal static void MarkSent(string dayKey, int revision)
+        {
+            MarkSent(dayKey, revision, generation);
+        }
+
+        private static void MarkSent(string dayKey, int revision, int packedGeneration)
         {
             lock (Sync)
             {
                 UsageDay day;
-                if (Days.TryGetValue(dayKey, out day) && day.Revision == revision)
+                if (packedGeneration == generation && Days.TryGetValue(dayKey, out day) && day.Revision == revision)
                 {
                     day.Sent = true;
                     Save();
@@ -155,6 +178,7 @@ namespace AgentProxy
             {
                 Days.Clear();
                 loaded = false;
+                generation++;
             }
         }
 
@@ -260,7 +284,7 @@ namespace AgentProxy
 
         private static string Today()
         {
-            return DateTime.Now.ToString(DayFormat, CultureInfo.InvariantCulture);
+            return clock().ToString(DayFormat, CultureInfo.InvariantCulture);
         }
 
         private static UsageDay DayEntry(string key)
@@ -375,7 +399,7 @@ namespace AgentProxy
         private static void Save()
         {
             if (!loaded || !UsageConsent.IsGiven) return;
-            DateTime oldest = DateTime.Today.AddDays(-KeepDays);
+            DateTime oldest = clock().Date.AddDays(-KeepDays);
             var stale = new List<string>();
             var lines = new List<string>();
             foreach (KeyValuePair<string, UsageDay> pair in Days)
@@ -394,7 +418,10 @@ namespace AgentProxy
             try
             {
                 Directory.CreateDirectory(AppIdentity.DataDirectory);
-                File.WriteAllLines(DaysPath, lines.ToArray(), new UTF8Encoding(false));
+                string temporary = DaysPath + ".tmp";
+                File.WriteAllLines(temporary, lines.ToArray(), new UTF8Encoding(false));
+                if (File.Exists(DaysPath)) File.Replace(temporary, DaysPath, null);
+                else File.Move(temporary, DaysPath);
             }
             catch (IOException error)
             {
