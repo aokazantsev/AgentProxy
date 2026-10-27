@@ -175,11 +175,14 @@ PREVIEW_CHARS = 300
 RULE_PROPERTIES = {
     "name": {"type": "string", "description": "Short human note, e.g. 'empty product list'"},
     "enabled": {"type": "boolean", "description": "Default true"},
-    "action": {"type": "string", "enum": ["respond", "rewrite", "drop", "delay", "sse", "events"],
+    "action": {"type": "string", "enum": ["respond", "rewrite", "drop", "delay", "cut", "sse", "events"],
                "description": "respond: answer from the proxy, the server is not contacted (map local, error "
                               "response); rewrite: change request headers on the way out and the response on "
                               "the way back, the request body stays; drop: abort the request without an answer "
-                              "(HTTP/2: stream reset); delay: only slow down (delay_ms, download_kbps, upload_kbps); sse: the proxy itself serves an "
+                              "(HTTP/2: stream reset); delay: only slow down (delay_ms, download_kbps, upload_kbps); cut: the server "
+                              "answers, and the proxy breaks the answer in the middle of its body (after_bytes or "
+                              "after_percent): HTTP/1.1 closes the connection, HTTP/2 resets the stream, the app sees "
+                              "a broken download; sse: the proxy itself serves an "
                               "open Server-Sent Events stream, the server is not contacted, and send_event writes "
                               "events into it; events: change the events of SSE and WebSocket streams the app opens "
                               "with a real server from now on (replace, event_data, close), the conditions pick the "
@@ -227,7 +230,11 @@ RULE_PROPERTIES = {
                                                "clients retry dropped requests (OkHttp: 1 to 3 requests per action "
                                                "under drop) and 408, and 503 with Retry-After: 0, so use respond with status 500/503 "
                                                "without Retry-After for exact "
-                                               "counts. events: counts streams as they open, so close with times=1 "
+                                               "counts. cut: counts the answers it breaks (HEAD and answers it skips keep "
+                                               "the rule), so times=1 breaks the first answer that reaches the point and "
+                                               "lets the retry (Range resume) through; that answer may be a probe, a side "
+                                               "Range or a request the app dropped itself, so check with list_flows "
+                                               "rule=<id> which request got cut_after_bytes. events: counts streams as they open, so close with times=1 "
                                                "acts on the first matching stream only and lets the reconnect "
                                                "through"},
     "status": {"type": "integer", "description": "200..599. respond: status code, default 200; rewrite: replace the "
@@ -250,6 +257,12 @@ RULE_PROPERTIES = {
     "response_headers": dict(HEADERS_SCHEMA, description="rewrite: set response headers, null removes one"),
     "response_body": {"type": "string", "description": "rewrite: replace the whole response body (the request "
                                                       "still reaches the server)"},
+    "after_bytes": {"type": "integer", "description": "cut: break the answer once this many bytes of its body "
+                                                   "went to the app, 1..10^12; bytes as the server sends them "
+                                                   "(compressed if it compresses)"},
+    "after_percent": {"type": "integer", "description": "cut: break the answer after this share of Content-Length, "
+                                                     "1..99; an answer without Content-Length is not cut (skipped), "
+                                                     "use after_bytes. For a 206 answer it is the share of the part"},
     "event_contains": {"type": "string", "description": "events: change only events whose data contains this text, "
                                                        "case-sensitive (as list_events shows the data: after the "
                                                        "changes of earlier rules, before this rule's)"},
@@ -526,6 +539,9 @@ class ProxyService:
                 hint += ("; connections the app opened before this rule stay HTTP/2, where close breaks the whole "
                          "connection: restart the app")
             hints.append(hint)
+        if rule["action"] == "cut" and rule["enabled"] and "times" not in rule:
+            hints.append("without times every retry and Range resume longer than the cut point is cut again: times=1 lets the "
+                         "retry through")
         if limits_speed(rule) and rule["enabled"]:
             if "host" in rule:
                 hints.append("connections the app opened before this rule stay HTTP/2 and are slowed as a whole: "
@@ -958,7 +974,8 @@ TOOLS = [
     {
         "name": "add_rule",
         "description": "Add a proxy rule (Charles map local and rewrite): answer requests from the proxy with a "
-                       "local file or text, return an error status, drop the connection, delay, change headers, "
+                       "local file or text, return an error status, drop the connection, break the answer in the "
+                       "middle of its body, delay, change headers, "
                        "status or body text. The condition uses host, path, method, url_regex (at least one). "
                        "Matching rules apply in list order, a new rule goes to the end; respond, drop and sse end "
                        "the chain. " + RULES_REFERENCE + " Returns the stored rule "

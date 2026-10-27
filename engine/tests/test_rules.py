@@ -254,10 +254,31 @@ def test_note_error_is_shown(tmp_path):
     ({"action": "respond", "path": "/", "body": "\ud800"}, "valid Unicode"),
     ({"action": "respond", "path": "/", "headers": {"X-A": "\udc80"}}, "valid Unicode"),
     ({"action": "respond", "url_regex": "a{4294967296}"}, "not a valid regular expression"),
+    ({"action": "cut", "path": "/"}, "exactly one of after_bytes, after_percent"),
+    ({"action": "cut", "path": "/", "after_bytes": 10, "after_percent": 50}, "exactly one of"),
+    ({"action": "cut", "path": "/", "after_bytes": 0}, "after_bytes must be between 1 and"),
+    ({"action": "cut", "path": "/", "after_percent": 100}, "after_percent must be between 1 and 99"),
+    ({"action": "delay", "path": "/", "delay_ms": 5, "after_bytes": 10}, "after_bytes is used only with action cut"),
 ])
 def test_normalize_rejects_rules_that_cannot_work(raw, message):
     with pytest.raises(RuleError, match=message):
         normalize(raw)
+
+
+def test_cut_rule_switches_between_bytes_and_percent(tmp_path):
+    rules = rule_set(tmp_path)
+    rule = rules.add({"action": "cut", "path": "/video", "after_bytes": "1000", "download_kbps": 500, "times": 1})
+    assert (rule["after_bytes"], rule["download_kbps"]) == (1000, 500)
+    rule = rules.update("r1", {"after_percent": 40})
+    assert rule["after_percent"] == 40 and "after_bytes" not in rule
+    rule = rules.update("r1", {"after_bytes": 7})
+    assert rule["after_bytes"] == 7 and "after_percent" not in rule
+    for _ in range(2):
+        assert rules.plan("cdn.example.com", "/video", "GET", "https://cdn.example.com/video")[0]["id"] == "r1"
+    assert by_id(rules, "r1")["hits"] == 0
+    assert rules.take("r1") and not rules.take("r1")
+    assert rules.plan("cdn.example.com", "/video", "GET", "https://cdn.example.com/video") == []
+    assert by_id(rules, "r1")["remaining"] == 0
 
 
 def test_not_utf8_file_is_set_aside_and_engine_starts(tmp_path):
@@ -761,3 +782,18 @@ def test_relative_body_file_in_the_file_is_refused(tmp_path):
         {"id": "r1", "action": "respond", "host": "a", "body_file": "rel.txt"}]}))
     rules = rule_set(tmp_path)
     assert rules.list() == [] and "absolute path" in rules.counts()["problem"]
+
+
+def test_take_counts_only_a_live_cut_rule_within_times(tmp_path):
+    rules = rule_set(tmp_path)
+    rules.add({"action": "cut", "path": "/video", "after_bytes": 10, "times": 2})
+    rules.add({"action": "cut", "path": "/video", "after_bytes": 10})
+    rules.add({"action": "delay", "path": "/video", "delay_ms": 5})
+    rules.add({"action": "cut", "path": "/other", "after_bytes": 10})
+    assert [rules.take("r1"), rules.take("r1"), rules.take("r1")] == [True, True, False]
+    assert all(rules.take("r2") for _ in range(5)) and by_id(rules, "r2")["hits"] == 5
+    assert not rules.take("r3") and by_id(rules, "r3")["hits"] == 0
+    rules.update("r2", {"enabled": False})
+    assert not rules.take("r2") and by_id(rules, "r2")["hits"] == 5
+    rules.delete("r4")
+    assert not rules.take("r4") and not rules.take("r99")

@@ -302,3 +302,9 @@ def test_events_rule_outcome_is_in_the_rules_line():
     text = flowlog._entry_text({"id": "r1", "action": "events", "changed": 2, "replaced": 3,
                                 "closed": "after incoming event 2"})
     assert text == "r1 events changed=2 replaced=3 closed=after incoming event 2"
+
+
+def test_describe_rule_names_the_cut_point():
+    assert flowlog.describe_rule({"action": "cut", "path": "/v", "after_bytes": 1000}) == "cut, after_bytes 1000"
+    assert flowlog.describe_rule({"action": "cut", "path": "/v", "after_percent": 40,
+                                  "download_kbps": 500}) == "cut, download_kbps 500, after_percent 40"

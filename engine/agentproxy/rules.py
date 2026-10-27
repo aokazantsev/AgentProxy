@@ -13,7 +13,7 @@ from .streamtap import NO_BODY_STATUSES
 log = logging.getLogger("agentproxy.rules")
 
 FILE_NAME = "rules.json"
-ACTIONS = ("respond", "rewrite", "drop", "delay", "sse", "events")
+ACTIONS = ("respond", "rewrite", "drop", "delay", "cut", "sse", "events")
 TERMINAL_ACTIONS = ("respond", "drop", "sse")
 MATCH_FIELDS = ("host", "path", "method", "url_regex")
 VIEW_FIELDS = ("id", "created", "hits", "remaining", "active", "last_applied", "last_error")
@@ -25,6 +25,7 @@ ACTION_FIELDS = {
     "rewrite": ("status", "request_headers", "response_headers", "response_body", "replace"),
     "drop": (),
     "delay": (),
+    "cut": ("after_bytes", "after_percent"),
     "sse": ("headers", "body"),
     "events": ("event_contains", "direction", "replace", "event_data", "close"),
 }
@@ -35,6 +36,7 @@ MAX_RULES = 200
 MAX_DELAY_MS = 300000
 MAX_KBPS = 1000000
 MAX_TIMES = 1000000
+MAX_CUT_BYTES = 10 ** 12
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_REPLACEMENTS = 100
 MAX_TEXT = 16 * 1024 * 1024
@@ -256,7 +258,19 @@ def normalize(raw, check_files=True):
         raise RuleError("action rewrite needs at least one of {0}".format(", ".join(REWRITE_CHANGES)))
     if action == "events":
         _event_fields(rule, values)
+    if action == "cut":
+        _cut_fields(rule, values)
     return rule
+
+
+def _cut_fields(rule, values):
+    given = [name for name in ACTION_FIELDS["cut"] if name in values]
+    if len(given) != 1:
+        raise RuleError("action cut needs exactly one of after_bytes, after_percent")
+    if "after_bytes" in values:
+        rule["after_bytes"] = _number("after_bytes", values["after_bytes"], 1, MAX_CUT_BYTES)
+    else:
+        rule["after_percent"] = _number("after_percent", values["after_percent"], 1, 99)
 
 
 def _event_fields(rule, values):
@@ -577,7 +591,8 @@ class RuleSet:
                 merged = {name: value for name, value in merged.items() if name in COMMON_FIELDS}
             if "enabled" in changes and changes["enabled"] is None:
                 raise RuleError("enabled must be true or false")
-            for one, other in (("body", "body_file"), ("body_file", "body")):
+            for one, other in (("body", "body_file"), ("body_file", "body"), ("after_bytes", "after_percent"),
+                               ("after_percent", "after_bytes")):
                 if changes.get(one) is not None and other not in changes:
                     merged.pop(other, None)
             merged.update(changes)
@@ -626,12 +641,25 @@ class RuleSet:
                 state = self._state.setdefault(rule["id"], {"hits": 0})
                 if "times" in rule and state["hits"] >= rule["times"]:
                     continue
-                state["hits"] += 1
-                state["last_applied"] = now
+                if rule["action"] != "cut":
+                    state["hits"] += 1
+                    state["last_applied"] = now
                 chosen.append(copy.deepcopy(rule))
                 if rule["action"] in TERMINAL_ACTIONS:
                     break
         return chosen
+
+    def take(self, rule_id):
+        with self._lock:
+            rule = next((rule for rule in self._rules if rule["id"] == rule_id), None)
+            if rule is None or not rule["enabled"] or rule["action"] != "cut":
+                return False
+            state = self._state.setdefault(rule_id, {"hits": 0})
+            if "times" in rule and state["hits"] >= rule["times"]:
+                return False
+            state["hits"] += 1
+            state["last_applied"] = time.time()
+            return True
 
     def plan_events(self, host, path, method, url, count=True, websocket=True):
         chosen = []

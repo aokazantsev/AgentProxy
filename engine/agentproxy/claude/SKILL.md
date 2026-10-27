@@ -60,7 +60,7 @@ MCP недоступен (сессия началась до установки)
 
 | Строка `engine.log` | Что значит |
 |---|---|
-| `rules #<seq> GET host -> 200: r1 respond; r2 rewrite replaced=3` | Правила запроса `<seq>` по порядку. `WARNING` — есть `error`, `skipped` или `not_found`; `-> no response` — `drop` или обрыв |
+| `rules #<seq> GET host -> 200: r1 respond; r2 rewrite replaced=3` | Правила запроса `<seq>` по порядку. `WARNING` — есть `error`, `skipped` или `not_found`; `-> no response` — `drop`; у `cut` — код, причина и `cut_after_bytes` |
 | `flow #<seq> GET host -> <код или no response> (причина)` | Ошибка запроса без правил, кто оборвал — в тексте причины. `Certificate verify failed` — у сервера неполная цепочка или внутренний ЦС; галка «Проверять сертификаты серверов» («Настройки…») снимает проверку для всех хостов: только с согласия, после задачи вернуть |
 | `rule r3 added`, `rule r3 updated …`, `rules deleted: …` | Менялись правила |
 | `<инструмент> refused: …` | Вызов отклонён |

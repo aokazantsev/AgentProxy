@@ -4,6 +4,7 @@ import time
 import uuid
 from collections import deque
 
+from .cutter import CUT_MARK
 from .guard import OWN_PORT_MARK
 from .rules import APPLIED_MARK, EVENTS_MARK, NO_REQUEST_STREAM_MARK, NO_RESPONSE_STREAM_MARK
 from .sse import MAX_EVENT_BYTES, SseTap
@@ -181,9 +182,15 @@ class Recorder:
             return
         if is_event_stream(flow.request, flow.response) and await self._open_event_stream(flow):
             return
+        headers = flow.response.headers
+        cutter = flow.metadata.get(CUT_MARK)
+        if cutter is not None:
+            tap = StreamTap(self.body_limit, headers.get("content-encoding"))
+            self.taps[flow.id] = tap
+            flow.response.stream = lambda chunk: tap(cutter(chunk))
+            return
         if callable(flow.response.stream):
             return
-        headers = flow.response.headers
         if should_stream(flow.request.method, flow.response.status_code, headers.get("content-type"),
                          headers.get("content-length"), self.body_limit):
             tap = StreamTap(self.body_limit, headers.get("content-encoding"))

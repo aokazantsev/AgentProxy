@@ -320,6 +320,7 @@ function rulesText(rules) {
     (rule.replaced !== undefined ? ", замен: " + rule.replaced : "") +
     (rule.changed !== undefined ? ", изменено событий: " + rule.changed : "") +
     (rule.closed ? ", поток оборван: " + rule.closed : "") +
+    (rule.cut_after_bytes !== undefined ? ", ответ оборван после байта " + rule.cut_after_bytes : "") +
     (rule.limited ? ", скорость ограничена: " + (rule.limited === "request" ? "запрос" : "соединение целиком") : "") +
     (rule.not_found ? ", не найдено: " + rule.not_found.join(" | ") : "")).join("\n");
 }

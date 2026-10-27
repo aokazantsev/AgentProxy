@@ -7,6 +7,7 @@ import re
 import time
 
 from .bodies import CHARSET, SLOW_CHARSETS, TEXT_CHARSETS
+from .cutter import CUT_MARK, NO_BODY, BodyCutter, cut_point
 from .eventrules import INCOMING, OUTGOING, EventChanger, EventStreams, SseEditor
 from .guard import OWN_PORT_MARK
 from .recorder import is_event_stream, is_websocket_handshake
@@ -489,6 +490,9 @@ class Rewriter:
         editor = flow.metadata.get(EDITOR_MARK)
         if editor is not None and flow.response is not None:
             editor.skip(BROKEN_BODY)
+        cutter = flow.metadata.get(CUT_MARK)
+        if cutter is not None:
+            cutter.broken()
         self.events.release(flow.id)
         if self.streams is not None:
             self.streams.release(flow.id)
@@ -621,6 +625,54 @@ class Rewriter:
         self._restore_request(flow)
         self._rewrite_response(flow)
         self._edit_event_stream(flow)
+        self._start_cut(flow)
+
+    def _start_cut(self, flow):
+        plan = flow.metadata.get(PLAN_MARK)
+        rules = [rule for rule in plan or [] if rule["action"] == "cut"]
+        if not rules:
+            return
+        length = None
+        if "content-length" in flow.response.headers and "transfer-encoding" not in flow.response.headers:
+            length = _declared_length(flow.response.headers)
+        refusal = self._cut_refusal(flow, plan, length)
+        chosen = None
+        for rule in rules:
+            point, reason = (None, refusal) if refusal else cut_point(rule, length)
+            if reason:
+                _entry(flow, rule)["skipped"] = reason
+            elif chosen is None or point < chosen[1]:
+                if chosen is not None:
+                    _entry(flow, chosen[0])["skipped"] = "not cut: rule {0} cuts earlier".format(rule["id"])
+                chosen = (rule, point)
+            else:
+                _entry(flow, rule)["skipped"] = "not cut: rule {0} cuts earlier".format(chosen[0]["id"])
+        if chosen is None:
+            return
+        response = flow.response
+        if length is None and "transfer-encoding" not in response.headers and flow.request.http_version == "HTTP/1.1":
+            response.headers["transfer-encoding"] = "chunked"
+            response.headers["connection"] = "close"
+            if response.http_version == "HTTP/1.0":
+                response.http_version = "HTTP/1.1"
+        cutter = BodyCutter(flow, chosen[0]["id"], chosen[1], self.rules.take)
+        flow.metadata[CUT_MARK] = cutter
+        response.stream = cutter
+
+    @staticmethod
+    def _cut_refusal(flow, plan, length):
+        response = flow.response
+        if plan[-1]["action"] in BUFFERING_ACTIONS:
+            return "not cut: the answer comes from rule {0}, not from the server".format(plan[-1]["id"])
+        if _has_no_body(flow.request.method, response.status_code) or length == 0:
+            return NO_BODY
+        if flow.metadata.get(EDITOR_MARK) is not None:
+            return "not cut: the body is changed by a rewrite rule and goes to the app whole"
+        if flow.metadata.get(EVENTS_MARK) is not None or is_event_stream(flow.request, response):
+            return "not cut: event stream; break it with action events and close"
+        if length is None and "transfer-encoding" not in response.headers and flow.request.http_version == "HTTP/1.0":
+            return "not cut: the response has no length and the client speaks HTTP/1.0, so closing is its normal end"
+        return None
 
     def _rewrite_response(self, flow):
         plan = flow.metadata.get(PLAN_MARK)
@@ -690,6 +742,9 @@ class Rewriter:
 
     async def response(self, flow):
         response = flow.response
+        cutter = flow.metadata.get(CUT_MARK)
+        if cutter is not None:
+            cutter.finish()
         if is_websocket_handshake(flow):
             self._start_events(flow)
             return

@@ -17,6 +17,7 @@ from . import settings as settings_module
 from .api import make_app
 from .charles import PAUSED_FOR, CharlesYield, charles_running
 from .claude import integration
+from .cutter import install as install_body_cutting
 from .flowlog import FlowLog
 from .guard import OwnPortsGuard
 from .eventrules import EventStreams
@@ -143,6 +144,7 @@ async def serve(current, data_dir, parent_pid):
     await streams.start()
     speeds = SpeedLimits()
     install_speed_limits(speeds)
+    install_body_cutting()
     events = EventStreams()
     master.addons.add(Rewriter(rules, streams, speeds, events))
     recorder = Recorder(store, current.max_body_bytes, FlowLog())

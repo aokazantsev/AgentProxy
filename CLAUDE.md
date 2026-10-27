@@ -132,6 +132,19 @@
   WebSocket через mitmproxy и так HTTP/1.1). `history_matches` считает только потоки, которые правило правит (`_editable_sse`). Пометку об обрыве
   `Recorder` пишет событием `note` с направлением обрыва (`take_notes` — пары направление, текст); номер в `closed` — счёт событий с
   данными этого направления, не `n` истории (текст это говорит); строка `rules #seq` журнала несёт `changed` и `closed`.
+- Обрыв тела (1.6): `cutter.py`, действие `cut` (`after_bytes` или `after_percent`), не завершает цепочку. `Rewriter._start_cut`
+  в конце `responseheaders` ставит `BodyCutter` в `response.stream` и `flow.metadata[CUT_MARK]` (из нескольких `cut` — самая
+  ранняя точка; отказы — `skipped`); ответ без длины клиенту HTTP/1.1 получает `Transfer-Encoding: chunked` и `Connection: close` (`flow.response` общий с `Http1Client`: без `close` соединение
+  с сервером «до закрытия» осталось бы в пуле, `max_conns` 5 на адрес; без `chunked` закрытие —
+  его штатный конец), клиенту HTTP/1.0 — отказ. `Recorder` ставит `StreamTap` после резака. `hits`/`times` у `cut` считает
+  `RuleSet.take` в момент обрыва, а не `plan` (HEAD и короткие ответы правило не тратят; исчерпанное, выключенное или
+  удалённое к этому моменту правило ответ не рвёт). Пустой кусок — не конец тела (пустой DATA HTTP/2): пометку «не
+  оборвано» ставит `BodyCutter.finish` в хуке `response`, а при обрыве раньше точки клиентом или сервером — `broken` в
+  хуке `error`. `install` один раз подменяет
+  `HttpStream.state_stream_response_body` mitmproxy: после куска, на котором сработал обрыв, — `RequestProtocolError` (CANCEL)
+  серверу и `handle_protocol_error(ResponseProtocolError)`, то есть mitmproxy сам ведёт себя как при сбое сервера: HTTP/1.1 —
+  `CloseConnection` клиента (`PacedWriter` закрывает после очереди, поэтому с `download_kbps` клиент получает ровно N байт),
+  HTTP/2 — `RST_STREAM` только этого потока. Сквозные тесты `test_cut_e2e.py` ловят поломку подмены при обновлении mitmproxy.
 - Правила подмены: `rules.py` (`normalize`, `RuleSet` — `rules.json` атомарной записью, счётчики `hits` только в
   памяти; битый или не UTF-8 файл откладывается в `rules.json.<время>.broken`, нечитаемый — правила выключены и не
   меняются, чтобы не затереть файл) и аддон `rewriter.py` между `OwnPortsGuard` и `Recorder`. План правил строится в

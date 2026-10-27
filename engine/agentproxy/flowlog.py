@@ -40,6 +40,8 @@ def _entry_text(entry):
         parts.append("not_found={0}".format(len(entry["not_found"])))
     if entry.get("limited"):
         parts.append("limited=" + entry["limited"])
+    if "cut_after_bytes" in entry:
+        parts.append("cut_after_bytes={0}".format(entry["cut_after_bytes"]))
     for name in ("closed", "error", "skipped"):
         if entry.get(name):
             parts.append("{0}={1}".format(name, clean(entry[name], REASON_CHARS)))
@@ -102,6 +104,9 @@ def describe_rule(rule):
             parts.append("{0} {1}".format(name, rule[name]))
     if "close" in rule:
         parts.append("close " + rule["close"])
+    for name in ("after_bytes", "after_percent"):
+        if name in rule:
+            parts.append("{0} {1}".format(name, rule[name]))
     if not rule.get("enabled", True):
         parts.append("disabled")
     return ", ".join(parts)

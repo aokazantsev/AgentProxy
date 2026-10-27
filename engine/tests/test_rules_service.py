@@ -611,3 +611,12 @@ def test_events_rule_names_why_matching_streams_do_not_count(service, store):
     assert answer["history_matches"] == 0
     assert "1 recorded SSE streams match this condition" in answer["hint"] and "Accept-Encoding: identity" in answer["hint"]
     assert "check host and path" not in answer["hint"]
+
+
+def test_cut_without_times_gets_a_retry_hint(service):
+    hint = "without times every retry and Range resume longer than the cut point is cut again"
+    assert hint in service.add_rule({"action": "cut", "path": "/video", "after_bytes": 1000})["hint"]
+    assert hint not in service.add_rule({"action": "cut", "path": "/video", "after_bytes": 1000,
+                                         "times": 1}).get("hint", "")
+    assert hint not in service.add_rule({"action": "cut", "path": "/video", "after_bytes": 1000,
+                                         "enabled": False}).get("hint", "")
