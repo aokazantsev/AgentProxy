@@ -27,7 +27,7 @@ MCP недоступен (сессия началась до установки)
 адрес с `&` — в двойных кавычках; тело `POST`/`PATCH` для `/api/rules` и `/api/events/send` — файлом в UTF-8 через
 `--data-binary "@rule.json"` (в Git Bash `-d` портит кириллицу, в PowerShell `-d` портит любой JSON). `curl -s http://127.0.0.1:{{API_PORT}}/api/status`, `"/api/flows?host=...&limit=20"`, `/api/flows/<id>` (`?raw=true` — как `raw` у `get_flow`), `/api/flows/wait?...` — как `wait_for_flow`,
 `DELETE /api/flows` — как `clear_flows`; `GET /api/connection` — как `check_connection`; потоки — `/api/events?flow=...` и `/api/events/wait` как `list_events` и `wait_for_event`, `POST /api/events/send` как `send_event`; правила —
-`GET`/`POST /api/rules` (`GET ?id=<id>` — как `list_rules` с `id`; тело `POST` — те же поля, что у `add_rule`), `DELETE /api/rules` — удалить **все**, `GET /api/log?source=engine&level=warning&lines=50` — как `read_log`,
+`GET`/`POST /api/rules` (`GET ?id=<id>` — как `list_rules` с `id`; тело `POST` — те же поля, что у `add_rule`), `DELETE /api/rules` — удалить **все** (`?device=<serial>` — правила устройства), `GET /api/log?source=engine&level=warning&lines=50` — как `read_log`,
 `PATCH`/`DELETE /api/rules/<id>` — одно. Схемы инструментов с описанием полей — метод MCP `tools/list`: в Git Bash
 `curl -s -X POST http://127.0.0.1:{{API_PORT}}/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`, в PowerShell
 `(Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://127.0.0.1:{{API_PORT}}/mcp -Body '{"jsonrpc":"2.0","id":1,"method":"tools/list"}').Content`.

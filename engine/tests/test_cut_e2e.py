@@ -274,8 +274,8 @@ def test_cutter_keeps_the_used_up_note_when_the_answer_breaks_later():
     assert [cutter(b"ab"), cutter(b"cde")] == [b"ab", b"cde"]
     cutter.broken()
     assert flow.metadata["agentproxy_rules"][0]["skipped"] == (
-        "not cut: when the answer passed byte 3, the rule was used up by other answers, disabled, deleted or changed "
-        "to another action")
+        "not cut: when the answer passed byte 3, the rule was used up by other answers, disabled, deleted, changed "
+        "to another action or moved to another device")
 
 
 def test_cutter_lets_the_body_through_when_the_rule_is_used_up():
@@ -333,8 +333,8 @@ def test_a_parallel_answer_passes_whole_when_the_other_one_used_up_the_rule(engi
     assert sorted(len(body) for response, body, broken in results) == [150000, len(VIDEO)]
     assert sorted(broken is None for response, body, broken in results) == [False, True]
     skipped = [flow["rules"][0].get("skipped") for flow in entries(engine, rule_id, 2)]
-    assert ("not cut: when the answer passed byte 150000, the rule was used up by other answers, disabled, deleted "
-            "or changed to another action") in skipped
+    assert ("not cut: when the answer passed byte 150000, the rule was used up by other answers, disabled, deleted, "
+            "changed to another action or moved to another device") in skipped
     assert rule_state(engine, rule_id)["hits"] == 1
 
 

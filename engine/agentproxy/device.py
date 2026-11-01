@@ -121,9 +121,11 @@ class DeviceControl:
                 target = self._assign(serial, port)
             else:
                 target = self._known_port(serial, port)
-            had_reverse = self._reverse_active(serial, port, target)
+            previous_target = self._reverse_target(serial, port)
+            had_reverse = previous_target is not None and previous_target == (
+                port if target is None and action == "disable" else target)
             if action == "enable":
-                self._enable(serial, port, target, address, had_reverse)
+                self._enable(serial, port, target, address, previous_target)
             elif action == "disable":
                 self._disable(serial, port)
             answer = self._state(serial, port, target, address)
@@ -134,7 +136,7 @@ class DeviceControl:
             answer["hint"] = self._hint(action, answer)
             if action != "status":
                 log.info("device proxy %s: proxy %s, reverse %s, pc port %s", action, self._proxy_kind(answer),
-                         "on" if answer["reverse_active"] else "off", target)
+                         "on" if answer["reverse_active"] else "off", target or port)
             return answer
 
     def release(self):
@@ -147,7 +149,7 @@ class DeviceControl:
                         continue
                     self._disable(serial, port)
                     released.append(serial)
-                    log.info("device proxy released: pc port %s", self._known_port(serial, port))
+                    log.info("device proxy released: pc port %s", self._known_port(serial, port) or port)
                 except DeviceError as error:
                     log.info("device release skipped: %s", error.kind)
             return released
@@ -164,7 +166,7 @@ class DeviceControl:
                     if not device_is_proxy_off(self._proxy_value(serial)):
                         continue
                     target = self._assign(serial, port)
-                    self._enable(serial, port, target, address, self._reverse_active(serial, port, target))
+                    self._enable(serial, port, target, address, self._reverse_target(serial, port))
                     restored.append(serial)
                     log.info("device proxy restored: pc port %s", target)
                 except DeviceError as error:
@@ -185,8 +187,7 @@ class DeviceControl:
             raise DeviceError(str(error), "device port: " + str(error))
 
     def _known_port(self, serial, port):
-        known = self.ports.port_of(serial) if self.ports is not None else None
-        return port if known is None else known
+        return port if self.ports is None else self.ports.port_of(serial)
 
     def _ready_serials(self):
         _, text = self._adb(None, "devices")
@@ -243,18 +244,27 @@ class DeviceControl:
         _, text = self._adb(serial, "shell", "settings", "get", "global", "http_proxy")
         return text.strip().splitlines()[-1] if text.strip() else ""
 
-    def _reverse_active(self, serial, port, target):
+    def _reverse_target(self, serial, port):
         _, text = self._adb(serial, "reverse", "--list")
-        pattern = re.compile(r"tcp:{0}\s+tcp:{1}\b".format(port, target))
-        return any(pattern.search(line) for line in text.splitlines())
+        pattern = re.compile(r"tcp:{0}\s+tcp:(\d+)\b".format(port))
+        for line in text.splitlines():
+            found = pattern.search(line)
+            if found:
+                return int(found.group(1))
+        return None
 
-    def _enable(self, serial, port, target, address, had_reverse):
+    def _reverse_active(self, serial, port, target):
+        return target is not None and self._reverse_target(serial, port) == target
+
+    def _enable(self, serial, port, target, address, previous_target):
         self._adb(serial, "reverse", "tcp:{0}".format(port), "tcp:{0}".format(target))
         try:
             self._adb(serial, "shell", "settings", "put", "global", "http_proxy", address)
         except DeviceError:
-            if not had_reverse:
+            if previous_target is None:
                 self._adb(serial, "reverse", "--remove", "tcp:{0}".format(port), check=False)
+            elif previous_target != target:
+                self._adb(serial, "reverse", "tcp:{0}".format(port), "tcp:{0}".format(previous_target), check=False)
             raise
 
     def _disable(self, serial, port):
@@ -296,6 +306,9 @@ class DeviceControl:
         if state["device_proxy"] and state["device_proxy"] != state["expected_proxy"]:
             return "the device uses another proxy ({0}): run device_proxy enable to switch it to AgentProxy".format(
                 state["device_proxy"])
+        if state["device_proxy"] and state["pc_port"] is None:
+            return ("the device has no port of its own on the PC yet (it was routed by an older AgentProxy or by "
+                    "hand): its traffic is not marked with the device; run device_proxy enable")
         if state["device_proxy"] and not state["reverse_active"]:
             return ("adb reverse does not lead to this device's port {0} on the PC (missing, or left by an older "
                     "AgentProxy on the shared port): its traffic is not marked with the device or does not arrive; "

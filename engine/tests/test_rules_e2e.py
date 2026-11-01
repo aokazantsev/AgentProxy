@@ -285,6 +285,22 @@ def test_delete_all_refuses_parameters(engine):
     assert answer["error"]["code"] == -32700
 
 
+def test_delete_all_with_device_deletes_only_the_rules_of_that_device(engine):
+    port = engine["api_port"]
+    add_rule(engine, action="drop", host="a.example", device="devA-1")
+    add_rule(engine, action="drop", host="b.example", device="devB.2")
+    add_rule(engine, action="drop", host="c.example")
+    add_rule(engine, action="drop", host="d.example", device="devA-1")
+    status, answer = api_call(port, "DELETE", "/api/rules?device=devA-1&id=r2")
+    assert status == 400 and "?device=<serial>" in answer["error"]
+    status, answer = api_call(port, "DELETE", "/api/rules?device=devA-1", {"device": "devA-1"})
+    assert status == 400
+    assert api_get(port, "/api/rules")[1]["counts"]["total"] == 4
+    status, answer = api_call(port, "DELETE", "/api/rules?device=devA-1")
+    assert status == 200 and answer["removed"] == ["r1", "r4"]
+    assert [rule["id"] for rule in api_get(port, "/api/rules")[1]["rules"]] == ["r2", "r3"]
+
+
 def test_https_drop_breaks_the_connection_when_the_host_is_unreachable(engine):
     rule_id = add_rule(engine, action="drop", host="localhost", path="/offline")
     cafile = os.path.join(engine["data_dir"], "certs", "mitmproxy-ca-cert.pem")

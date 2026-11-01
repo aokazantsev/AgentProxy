@@ -172,11 +172,13 @@ class RulesHandler(BaseHandler):
         await self.run_body_tool("add_rule")
 
     async def delete(self):
-        if self.request.query_arguments or self.request.body:
-            self.write_json({"error": "DELETE /api/rules deletes every rule and takes no parameters; delete one rule "
-                                      "with DELETE /api/rules/<id>"}, 400)
+        arguments = self.query_arguments()
+        if set(arguments) - {"device"} or self.request.body:
+            self.write_json({"error": "DELETE /api/rules deletes every rule, with ?device=<serial> the rules of that "
+                                      "device, and takes no other parameters; delete one rule with "
+                                      "DELETE /api/rules/<id>"}, 400)
             return
-        await self.run_tool("delete_rule", {"all": True})
+        await self.run_tool("delete_rule", dict(arguments, all=True))
 
 
 class MonitorPinsHandler(BaseHandler):

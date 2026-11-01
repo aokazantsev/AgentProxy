@@ -13,7 +13,7 @@ from .device import DeviceControl, DeviceError
 from .deviceports import valid_serial
 from .flowlog import clean, describe_rule
 from .injector import InjectError
-from .rules import VIEW_FIELDS, RuleError, RuleNotFound, closes_streams, limits_speed, matches
+from .rules import VIEW_FIELDS, RuleError, RuleNotFound, closes_streams, limits_speed, matches, moved_away
 from .speed import rule_limits
 from .store import EventFilter, FlowFilter
 from .streamhost import StreamRefused, build_frame
@@ -105,6 +105,9 @@ def _check_text(name, value):
 
 
 def _device(arguments, name="device"):
+    if name == "device" and arguments.get(name) == "":
+        raise ToolError("device is empty: pass the adb serial of one device, or leave device out for every device "
+                        "and this PC")
     value = _str(arguments, name)
     if value is not None and not valid_serial(value):
         raise ToolError("{0} is the adb serial of a device (device_proxy status, adb devices)".format(name))
@@ -450,7 +453,7 @@ class ProxyService:
             raise NotFound(FLOW_NOT_FOUND.format(value))
         if device is not None and summary.get("device") != device:
             raise NotFound("flow {0} is not a flow of device {1}: list_flows with device={1} shows its "
-                           "flows".format(value, device))
+                           "flows".format(value, device), "flow of another device")
         if summary.get("kind", "http") == "http":
             raise ToolError("flow {0} is a plain request, it has no events: only sse and websocket flows do; list_flows with "
                             "kind sse or websocket finds them".format(value))
@@ -624,7 +627,7 @@ class ProxyService:
             raise NotFound(str(error))
         except RuleError as error:
             raise ToolError(str(error))
-        moved = before != rule.get("device")
+        moved = moved_away(rule, before)
         log.info("rule %s updated (%s): %s", rule_id, ", ".join(sorted(changes) + (["reset_hits"] if reset_hits else [])),
                  describe_rule(rule))
         if self.streams is not None and (not rule["enabled"] or rule["action"] != "sse" or moved):

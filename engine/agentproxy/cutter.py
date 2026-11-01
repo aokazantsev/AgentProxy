@@ -7,8 +7,8 @@ CUT_MESSAGE = "AgentProxy rule {0} cut the response after {1} bytes of body"
 NOT_REACHED = "not cut: the body has {0} bytes, not more than {1}"
 NO_BODY = "not cut: response has no body"
 BROKE_EARLY = "not cut: the answer broke after {0} bytes of body, before byte {1}"
-USED_UP = ("not cut: when the answer passed byte {0}, the rule was used up by other answers, disabled, deleted or "
-           "changed to another action")
+USED_UP = ("not cut: when the answer passed byte {0}, the rule was used up by other answers, disabled, deleted, "
+           "changed to another action or moved to another device")
 
 
 def cut_point(rule, length):

@@ -1,12 +1,19 @@
 import json
 import os
 import sys
+import threading
+import time
 import urllib.request
 
 import pytest
 
 from conftest import free_port
+from test_cut_e2e import VIDEO, media, recorded
+from test_cut_e2e import fetch as fetch_media
 from test_engine_e2e import ENGINE_START_TIMEOUT, api_get, api_post, launch, start_server, two_ports, wait_until
+from test_event_rules_e2e import fetch as fetch_stream
+from test_event_rules_e2e import start_feed
+from test_rules_e2e import add_rule, api_call
 
 FIRST = "devA-1"
 SECOND = "devB.2"
@@ -116,6 +123,7 @@ def test_two_devices_on_their_ports_are_kept_apart(device_engine):
     pc_status, pc_body = fetch(engine["proxy_port"], url)
     assert pc_body != b"mock of A"
 
+    assert wait_until(lambda: len(flows(engine)) == 3, 10)
     first_flows = flows(engine, "?device=" + FIRST)
     assert [flow["device"] for flow in first_flows] == [FIRST]
     assert first_flows[0]["rules"] == [{"id": rule["rule"]["id"], "action": "respond"}]
@@ -127,3 +135,61 @@ def test_two_devices_on_their_ports_are_kept_apart(device_engine):
     assert code == 200 and cleared["device_proxy"] is None and cleared["reverse_active"] is False
     assert json.load(open(os.path.join(engine["data_dir"], "device-ports.json")))["ports"] == {
         SECOND: engine["second_port"], FIRST: first_port}
+
+
+def enable(engine, serial):
+    code, answer = api_post(engine["api_port"], "/api/device", {"action": "enable", "serial": serial})
+    assert code == 200 and answer["ready"] is True, answer
+    return answer["pc_port"]
+
+
+def through(engine, port):
+    return dict(engine, proxy_port=port)
+
+
+def test_events_rule_of_one_device_changes_only_its_stream(device_engine):
+    engine = device_engine
+    first_port, second_port = enable(engine, FIRST), enable(engine, SECOND)
+    feed = start_feed()
+    try:
+        rule = add_rule(engine, action="events", path="/feed", replace=[{"find": "tick", "with": "tock"}], device=FIRST)
+        first_body = fetch_stream(through(engine, first_port), feed.server_port)
+        second_body = fetch_stream(through(engine, second_port), feed.server_port)
+        assert b"data: tock 1\r\n" in first_body and b"data: tick" not in first_body
+        assert b"data: tick 1\r\n" in second_body and b"tock" not in second_body
+        assert wait_until(lambda: len([flow for flow in flows(engine, "?kind=sse") if flow["open"] is False]) == 2, 10)
+        streams = [flow for flow in flows(engine, "?kind=sse") if flow["open"] is False]
+        assert sorted(flow["device"] for flow in streams) == sorted([FIRST, SECOND])
+        assert [flow["device"] for flow in flows(engine, "?rule=" + rule)] == [FIRST]
+    finally:
+        feed.shutdown()
+
+
+def test_clearing_the_history_of_one_device_keeps_the_others(device_engine):
+    engine = device_engine
+    first_port, second_port = enable(engine, FIRST), enable(engine, SECOND)
+    target = start_server()
+    url = "http://127.0.0.1:{0}/v1/items".format(target.server_port)
+    for port in (first_port, second_port, engine["proxy_port"]):
+        fetch(port, url)
+    assert wait_until(lambda: len(flows(engine)) == 3, 10)
+    code, answer = api_call(engine["api_port"], "DELETE", "/api/flows?device=" + FIRST)
+    assert code == 200 and answer == {"removed": 1}
+    assert sorted(flow["device"] or "" for flow in flows(engine)) == sorted(["", SECOND])
+
+
+def test_cut_moved_to_another_device_lets_the_planned_answer_through_whole(device_engine, media):
+    engine = device_engine
+    first_port = enable(engine, FIRST)
+    port = media()
+    rule_id = add_rule(engine, action="cut", path="/video", after_bytes=250000, download_kbps=1000, device=FIRST)
+    results = []
+    thread = threading.Thread(target=lambda: results.append(fetch_media(through(engine, first_port), port, "/video")))
+    thread.start()
+    time.sleep(0.5)
+    assert api_call(engine["api_port"], "PATCH", "/api/rules/" + rule_id, {"device": SECOND})[0] == 200
+    thread.join(60)
+    response, body, broken = results[0]
+    assert broken is None and body == VIDEO
+    skipped = recorded(engine, rule_id)["rules"][0]["skipped"]
+    assert skipped.startswith("not cut: when the answer passed byte 250000") and "moved to another device" in skipped

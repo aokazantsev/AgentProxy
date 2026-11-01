@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from agentproxy.rules import FILE_NAME, RuleError, RuleSet, matches, normalize
+from agentproxy.rules import FILE_NAME, RuleError, RuleSet, matches, moved_away, normalize
 
 
 def by_id(rules, rule_id):
@@ -510,6 +510,23 @@ def test_unreadable_file_names_the_reason_on_update(tmp_path, monkeypatch):
             action()
 
 
+def test_clear_of_one_device_on_unreadable_file_is_refused_and_keeps_the_file(tmp_path, monkeypatch):
+    (tmp_path / FILE_NAME).write_text(json.dumps({"rules": [dict(respond(), id="r1", device="devA")]}))
+    real_open = open
+
+    def locked(path, *args, **kwargs):
+        if str(path).endswith(FILE_NAME):
+            raise PermissionError("locked")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", locked)
+    rules = rule_set(tmp_path)
+    monkeypatch.setattr("builtins.open", real_open)
+    with pytest.raises(RuleError, match="could not be read"):
+        rules.clear("devA")
+    assert json.loads((tmp_path / FILE_NAME).read_text())["rules"] == [dict(respond(), id="r1", device="devA")]
+
+
 def test_copies_in_the_same_second_do_not_overwrite_each_other(tmp_path, monkeypatch):
     monkeypatch.setattr("agentproxy.rules.time.strftime", lambda pattern: "20261017-000000")
     (tmp_path / FILE_NAME).write_text("{bad1")
@@ -797,3 +814,27 @@ def test_take_counts_only_a_live_cut_rule_within_times(tmp_path):
     assert not rules.take("r2") and by_id(rules, "r2")["hits"] == 5
     rules.delete("r4")
     assert not rules.take("r4") and not rules.take("r99")
+
+
+def test_cut_moved_to_another_device_is_not_taken_by_the_answer_planned_before(tmp_path):
+    rules = rule_set(tmp_path)
+    rules.add({"action": "cut", "path": "/video", "after_bytes": 10, "device": "devA"})
+    assert rules.take("r1", planned_device="devA") is True
+    rules.update("r1", {"device": "devB"})
+    assert rules.take("r1", planned_device="devA") is False
+    assert rules.take("r1") is True and rules.take("r1", planned_device="devB") is True
+    assert by_id(rules, "r1")["hits"] == 3
+
+
+@pytest.mark.parametrize("device, planned_device, moved", [
+    ("devA", "devA", False),
+    ("devA", "devB", True),
+    (None, "devA", False),
+    ("devA", None, False),
+    (None, None, False),
+])
+def test_only_a_change_from_one_device_to_another_is_a_move(device, planned_device, moved):
+    rule = {"action": "cut", "path": "/video"}
+    if device is not None:
+        rule["device"] = device
+    assert moved_away(rule, planned_device) is moved

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from agentproxy.device import DeviceControl, DeviceError
 from agentproxy.deviceports import FILE_NAME, MAX_DEVICES, DeviceListeners, DevicePortError, DevicePorts
 from agentproxy.flowlog import describe_rule
 from agentproxy.guard import OwnPortsGuard
-from agentproxy.recorder import build_record
+from agentproxy.recorder import Recorder, build_record
 from agentproxy.rules import RuleError, RuleSet, normalize
 from agentproxy.service import ProxyService, ToolError, call_tool
 from agentproxy.settings import Settings
@@ -75,14 +76,62 @@ def test_busy_port_at_start_moves_the_device(tmp_path):
     assert moved.port_of(XIAOMI) == 8893
 
 
-def test_device_count_and_serial_form_are_limited(tmp_path):
+def test_moving_a_busy_port_keeps_the_order_of_the_devices(tmp_path):
+    ports = ports_in(tmp_path)
+    for serial in (XIAOMI, SAMSUNG, "third"):
+        ports.assign(serial)
+    moved = ports_in(tmp_path, busy=(8892,))
+    assert moved.check_free() == [(8892, 8895)]
+    assert list(moved.mapping()) == [XIAOMI, SAMSUNG, "third"]
+    assert list(ports_in(tmp_path).mapping().items()) == [(XIAOMI, 8895), (SAMSUNG, 8893), ("third", 8894)]
+
+
+def test_a_new_device_over_the_limit_frees_the_port_used_longest_ago(tmp_path):
     ports = ports_in(tmp_path)
     for index in range(MAX_DEVICES):
         ports.assign("dev{0}".format(index))
-    with pytest.raises(DevicePortError):
-        ports.assign("one-more")
+    first, second = ports.port_of("dev0"), ports.port_of("dev1")
+    assert ports.assign("dev0") == first
+    newest = ports.assign("one-more")
+    assert ports.port_of("dev1") is None and ports.port_of("dev0") == first
+    assert newest not in (first, second) and len(ports.mapping()) == MAX_DEVICES
+    assert ports_in(tmp_path).mapping() == ports.mapping()
     with pytest.raises(DevicePortError):
         ports.assign("-s")
+
+
+def test_ports_go_round_so_a_pushed_out_port_is_not_given_to_the_next_device(tmp_path):
+    ports = ports_in(tmp_path)
+    for index in range(MAX_DEVICES):
+        ports.assign("dev{0}".format(index))
+    pushed = ports.port_of("dev0")
+    last = max(ports.ports())
+    first_new = ports.assign("x1")
+    second_new = ports.assign("x2")
+    assert first_new == last + 1
+    assert second_new != pushed and second_new > first_new
+
+
+def test_device_on_the_highest_port_sends_the_next_one_back_to_the_first(tmp_path):
+    (tmp_path / FILE_NAME).write_text(json.dumps({"ports": {XIAOMI: 65535}}))
+    ports = ports_in(tmp_path, api_port=8000)
+    assert ports.assign(SAMSUNG) == ports.first == 8891
+
+
+def test_no_free_port_above_the_last_one_continues_from_the_first(tmp_path):
+    (tmp_path / FILE_NAME).write_text(json.dumps({"ports": {XIAOMI: 65534}}))
+    ports = ports_in(tmp_path, busy=(65535,), api_port=8000)
+    assert ports.assign(SAMSUNG) == ports.first == 8891
+
+
+def test_listeners_close_the_port_of_a_device_pushed_out(tmp_path):
+    ports = ports_in(tmp_path)
+    for index in range(MAX_DEVICES):
+        ports.assign("dev{0}".format(index))
+    listeners = Listeners(ports)
+    pushed = ports.port_of("dev0")
+    added = listeners.ensure(XIAOMI)
+    assert pushed not in listeners.applied[-1] and added in listeners.applied[-1]
 
 
 def test_client_is_mapped_by_its_local_port(tmp_path):
@@ -158,22 +207,41 @@ def test_reverse_left_on_the_shared_port_is_not_ready(tmp_path):
     assert control.apply("enable", XIAOMI)["ready"] is True
 
 
-def test_status_of_a_device_without_a_port_reads_the_shared_reverse(tmp_path):
+def test_device_routed_by_an_older_version_is_not_ready_until_enable(tmp_path):
     adb = two_devices()
     adb.proxy[XIAOMI] = "127.0.0.1:8890"
     adb.reverse[XIAOMI] = [8890]
-    state = control_with_ports(adb, tmp_path).apply("status", XIAOMI)
-    assert state["pc_port"] == 8890 and state["ready"] is True
+    control = control_with_ports(adb, tmp_path)
+    state = control.apply("status", XIAOMI)
+    assert state["pc_port"] is None and state["ready"] is False and not state["reverse_active"]
+    assert "no port of its own" in state["hint"] and "device_proxy enable" in state["hint"]
+    enabled = control.apply("enable", XIAOMI)
+    assert enabled["ready"] is True and adb.targets[(XIAOMI, 8890)] == enabled["pc_port"] == 8892
 
 
-def test_restore_after_charles_uses_the_device_port(tmp_path):
+def test_disable_takes_off_a_device_routed_by_an_older_version(tmp_path):
+    adb = two_devices()
+    adb.proxy[XIAOMI] = ":0"
+    adb.reverse[XIAOMI] = [8890]
+    off = control_with_ports(adb, tmp_path).apply("disable", XIAOMI)
+    assert off["changed"] is True and off["reverse_active"] is False and off["pc_port"] is None
+    assert adb.reverse[XIAOMI] == [] and adb.proxy[XIAOMI] == ":0"
+
+
+def test_restore_after_charles_uses_the_device_port(tmp_path, caplog):
     adb = two_devices()
     control = control_with_ports(adb, tmp_path)
     control.apply("enable", XIAOMI)
     control.apply("enable", SAMSUNG)
-    assert sorted(control.release()) == sorted([XIAOMI, SAMSUNG])
-    assert adb.proxy == {XIAOMI: ":0", SAMSUNG: ":0"}
-    assert control.restore([SAMSUNG]) == [SAMSUNG]
+    with caplog.at_level(logging.INFO, logger="agentproxy.device"):
+        assert sorted(control.release()) == sorted([XIAOMI, SAMSUNG])
+        assert adb.proxy == {XIAOMI: ":0", SAMSUNG: ":0"}
+        assert control.restore([SAMSUNG]) == [SAMSUNG]
+    lines = [record.getMessage() for record in caplog.records if record.name == "agentproxy.device"]
+    assert sorted(line for line in lines if "released" in line) == [
+        "device proxy released: pc port 8892", "device proxy released: pc port 8893"]
+    assert "device proxy restored: pc port 8893" in lines
+    assert not [line for line in lines if XIAOMI in line or SAMSUNG in line]
     assert adb.proxy[SAMSUNG] == "127.0.0.1:8890" and adb.targets[(SAMSUNG, 8890)] == 8893
     assert adb.proxy[XIAOMI] == ":0"
 
@@ -284,6 +352,16 @@ def test_record_takes_the_device_given(tmp_path):
     assert build_record(flow, 1024).device is None
 
 
+def test_tls_failure_of_a_device_is_recorded_with_the_device(store):
+    client = SimpleNamespace(sni="a.example.com", timestamp_start=None, peername=("127.0.0.1", 1),
+                             sockname=("127.0.0.1", 8892))
+    server = SimpleNamespace(address=("a.example.com", 443))
+    data = SimpleNamespace(context=SimpleNamespace(client=client, server=server),
+                           conn=SimpleNamespace(error="connection closed early"))
+    Recorder(store, 1024, device_of=lambda seen: XIAOMI if seen is client else None).tls_failed_client(data)
+    assert [flow["device"] for flow in store.query(FlowFilter(), 10)] == [XIAOMI]
+
+
 def test_guard_covers_device_ports(tmp_path):
     ports = ports_in(tmp_path)
     guard = OwnPortsGuard(8890, 8891, ports.ports)
@@ -334,6 +412,32 @@ def test_stream_of_another_device_is_refused(device_service, store):
         tool(device_service, "wait_for_event", {"flow": "1", "device": SAMSUNG, "timeout_seconds": 1})
 
 
+def test_refusal_of_a_stream_of_another_device_keeps_the_serial_out_of_the_journal(device_service, store, caplog):
+    store.insert(make_record(1, device=XIAOMI, kind="sse", open=True))
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ToolError, match="not a flow of device " + SAMSUNG):
+            tool(device_service, "list_events", {"flow": "1", "device": SAMSUNG})
+    assert "flow of another device" in caplog.text
+    assert SAMSUNG not in caplog.text and XIAOMI not in caplog.text
+
+
+@pytest.mark.parametrize("name, arguments", [
+    ("list_flows", {"device": ""}),
+    ("clear_flows", {"device": ""}),
+    ("delete_rule", {"all": True, "device": ""}),
+    ("wait_for_event", {"flow": "1", "device": "", "timeout_seconds": 1}),
+])
+def test_empty_device_is_refused_instead_of_meaning_every_device(device_service, store, name, arguments):
+    store.insert(make_record(1, device=XIAOMI, kind="sse", open=True))
+    store.insert(make_record(2))
+    tool(device_service, "add_rule", {"action": "drop", "host": "a", "device": XIAOMI})
+    tool(device_service, "add_rule", {"action": "drop", "host": "b"})
+    with pytest.raises(ToolError, match="device is empty"):
+        tool(device_service, name, arguments)
+    assert store.count() == 2
+    assert [rule["id"] for rule in tool(device_service, "list_rules", {})["rules"]] == ["r1", "r2"]
+
+
 def test_delete_rule_all_with_device(device_service):
     tool(device_service, "add_rule", {"action": "drop", "host": "a", "device": XIAOMI})
     tool(device_service, "add_rule", {"action": "drop", "host": "b"})
@@ -365,6 +469,34 @@ def test_moving_a_rule_to_another_device_drops_it_from_open_streams(device_servi
     assert changes == [None, None]
     tool(device_service, "update_rule", {"id": "r1", "name": "same device"})
     assert changes[-1]["name"] == "same device"
+
+
+def watch_rule_changes(service):
+    seen = {"closed": [], "events": [], "speeds": []}
+    service.streams = SimpleNamespace(close_rules=lambda rule_ids: seen["closed"].append(list(rule_ids)))
+    service.events = SimpleNamespace(change_rule=lambda rule_id, rule: seen["events"].append(rule))
+    service.speeds = SimpleNamespace(change_rule=lambda rule_id, limits: seen["speeds"].append(limits))
+    return seen
+
+
+def test_moving_a_rule_to_another_device_closes_its_streams(device_service):
+    seen = watch_rule_changes(device_service)
+    tool(device_service, "add_rule", {"action": "sse", "host": "a", "device": XIAOMI})
+    tool(device_service, "update_rule", {"id": "r1", "device": SAMSUNG})
+    assert seen == {"closed": [["r1"]], "events": [None], "speeds": [None]}
+
+
+@pytest.mark.parametrize("before, after", [(None, XIAOMI), (XIAOMI, None)])
+def test_narrowing_or_widening_the_device_is_not_a_move(device_service, before, after):
+    seen = watch_rule_changes(device_service)
+    rule = {"action": "sse", "host": "a", "download_kbps": 100}
+    if before is not None:
+        rule["device"] = before
+    tool(device_service, "add_rule", rule)
+    tool(device_service, "update_rule", {"id": "r1", "device": after})
+    assert seen["closed"] == []
+    assert seen["events"][0]["id"] == "r1" and seen["events"][0].get("device") == after
+    assert seen["speeds"] == [(100, None)]
 
 
 def test_status_lists_device_ports(device_service):

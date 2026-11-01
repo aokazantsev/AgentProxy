@@ -57,6 +57,29 @@ def test_rule_deleted_or_disabled_while_the_request_waited_gives_no_stream(tmp_p
         assert "while the request waited" in flow.metadata["agentproxy_rules"][-1]["error"]
 
 
+def device_stream_flow(tmp_path, change):
+    rules = RuleSet(str(tmp_path))
+    rules.add({"action": "sse", "host": "address", "device": "devA"})
+    rewriter = Rewriter(rules, FakeStreams(), device_of=lambda client: "devA")
+    flow = tflow.tflow()
+    flow.request.headers["Host"] = "ADDRESS:22"
+    asyncio.run(rewriter.requestheaders(flow))
+    rules.update("r1", change)
+    asyncio.run(rewriter.request(flow))
+    return rewriter, flow
+
+
+def test_rule_moved_to_another_device_while_the_request_waited_gives_no_stream(tmp_path):
+    rewriter, flow = device_stream_flow(tmp_path, {"device": "devB"})
+    assert flow.response.status_code == 503 and rewriter.streams.reserved == []
+    assert "moved to another device while the request waited" in flow.metadata["agentproxy_rules"][-1]["error"]
+
+
+def test_rule_widened_to_every_device_while_the_request_waited_still_serves_the_stream(tmp_path):
+    rewriter, flow = device_stream_flow(tmp_path, {"device": None})
+    assert flow.response is None and rewriter.streams.reserved == [flow.id]
+
+
 def test_rewrite_before_an_sse_rule_leaves_the_stream_response_alone(tmp_path):
     rewriter, flow = rerouted_flow(tmp_path, rules_before=[
         {"action": "rewrite", "host": "address", "status": 500, "response_headers": {"Content-Type": "text/plain"}}])

@@ -327,6 +327,10 @@ def _covers(wide, narrow):
     return True
 
 
+def moved_away(rule, planned_device):
+    return planned_device is not None and rule.get("device", planned_device) != planned_device
+
+
 def matches(rule, host, path, method, url, device=None):
     if "device" in rule and rule["device"] != device:
         return False
@@ -664,10 +668,12 @@ class RuleSet:
                     break
         return chosen
 
-    def take(self, rule_id):
+    def take(self, rule_id, planned_device=None):
         with self._lock:
             rule = next((rule for rule in self._rules if rule["id"] == rule_id), None)
             if rule is None or not rule["enabled"] or rule["action"] != "cut":
+                return False
+            if moved_away(rule, planned_device):
                 return False
             state = self._state.setdefault(rule_id, {"hits": 0})
             if "times" in rule and state["hits"] >= rule["times"]:

@@ -195,3 +195,14 @@ def test_no_downgrade_without_speed_limits(rules):
     hello = Hello("img.example.com", (b"h2", b"http/1.1"))
     Rewriter(rules).tls_clienthello(hello)
     assert hello.context.client.alpn_offers == (b"h2", b"http/1.1")
+
+
+def test_only_the_device_of_a_limit_is_offered_http1_only(rules):
+    rules.add({"action": "delay", "host": "img.example.com", "download_kbps": 100, "device": "devA"})
+    first, second = Hello("img.example.com", (b"h2", b"http/1.1")), Hello("img.example.com", (b"h2", b"http/1.1"))
+    devices = {first.context.client.id: "devA", second.context.client.id: "devB"}
+    rewriter = Rewriter(rules, speeds=Limits(), device_of=lambda client: devices.get(client.id))
+    rewriter.tls_clienthello(first)
+    rewriter.tls_clienthello(second)
+    assert first.context.client.alpn_offers == (b"http/1.1",)
+    assert second.context.client.alpn_offers == (b"h2", b"http/1.1")

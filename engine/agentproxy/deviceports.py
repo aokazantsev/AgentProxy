@@ -87,26 +87,44 @@ class DevicePorts:
             raise DevicePortError("serial has an unexpected form")
         with self.lock:
             current = self._ports.get(serial)
-            if current is not None and not avoid_current:
-                return current
-            if current is None and len(self._ports) >= MAX_DEVICES:
-                raise DevicePortError("at most {0} devices get their own port; remove old entries from {1} in the "
-                                      "data folder and restart the engine".format(MAX_DEVICES, FILE_NAME))
-            taken = set(self._ports.values()) | self.reserved
-            port = self.first
-            while port <= HIGHEST_PORT and (port in taken or not self.is_free(port)):
-                port += 1
-            if port > HIGHEST_PORT:
-                raise DevicePortError("no free port above {0} for the device".format(self.first))
             previous = dict(self._ports)
-            self._ports[serial] = port
+            if current is not None and not avoid_current:
+                if list(self._ports)[-1] != serial:
+                    self._ports.pop(serial)
+                    self._ports[serial] = current
+                    try:
+                        self._write()
+                    except OSError as error:
+                        self._ports = previous
+                        log.warning("%s order not saved: %s", FILE_NAME, error.strerror or error)
+                return current
+            evicted = None
+            if current is None and len(self._ports) >= MAX_DEVICES:
+                evicted = self._ports.pop(next(iter(self._ports)))
+            port = self._free_port(set(self._ports.values()) | self.reserved | {current, evicted},
+                                   max(list(self._ports.values()) + [current or 0, evicted or 0]))
+            if port is None:
+                self._ports = previous
+                raise DevicePortError("no free port above {0} for the device".format(self.first))
+            if current is None:
+                self._ports[serial] = port
+            else:
+                self._ports = {name: port if name == serial else value for name, value in self._ports.items()}
             try:
                 self._write()
             except OSError as error:
                 self._ports = previous
                 raise DevicePortError("{0} was not saved: {1}".format(FILE_NAME, error.strerror or error))
-            log.info("device port %s assigned%s", port, " (port {0} was busy)".format(current) if current else "")
+            log.info("device port %s assigned%s%s", port, " (port {0} was busy)".format(current) if current else "",
+                     ", port {0} of the device used longest ago freed".format(evicted) if evicted else "")
             return port
+
+    def _free_port(self, taken, last):
+        start = last + 1 if self.first <= last < HIGHEST_PORT else self.first
+        for port in list(range(start, HIGHEST_PORT + 1)) + list(range(self.first, start)):
+            if port not in taken and self.is_free(port):
+                return port
+        return None
 
     def check_free(self):
         moved = []
@@ -146,8 +164,9 @@ class DeviceListeners:
                               .format(port))
 
     def _listen(self, port):
-        if port not in self.active:
-            self.active = set(self.ports.ports())
+        assigned = set(self.ports.ports())
+        if assigned != self.active:
+            self.active = assigned
             self.loop.call_soon_threadsafe(self.set_ports, sorted(self.active))
         if self.is_paused():
             return True

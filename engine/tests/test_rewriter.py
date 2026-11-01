@@ -455,6 +455,19 @@ def test_connect_is_answered_locally_only_for_hosts_a_rule_may_answer(rules):
     assert other.response is None
 
 
+def test_connect_is_answered_locally_only_for_the_device_of_the_rule(rules):
+    rules.add({"action": "respond", "host": "address", "body": "x", "device": "devA"})
+    first, second, pc = tflow.tflow(), tflow.tflow(), tflow.tflow()
+    devices = {first.client_conn.id: "devA", second.client_conn.id: "devB"}
+    rewriter = Rewriter(rules, device_of=lambda client: devices.get(client.id))
+    for flow in (first, second, pc):
+        flow.request.method = "CONNECT"
+        rewriter.http_connect(flow)
+    assert first.response.status_code == 200
+    assert second.response is None and pc.response is None
+    assert rewriter.lazy_clients == {first.client_conn.id}
+
+
 def test_server_tls_is_skipped_only_for_connections_answered_locally(rules):
     class Data:
         pass

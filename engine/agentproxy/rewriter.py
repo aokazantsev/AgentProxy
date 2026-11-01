@@ -12,7 +12,8 @@ from .eventrules import INCOMING, OUTGOING, EventChanger, EventStreams, SseEdito
 from .guard import OWN_PORT_MARK
 from .recorder import is_event_stream, is_websocket_handshake
 from .rules import (APPLIED_MARK, EVENTS_MARK, MAX_DELAY_MS, MAX_FILE_BYTES, NO_REQUEST_STREAM_MARK,
-                    NO_RESPONSE_STREAM_MARK, PLAN_MARK, TERMINAL_ACTIONS, RuleError, changes_body, limits_speed)
+                    NO_RESPONSE_STREAM_MARK, PLAN_MARK, TERMINAL_ACTIONS, RuleError, changes_body, limits_speed,
+                    moved_away)
 from .speed import SCOPE_CONNECTION, SCOPE_REQUEST, rule_limits
 from .streamhost import DEFAULT_HEADERS as DEFAULT_STREAM_HEADERS, LOOPBACK, STREAM_HEADER, StreamRefused
 from .streamtap import IDENTITY_ENCODINGS, NO_BODY_STATUSES, decoded_pieces
@@ -439,8 +440,10 @@ class Rewriter:
             current = self.rules.get(rule["id"])
         except RuleError:
             current = None
-        if current is None or not current["enabled"] or current["action"] != "sse":
-            self._refuse_stream(flow, rule, "the rule was deleted, disabled or changed while the request waited")
+        if (current is None or not current["enabled"] or current["action"] != "sse"
+                or moved_away(current, rule.get("device"))):
+            self._refuse_stream(flow, rule, "the rule was deleted, disabled, changed or moved to another device while "
+                                            "the request waited")
             return
         if flow.request.method == "HEAD":
             headers = dict(current.get("headers", {}))
@@ -658,7 +661,9 @@ class Rewriter:
             response.headers["connection"] = "close"
             if response.http_version == "HTTP/1.0":
                 response.http_version = "HTTP/1.1"
-        cutter = BodyCutter(flow, chosen[0]["id"], chosen[1], self.rules.take)
+        planned_device = chosen[0].get("device")
+        cutter = BodyCutter(flow, chosen[0]["id"], chosen[1],
+                            lambda rule_id: self.rules.take(rule_id, planned_device))
         flow.metadata[CUT_MARK] = cutter
         response.stream = cutter
 
