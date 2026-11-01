@@ -54,6 +54,7 @@ tr.node td { max-width: none; font-weight: 500; }
 <main>
   <section id="list">
     <div id="tools">
+      <label title="Телефоны, подключённые через device_proxy enable">устройство <select id="fDevice"><option value="">все</option></select></label>
       <label>метод <select id="fMethod"><option value="">все</option></select></label>
       <label>код <select id="fCode">
         <option value="">все</option><option value="1">1xx</option><option value="2">2xx</option><option value="3">3xx</option><option value="4">4xx</option><option value="5">5xx</option><option value="err">ошибка</option>
@@ -92,6 +93,7 @@ async function refreshStatus() {
     document.getElementById("count").textContent = status.flows;
     document.getElementById("rules").textContent = status.rules ? status.rules.active + (status.rules.problem ? " ⚠" : "") : "—";
     document.getElementById("rules").title = status.rules && status.rules.problem ? status.rules.problem : "";
+    fillDevices(Object.keys(status.proxy.device_ports || {}).sort());
     document.getElementById("version").textContent = status.version;
   } catch (error) {
     document.getElementById("dot").className = "dot off";
@@ -99,7 +101,7 @@ async function refreshStatus() {
   }
 }
 const COLUMNS = [["seq", "#"], ["method", "метод"], ["code", "код"], ["host", "хост"], ["path", "путь"], ["duration_ms", "мс"], ["event_count", "соб."], ["rules", "правила"]];
-const view = { method: "", code: "", pinnedOnly: false, sortKey: "seq", sortDir: -1 };
+const view = { device: "", method: "", code: "", pinnedOnly: false, sortKey: "seq", sortDir: -1 };
 const MODES = ["list", "group", "tree"];
 const expanded = new Set();
 const treeOpen = new Set();
@@ -217,6 +219,21 @@ function buildHeads() {
     heads.appendChild(th);
   }
 }
+function fillDevices(devices) {
+  const select = document.getElementById("fDevice");
+  if (view.device && devices.indexOf(view.device) < 0) devices.push(view.device);
+  const wanted = [""].concat(devices).join("|");
+  if (select.dataset.options !== wanted) {
+    select.dataset.options = wanted;
+    select.textContent = "";
+    for (const device of [""].concat(devices)) {
+      const option = document.createElement("option");
+      option.value = device; option.textContent = device || "все";
+      select.appendChild(option);
+    }
+  }
+  select.value = view.device;
+}
 function fillMethods() {
   const select = document.getElementById("fMethod");
   const methods = Array.from(new Set(lastFlows.map((flow) => flow.method))).sort();
@@ -294,14 +311,18 @@ function render() {
 }
 async function refreshFlows() {
   let data;
-  try { data = await getJson("/api/flows?limit=300"); } catch (error) { return; }
+  const device = view.device;
+  try { data = await getJson("/api/flows?limit=300" + (device ? "&device=" + encodeURIComponent(device) : "")); } catch (error) { return; }
+  if (device !== view.device) return;
   lastFlows = data.flows;
   const changes = pinsChanged;
   try { const pins = await getJson("/api/monitor/pins"); if (changes === pinsChanged) pinnedHosts = pins.pinned_hosts; } catch (error) {}
   render();
 }
 function initTools() {
-  const method = document.getElementById("fMethod"), code = document.getElementById("fCode"), mode = document.getElementById("fMode"), pinned = document.getElementById("fPinned");
+  const device = document.getElementById("fDevice"), method = document.getElementById("fMethod"), code = document.getElementById("fCode"), mode = document.getElementById("fMode"), pinned = document.getElementById("fPinned");
+  fillDevices([]);
+  device.onchange = () => { view.device = device.value; saveView(); lastFlows = []; render(); refreshFlows(); };
   code.value = view.code; mode.value = view.mode; pinned.checked = !!view.pinnedOnly;
   method.onchange = () => { view.method = method.value; saveView(); render(); };
   code.onchange = () => { view.code = code.value; saveView(); render(); };
@@ -342,6 +363,7 @@ async function showFlow(id) {
   const detail = document.getElementById("detail");
   detail.textContent = "";
   section(detail, "Запрос", flow.method + " " + flow.url);
+  if (flow.device) section(detail, "Устройство", flow.device);
   if (flow.rules && flow.rules.length) section(detail, "Правила подмены", rulesText(flow.rules));
   section(detail, "Ответ", flow.error ? "Ошибка: " + flow.error : text(flow.status) + " " + text(flow.reason) + (flow.duration_ms !== null ? ", " + flow.duration_ms + " мс" : ""));
   section(detail, "Заголовки запроса", headersText(flow.request_headers));

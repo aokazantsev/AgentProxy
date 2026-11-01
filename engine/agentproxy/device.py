@@ -6,13 +6,13 @@ import subprocess
 import sys
 import threading
 
+from .deviceports import SERIAL_PATTERN, DevicePortError
 from .flowlog import clean
 
 log = logging.getLogger("agentproxy.device")
 
 ADB_TIMEOUT_SECONDS = 15
 ERROR_CHARS = 300
-SERIAL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]*")
 PROXY_OFF = ("", "null", ":0")
 ACTIONS = ("enable", "disable", "status")
 NO_REVERSE_MARKERS = ("not found", "no such reverse", "nothing to remove")
@@ -59,13 +59,19 @@ def find_adb(configured="", environ=None):
                       "adb not found")
 
 
+def reconnect_advice(command):
+    serial = command[command.index("-s") + 1] if "-s" in command[:-1] else "<serial>"
+    return ("replug it or run adb -s {0} reconnect (adb kill-server and a bare adb reconnect drop every connected "
+            "device), then repeat".format(serial))
+
+
 def run_command(command, timeout=ADB_TIMEOUT_SECONDS):
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     try:
         done = subprocess.run(command, capture_output=True, timeout=timeout, creationflags=flags)
     except subprocess.TimeoutExpired:
         raise DeviceError("adb did not answer within {0} s: the device may be asleep or the connection is stuck; "
-                          "replug it, run adb kill-server, then repeat".format(timeout), "adb timed out")
+                          "{1}".format(timeout, reconnect_advice(command)), "adb timed out")
     except OSError as error:
         raise DeviceError("adb could not be started: {0}".format(clean(error, ERROR_CHARS)), "adb could not be started")
     text = (done.stdout + done.stderr).decode("utf-8", "replace")
@@ -86,11 +92,12 @@ def device_is_proxy_off(value):
 
 
 class DeviceControl:
-    def __init__(self, get_settings, is_listening, runner=run_command, finder=find_adb):
+    def __init__(self, get_settings, is_listening, runner=run_command, finder=find_adb, ports=None):
         self.get_settings = get_settings
         self.is_listening = is_listening
         self.runner = runner
         self.finder = finder
+        self.ports = ports
         self.lock = threading.Lock()
 
     def apply(self, action, serial):
@@ -106,24 +113,28 @@ class DeviceControl:
             port = settings.proxy_port
             address = "127.0.0.1:{0}".format(port)
             previous = self._proxy_value(serial)
-            had_reverse = self._reverse_active(serial, port)
             if action == "enable":
                 if not self.is_listening():
                     raise DeviceError("the AgentProxy proxy is not listening on port {0}, the device would lose its "
                                       "connection: check proxy_status and read_log, then repeat device_proxy enable "
                                       "once proxy_status reports running".format(port), "proxy not listening")
-                self._enable(serial, port, address, had_reverse)
+                target = self._assign(serial, port)
+            else:
+                target = self._known_port(serial, port)
+            had_reverse = self._reverse_active(serial, port, target)
+            if action == "enable":
+                self._enable(serial, port, target, address, had_reverse)
             elif action == "disable":
                 self._disable(serial, port)
-            answer = self._state(serial, port, address)
+            answer = self._state(serial, port, target, address)
             answer["action"] = action
             answer["previous_proxy"] = None if device_is_proxy_off(previous) else previous.strip()
             answer["changed"] = action != "status" and (answer["previous_proxy"] != answer["device_proxy"]
                                                         or had_reverse != answer["reverse_active"])
             answer["hint"] = self._hint(action, answer)
             if action != "status":
-                log.info("device proxy %s: proxy %s, reverse %s", action, self._proxy_kind(answer),
-                         "on" if answer["reverse_active"] else "off")
+                log.info("device proxy %s: proxy %s, reverse %s, pc port %s", action, self._proxy_kind(answer),
+                         "on" if answer["reverse_active"] else "off", target)
             return answer
 
     def release(self):
@@ -136,6 +147,7 @@ class DeviceControl:
                         continue
                     self._disable(serial, port)
                     released.append(serial)
+                    log.info("device proxy released: pc port %s", self._known_port(serial, port))
                 except DeviceError as error:
                     log.info("device release skipped: %s", error.kind)
             return released
@@ -151,8 +163,10 @@ class DeviceControl:
                 try:
                     if not device_is_proxy_off(self._proxy_value(serial)):
                         continue
-                    self._enable(serial, port, address, self._reverse_active(serial, port))
+                    target = self._assign(serial, port)
+                    self._enable(serial, port, target, address, self._reverse_active(serial, port, target))
                     restored.append(serial)
+                    log.info("device proxy restored: pc port %s", target)
                 except DeviceError as error:
                     log.info("device restore skipped: %s", error.kind)
             return restored
@@ -161,6 +175,18 @@ class DeviceControl:
         settings = self.get_settings()
         self.adb = self.finder(settings.adb_path)
         return settings.proxy_port, "127.0.0.1:{0}".format(settings.proxy_port)
+
+    def _assign(self, serial, port):
+        if self.ports is None:
+            return port
+        try:
+            return self.ports.ensure(serial)
+        except DevicePortError as error:
+            raise DeviceError(str(error), "device port: " + str(error))
+
+    def _known_port(self, serial, port):
+        known = self.ports.port_of(serial) if self.ports is not None else None
+        return port if known is None else known
 
     def _ready_serials(self):
         _, text = self._adb(None, "devices")
@@ -210,20 +236,20 @@ class DeviceControl:
         if state == "unauthorized":
             return "device {0} is unauthorized: ask the user to accept the debugging prompt on the device".format(serial)
         if state == "offline":
-            return "device {0} is offline: replug it or run adb reconnect".format(serial)
+            return "device {0} is offline: replug it or run adb -s {0} reconnect".format(serial)
         return "device {0} is in state {1}, not ready: wait a few seconds and repeat, or replug it".format(serial, state)
 
     def _proxy_value(self, serial):
         _, text = self._adb(serial, "shell", "settings", "get", "global", "http_proxy")
         return text.strip().splitlines()[-1] if text.strip() else ""
 
-    def _reverse_active(self, serial, port):
+    def _reverse_active(self, serial, port, target):
         _, text = self._adb(serial, "reverse", "--list")
-        pattern = re.compile(r"tcp:{0}\s+tcp:{0}\b".format(port))
+        pattern = re.compile(r"tcp:{0}\s+tcp:{1}\b".format(port, target))
         return any(pattern.search(line) for line in text.splitlines())
 
-    def _enable(self, serial, port, address, had_reverse):
-        self._adb(serial, "reverse", "tcp:{0}".format(port), "tcp:{0}".format(port))
+    def _enable(self, serial, port, target, address, had_reverse):
+        self._adb(serial, "reverse", "tcp:{0}".format(port), "tcp:{0}".format(target))
         try:
             self._adb(serial, "shell", "settings", "put", "global", "http_proxy", address)
         except DeviceError:
@@ -239,15 +265,16 @@ class DeviceControl:
                               "and remove the leftover by hand".format(clean(text, ERROR_CHARS)),
                               "adb reverse --remove failed, exit code {0}".format(code))
 
-    def _state(self, serial, port, address):
+    def _state(self, serial, port, target, address):
         value = self._proxy_value(serial)
         proxy = None if device_is_proxy_off(value) else value.strip()
-        reverse = self._reverse_active(serial, port)
+        reverse = self._reverse_active(serial, port, target)
         listening = self.is_listening()
         return {
             "serial": serial,
             "device_proxy": proxy,
             "expected_proxy": address,
+            "pc_port": target,
             "reverse_active": reverse,
             "proxy_listening": listening,
             "ready": proxy == address and reverse and listening,
@@ -270,5 +297,7 @@ class DeviceControl:
             return "the device uses another proxy ({0}): run device_proxy enable to switch it to AgentProxy".format(
                 state["device_proxy"])
         if state["device_proxy"] and not state["reverse_active"]:
-            return "the proxy is set but adb reverse is missing, the device has no connection: run device_proxy enable"
+            return ("adb reverse does not lead to this device's port {0} on the PC (missing, or left by an older "
+                    "AgentProxy on the shared port): its traffic is not marked with the device or does not arrive; "
+                    "run device_proxy enable".format(state["pc_port"]))
         return "the device proxy is off: run device_proxy enable to route its traffic through AgentProxy"

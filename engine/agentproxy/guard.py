@@ -22,8 +22,13 @@ def is_loopback_address(address):
 
 
 class OwnPortsGuard:
-    def __init__(self, proxy_port, api_port):
-        self.ports = {proxy_port, api_port}
+    def __init__(self, proxy_port, api_port, device_ports=None):
+        self.fixed_ports = {proxy_port, api_port}
+        self.device_ports = device_ports or (lambda: ())
+
+    @property
+    def ports(self):
+        return self.fixed_ports.union(self.device_ports())
 
     async def requestheaders(self, flow):
         if flow.request.port in self.ports:

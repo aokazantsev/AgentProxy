@@ -306,8 +306,9 @@ class BodyEditor:
 
 
 class Rewriter:
-    def __init__(self, rule_set, streams=None, speeds=None, events=None):
+    def __init__(self, rule_set, streams=None, speeds=None, events=None, device_of=None):
         self.rules = rule_set
+        self.device_of = device_of or (lambda client: None)
         self.streams = streams
         self.speeds = speeds
         self.events = events if events is not None else EventStreams()
@@ -318,7 +319,7 @@ class Rewriter:
     def http_connect(self, flow):
         if flow.metadata.get(OWN_PORT_MARK):
             return
-        if self.rules.may_answer(flow.request.host):
+        if self.rules.may_answer(flow.request.host, self.device_of(flow.client_conn)):
             from mitmproxy import http
             now = time.time()
             flow.response = http.Response(flow.request.data.http_version, 200, b"Connection established",
@@ -329,7 +330,7 @@ class Rewriter:
         client = data.context.client
         offers = tuple(client.alpn_offers or ())
         if (self.speeds is not None and client.sni and HTTP2 in offers and HTTP1 in offers
-                and self.rules.needs_http1(client.sni)):
+                and self.rules.needs_http1(client.sni, self.device_of(client))):
             client.alpn_offers = tuple(offer for offer in offers if offer != HTTP2)
             self.http1_clients.add(client.id)
         if client.id not in self.lazy_clients:
@@ -372,7 +373,8 @@ class Rewriter:
         if flow.metadata.get(OWN_PORT_MARK):
             return
         request = flow.request
-        plan = self.rules.plan(request.pretty_host, request.path, request.method, request.pretty_url)
+        plan = self.rules.plan(request.pretty_host, request.path, request.method, request.pretty_url,
+                               self.device_of(flow.client_conn))
         if not plan:
             self._limit_speed(flow, plan)
             return
@@ -519,7 +521,8 @@ class Rewriter:
             refusal = SERVED_STREAM
         request = flow.request
         rules = self.rules.plan_events(request.pretty_host, request.path, request.method, request.pretty_url,
-                                       count=refusal is None, websocket=is_websocket_handshake(flow))
+                                       count=refusal is None, websocket=is_websocket_handshake(flow),
+                                       device=self.device_of(flow.client_conn))
         if not rules:
             return None
         changer = EventChanger(flow, rules, self._closer(flow), whole_connection=request.is_http2)

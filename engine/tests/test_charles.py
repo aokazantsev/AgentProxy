@@ -302,7 +302,7 @@ def test_serve_builds_a_silent_master_when_charles_runs_at_start(tmp_path, monke
     class Stop(Exception):
         pass
 
-    def fake(current, cert_dir, listening=True):
+    def fake(current, cert_dir, listening=True, device_ports=()):
         seen["listening"] = listening
         raise Stop()
     monkeypatch.setattr(engine, "charles_at_start", lambda: True)

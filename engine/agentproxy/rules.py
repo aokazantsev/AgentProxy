@@ -8,6 +8,7 @@ import shutil
 import threading
 import time
 
+from .deviceports import valid_serial
 from .streamtap import NO_BODY_STATUSES
 
 log = logging.getLogger("agentproxy.rules")
@@ -19,7 +20,7 @@ MATCH_FIELDS = ("host", "path", "method", "url_regex")
 VIEW_FIELDS = ("id", "created", "hits", "remaining", "active", "last_applied", "last_error")
 HOST_WITH_PORT = re.compile(r"^(?:[^:\[\]]*|\[.*\]):\d+$")
 SPEED_FIELDS = ("download_kbps", "upload_kbps")
-COMMON_FIELDS = ("name", "enabled", "action", "delay_ms") + SPEED_FIELDS + ("times",) + MATCH_FIELDS
+COMMON_FIELDS = ("name", "enabled", "action", "delay_ms") + SPEED_FIELDS + ("times",) + MATCH_FIELDS + ("device",)
 ACTION_FIELDS = {
     "respond": ("status", "headers", "body", "body_file", "content_type"),
     "rewrite": ("status", "request_headers", "response_headers", "response_body", "replace"),
@@ -209,6 +210,11 @@ def normalize(raw, check_files=True):
         rule["url_regex"] = pattern
     if "name" in values:
         rule["name"] = _text("name", values["name"], 200)
+    if "device" in values:
+        if not valid_serial(values["device"]):
+            raise RuleError("device is the adb serial of one device (device_proxy status shows it); leave it out for "
+                            "every device and this PC")
+        rule["device"] = values["device"]
     rule["enabled"] = _flag("enabled", values.get("enabled", True))
     if "delay_ms" in values:
         rule["delay_ms"] = _number("delay_ms", values["delay_ms"], 0, MAX_DELAY_MS)
@@ -303,6 +309,8 @@ def _answers_always(rule):
 
 
 def _covers(wide, narrow):
+    if "device" in wide and wide["device"] != narrow.get("device"):
+        return False
     for field in MATCH_FIELDS:
         if field not in wide:
             continue
@@ -319,7 +327,9 @@ def _covers(wide, narrow):
     return True
 
 
-def matches(rule, host, path, method, url):
+def matches(rule, host, path, method, url, device=None):
+    if "device" in rule and rule["device"] != device:
+        return False
     if "host" in rule and rule["host"].lower() not in host.lower():
         return False
     if "path" in rule and rule["path"] not in path:
@@ -622,21 +632,26 @@ class RuleSet:
             self._state.pop(rule_id, None)
             return [rule_id]
 
-    def clear(self):
+    def clear(self, device=None):
         with self._lock:
-            removed = [rule["id"] for rule in self._rules]
-            self._save([], self._next_id)
+            if device is not None:
+                self._check_readable()
+            removed = [rule["id"] for rule in self._rules if device is None or rule.get("device") == device]
+            kept = [rule for rule in self._rules if rule["id"] not in removed]
+            self._save(kept, self._next_id)
             self._changed()
-            self._rules = []
-            self._state = {}
+            self._rules = kept
+            for rule_id in removed:
+                self._state.pop(rule_id, None)
             return removed
 
-    def plan(self, host, path, method, url):
+    def plan(self, host, path, method, url, device=None):
         chosen = []
         now = time.time()
         with self._lock:
             for rule in self._rules:
-                if rule["action"] == "events" or not rule["enabled"] or not matches(rule, host, path, method, url):
+                if rule["action"] == "events" or not rule["enabled"] or not matches(rule, host, path, method, url,
+                                                                                    device):
                     continue
                 state = self._state.setdefault(rule["id"], {"hits": 0})
                 if "times" in rule and state["hits"] >= rule["times"]:
@@ -661,12 +676,13 @@ class RuleSet:
             state["last_applied"] = time.time()
             return True
 
-    def plan_events(self, host, path, method, url, count=True, websocket=True):
+    def plan_events(self, host, path, method, url, count=True, websocket=True, device=None):
         chosen = []
         now = time.time()
         with self._lock:
             for rule in self._rules:
-                if rule["action"] != "events" or not rule["enabled"] or not matches(rule, host, path, method, url):
+                if rule["action"] != "events" or not rule["enabled"] or not matches(rule, host, path, method, url,
+                                                                                    device):
                     continue
                 if not websocket and rule.get("direction") == "outgoing":
                     continue
@@ -679,11 +695,13 @@ class RuleSet:
                 chosen.append(copy.deepcopy(rule))
         return chosen
 
-    def may_answer(self, host):
+    def may_answer(self, host, device=None):
         lowered = host.lower()
         with self._lock:
             for rule in self._rules:
                 if not rule["enabled"] or rule["action"] not in TERMINAL_ACTIONS:
+                    continue
+                if "device" in rule and rule["device"] != device:
                     continue
                 if "times" in rule and self._state.get(rule["id"], {}).get("hits", 0) >= rule["times"]:
                     continue
@@ -691,11 +709,13 @@ class RuleSet:
                     return True
         return False
 
-    def needs_http1(self, host):
+    def needs_http1(self, host, device=None):
         lowered = host.lower()
         with self._lock:
             for rule in self._rules:
                 if not rule["enabled"] or not (limits_speed(rule) or closes_streams(rule)) or "host" not in rule:
+                    continue
+                if "device" in rule and rule["device"] != device:
                     continue
                 if "times" in rule and self._state.get(rule["id"], {}).get("hits", 0) >= rule["times"]:
                     continue

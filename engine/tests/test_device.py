@@ -19,6 +19,7 @@ class FakeAdb:
         self.crlf = crlf
         self.proxy = {}
         self.reverse = {}
+        self.targets = {}
         self.calls = []
         self.fail = {}
 
@@ -46,7 +47,8 @@ class FakeAdb:
             return 0, ""
         if args[:2] == ["reverse", "--list"]:
             prefix = "UsbFfs" if self.crlf else "host-19"
-            return 0, "".join("{0} tcp:{1} tcp:{1}\n".format(prefix, port) for port in self.reverse.get(serial, []))
+            return 0, "".join("{0} tcp:{1} tcp:{2}\n".format(prefix, port, self.targets.get((serial, port), port))
+                              for port in self.reverse.get(serial, []))
         if args[:2] == ["reverse", "--remove"]:
             port = int(args[2].split(":")[1])
             if port not in self.reverse.get(serial, []):
@@ -54,7 +56,9 @@ class FakeAdb:
             self.reverse[serial].remove(port)
             return 0, ""
         if args[0] == "reverse":
-            self.reverse.setdefault(serial, []).append(int(args[1].split(":")[1]))
+            local = int(args[1].split(":")[1])
+            self.reverse.setdefault(serial, []).append(local)
+            self.targets[(serial, local)] = int(args[2].split(":")[1])
             return 0, "8890\n"
         return 1, "unknown"
 
@@ -127,7 +131,7 @@ def test_status_hint_for_foreign_proxy_and_missing_reverse():
     assert "another proxy" in control(adb).apply("status", None)["hint"]
     assert "run device_proxy enable" in control(adb).apply("status", None)["hint"]
     adb.proxy["emu-1"] = "127.0.0.1:8890"
-    assert "no connection: run device_proxy enable" in control(adb).apply("status", None)["hint"]
+    assert "adb reverse does not lead to this device's port 8890" in control(adb).apply("status", None)["hint"]
 
 
 def test_failed_proxy_write_rolls_back_reverse():
@@ -272,7 +276,7 @@ def test_tool_runs_through_service_and_logs_without_secrets(service, caplog):
         answer = asyncio.run(call_tool(service, "device_proxy", {"action": "enable"}))
     assert answer["ready"] is True
     lines = [record.getMessage() for record in caplog.records if record.name == "agentproxy.device"]
-    assert lines == ["device proxy enable: proxy agentproxy, reverse on"]
+    assert lines == ["device proxy enable: proxy agentproxy, reverse on, pc port 18890"]
 
 
 def test_tool_errors_are_tool_errors_and_logged(service, caplog):
@@ -418,7 +422,7 @@ def test_status_is_not_logged_and_disable_line_has_its_format(caplog):
         tool.apply("enable", None)
         tool.apply("disable", None)
     lines = [record.getMessage() for record in caplog.records if record.name == "agentproxy.device"]
-    assert lines[-1] == "device proxy disable: proxy off, reverse off"
+    assert lines[-1] == "device proxy disable: proxy off, reverse off, pc port 8890"
 
 
 def api_calls(service, adb, requests):

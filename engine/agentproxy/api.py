@@ -116,7 +116,7 @@ class FlowsHandler(BaseHandler):
         await self.run_tool("list_flows", self.query_arguments())
 
     async def delete(self):
-        await self.run_tool("clear_flows", {})
+        await self.run_tool("clear_flows", self.query_arguments())
 
 
 class WaitHandler(BaseHandler):

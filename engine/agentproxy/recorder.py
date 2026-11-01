@@ -80,7 +80,7 @@ def _body(message, limit):
     return tap.body()
 
 
-def build_record(flow, limit, tap=None, error=None, request_tap=None):
+def build_record(flow, limit, tap=None, error=None, request_tap=None, device=None):
     request = flow.request
     if request_tap is not None:
         request_body, request_size = request_tap.body(_content_length(request))
@@ -102,6 +102,7 @@ def build_record(flow, limit, tap=None, error=None, request_tap=None):
         request_content_type=request.headers.get("content-type", ""),
         client=flow.client_conn.peername[0] if flow.client_conn and flow.client_conn.peername else "",
         rules=list(flow.metadata.get(APPLIED_MARK) or []),
+        device=device,
     )
     response = flow.response
     if response is not None:
@@ -124,7 +125,7 @@ def build_record(flow, limit, tap=None, error=None, request_tap=None):
     return record
 
 
-def tls_failure_record(data):
+def tls_failure_record(data, device=None):
     client = data.context.client
     server = data.context.server
     host = client.sni or (server.address[0] if server and server.address else "unknown")
@@ -135,7 +136,7 @@ def tls_failure_record(data):
         id=str(uuid.uuid4()), started=now, method="CONNECT", scheme="https",
         host=host, port=port, path="", url="https://{0}:{1}".format(host, port), request_headers=[],
         error=TLS_CLIENT_ERROR.format(data.conn.error or "handshake failed"),
-        client=client.peername[0] if client.peername else "")
+        client=client.peername[0] if client.peername else "", device=device)
 
 
 def connect_failure(response):
@@ -151,8 +152,9 @@ def connect_failure(response):
 
 
 class Recorder:
-    def __init__(self, store, body_limit, flow_log=None):
+    def __init__(self, store, body_limit, flow_log=None, device_of=None):
         self.store = store
+        self.device_of = device_of or (lambda client: None)
         self.flow_log = flow_log
         self.body_limit = body_limit
         self.taps = {}
@@ -163,10 +165,11 @@ class Recorder:
     async def _record(self, flow, tap=None, error=None, request_tap=None):
         packed_request = _encoded(flow.request) and (request_tap is not None or bool(flow.request.raw_content))
         packed_response = _encoded(flow.response) and (tap is not None or bool(flow.response.raw_content))
+        device = self.device_of(flow.client_conn)
         if not (packed_request or packed_response):
-            return build_record(flow, self.body_limit, tap, error, request_tap)
+            return build_record(flow, self.body_limit, tap, error, request_tap, device)
         async with self.unpacking:
-            return await asyncio.to_thread(build_record, flow, self.body_limit, tap, error, request_tap)
+            return await asyncio.to_thread(build_record, flow, self.body_limit, tap, error, request_tap, device)
 
     def requestheaders(self, flow):
         if flow.metadata.get(NO_REQUEST_STREAM_MARK):
@@ -267,7 +270,7 @@ class Recorder:
         server = data.context.server
         if not (server and server.address):
             return
-        record = tls_failure_record(data)
+        record = tls_failure_record(data, self.device_of(data.context.client))
         try:
             seq = self.store.insert(record)
         except Exception:

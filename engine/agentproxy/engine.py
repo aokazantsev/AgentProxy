@@ -18,6 +18,7 @@ from .api import make_app
 from .charles import PAUSED_FOR, CharlesYield, charles_running
 from .claude import integration
 from .cutter import install as install_body_cutting
+from .deviceports import DeviceListeners, DevicePorts
 from .flowlog import FlowLog
 from .guard import OwnPortsGuard
 from .eventrules import EventStreams
@@ -118,42 +119,59 @@ def settings_for_log(current):
     return replace(current, adb_path="(set)" if current.adb_path else "")
 
 
-def proxy_options(current, cert_dir, listening=True):
+def proxy_modes(device_ports=()):
+    return ["regular"] + ["regular@{0}".format(port) for port in device_ports]
+
+
+def proxy_options(current, cert_dir, listening=True, device_ports=()):
     from mitmproxy import options
     return options.Options(listen_host=LOCAL_HOST, listen_port=current.proxy_port, confdir=cert_dir,
-                           ssl_insecure=not current.verify_upstream, websocket=True, server=listening)
+                           ssl_insecure=not current.verify_upstream, websocket=True, server=listening,
+                           mode=proxy_modes(device_ports))
 
 
-def create_master(current, cert_dir, listening=True):
+def create_master(current, cert_dir, listening=True, device_ports=()):
     from mitmproxy.tools.dump import DumpMaster
-    master = DumpMaster(proxy_options(current, cert_dir, listening), with_termlog=False, with_dumper=False)
+    master = DumpMaster(proxy_options(current, cert_dir, listening, device_ports), with_termlog=False,
+                        with_dumper=False)
     master.options.update(stream_large_bodies=str(MAX_FILE_BYTES))
     return master
+
+
+def port_free(port):
+    return port_problem(LOCAL_HOST, port) is None
 
 
 async def serve(current, data_dir, parent_pid):
     cert_dir = paths.ensure(os.path.join(data_dir, "certs"))
     store = FlowStore(os.path.join(data_dir, "flows.db"), current.max_flows)
     rules = RuleSet(data_dir)
-    service = ProxyService(store, current, data_dir, cert_dir, rules)
+    ports = DevicePorts(data_dir, current.proxy_port, current.api_port, port_free)
+    for busy, moved in ports.check_free():
+        log.warning("device port %s is busy, the device moves to port %s: run device_proxy enable for it again",
+                    busy, moved)
+    service = ProxyService(store, current, data_dir, cert_dir, rules, ports)
     if current.yield_to_charles and charles_at_start():
         service.paused_for = PAUSED_FOR
-    master = create_master(current, cert_dir, listening=not service.paused_for)
-    master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port))
+    master = create_master(current, cert_dir, listening=not service.paused_for, device_ports=ports.ports())
+    master.addons.add(OwnPortsGuard(current.proxy_port, current.api_port, ports.ports))
     streams = StreamHost()
     await streams.start()
     speeds = SpeedLimits()
     install_speed_limits(speeds)
     install_body_cutting()
     events = EventStreams()
-    master.addons.add(Rewriter(rules, streams, speeds, events))
-    recorder = Recorder(store, current.max_body_bytes, FlowLog())
+    master.addons.add(Rewriter(rules, streams, speeds, events, ports.device_of_client))
+    recorder = Recorder(store, current.max_body_bytes, FlowLog(), ports.device_of_client)
     master.addons.add(recorder)
     service.injector = WebSocketInjector(master, recorder)
     service.streams = StreamLookup(streams, recorder)
     service.speeds = speeds
     service.events = events
     loop = asyncio.get_running_loop()
+    service.device.ports = DeviceListeners(
+        ports, lambda device_ports: master.options.update(mode=proxy_modes(device_ports)),
+        lambda port: proxy_listening(LOCAL_HOST, port), lambda: bool(service.paused_for), loop)
 
     def shutdown():
         loop.call_soon_threadsafe(master.shutdown)
@@ -172,7 +190,8 @@ async def serve(current, data_dir, parent_pid):
                                lambda: proxy_listening(LOCAL_HOST, current.proxy_port))
         service.charles = watcher
         yielder = asyncio.ensure_future(watcher.run())
-    log.info("api on %s:%s, proxy on %s:%s", LOCAL_HOST, current.api_port, LOCAL_HOST, current.proxy_port)
+    log.info("api on %s:%s, proxy on %s:%s, device ports %s", LOCAL_HOST, current.api_port, LOCAL_HOST,
+             current.proxy_port, ", ".join(str(port) for port in ports.ports()) or "none")
     try:
         await master.run()
     finally:

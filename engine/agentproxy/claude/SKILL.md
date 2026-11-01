@@ -88,6 +88,14 @@ MCP недоступен (сессия началась до установки)
 **После работы выключить прокси сам**: `device_proxy` (`action: disable`) — иначе у устройства пропадёт интернет, когда
 AgentProxy закроют.
 
+## Несколько устройств
+
+После `device_proxy enable` устройство приходит на свой порт ПК (`pc_port`, закреплён за `serial`; все — `device_ports`
+в `proxy_status`), у его запросов `device` = `serial`, у запросов ПК — `null`. При нескольких устройствах работать только
+со своим: `serial` в `device_proxy` и `check_connection`; `device` в `list_flows`, `wait_for_flow`, `wait_for_event` и
+`add_rule` (без него правило подменит ответы всем); после задачи — `delete_rule` с `all` и `device`, `clear_flows` с
+`device`. Устройство, подключённое до 1.7, — повторить `device_proxy enable`.
+
 ## Почему не видно трафика
 
 Сначала `check_connection`: прокси устройства, `adb reverse`, запросы за последние минуты, отказы TLS по хостам

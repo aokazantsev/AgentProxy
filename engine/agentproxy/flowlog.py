@@ -107,6 +107,8 @@ def describe_rule(rule):
     for name in ("after_bytes", "after_percent"):
         if name in rule:
             parts.append("{0} {1}".format(name, rule[name]))
+    if "device" in rule:
+        parts.append("one device")
     if not rule.get("enabled", True):
         parts.append("disabled")
     return ", ".join(parts)

@@ -10,6 +10,7 @@ from dataclasses import replace
 from . import VERSION, connection, logreader
 from .bodies import render
 from .device import DeviceControl, DeviceError
+from .deviceports import valid_serial
 from .flowlog import clean, describe_rule
 from .injector import InjectError
 from .rules import VIEW_FIELDS, RuleError, RuleNotFound, closes_streams, limits_speed, matches
@@ -103,6 +104,13 @@ def _check_text(name, value):
         raise ToolError("{0} must be valid Unicode text".format(name))
 
 
+def _device(arguments, name="device"):
+    value = _str(arguments, name)
+    if value is not None and not valid_serial(value):
+        raise ToolError("{0} is the adb serial of a device (device_proxy status, adb devices)".format(name))
+    return value
+
+
 def _choice(arguments, name, choices):
     value = _str(arguments, name)
     if value is not None and value not in choices:
@@ -136,6 +144,7 @@ def build_filter(arguments):
         rule=_str(arguments, "rule"),
         kind=_choice(arguments, "kind", FLOW_KINDS),
         open_only=_bool(arguments, "open"),
+        device=_device(arguments),
     )
 
 
@@ -153,7 +162,12 @@ FILTER_PROPERTIES = {
              "description": "http: plain requests; sse: Server-Sent Events streams; websocket: WebSocket connections "
                             "(the last two carry events, see list_events)"},
     "open": {"type": "boolean", "description": "Only streams (sse, websocket) that are still open"},
+    "device": {"type": "string", "description": "Only flows of this Android device, by adb serial: each device routed "
+                                                "with device_proxy enable comes to its own port on this PC, and every "
+                                                "flow carries device (null for this PC and devices routed by hand)"},
 }
+
+DEVICE_SCOPE = {"type": "string", "description": "adb serial of the device whose flows to take; leave it out for all"}
 
 EVENT_PROPERTIES = {
     "direction": {"type": "string", "enum": list(DIRECTIONS),
@@ -194,6 +208,10 @@ RULE_PROPERTIES = {
                                               "(as in list_flows)"},
     "method": {"type": "string", "description": "Condition: HTTP method"},
     "url_regex": {"type": "string", "description": "Condition: Python regular expression searched in the full URL"},
+    "device": {"type": "string", "description": "Scope: apply only to requests of this Android device, by adb serial "
+                                                "(as device in list_flows); by default the rule applies to every "
+                                                "device and this PC. With several devices connected, set it so a "
+                                                "rule for one device does not change what the others get"},
     "delay_ms": {"type": "integer", "description": "Wait after the request body before the request goes on "
                                                 "(any action except events), 0..300000; under rewrite and delay an upload without "
                                                 "length or over max_body_bytes (2 MB by default) reaches the server "
@@ -341,8 +359,9 @@ def _brief(rule):
 
 
 class ProxyService:
-    def __init__(self, store, settings, data_dir, cert_dir, rules):
+    def __init__(self, store, settings, data_dir, cert_dir, rules, ports=None):
         self.store = store
+        self.ports = ports
         self.rules = rules
         self.settings = settings
         self.data_dir = data_dir
@@ -371,7 +390,8 @@ class ProxyService:
         return {
             "version": VERSION,
             "proxy": {"host": "127.0.0.1", "port": settings.proxy_port, "running": self.proxy_running,
-                      "paused": self.paused_for, "yield_to_charles": settings.yield_to_charles},
+                      "paused": self.paused_for, "yield_to_charles": settings.yield_to_charles,
+                      "device_ports": self.ports.mapping() if self.ports is not None else {}},
             "api": api,
             "mcp": api + "/mcp",
             "monitor": api + "/",
@@ -419,7 +439,7 @@ class ProxyService:
                                        "note": "a stream: read it with list_events"}
         return record
 
-    def _flow_ref(self, value):
+    def _flow_ref(self, value, device=None):
         if isinstance(value, int) and not isinstance(value, bool):
             value = str(value)
         if not isinstance(value, str) or not value:
@@ -428,6 +448,9 @@ class ProxyService:
         summary = self.store.find_summary(value)
         if summary is None:
             raise NotFound(FLOW_NOT_FOUND.format(value))
+        if device is not None and summary.get("device") != device:
+            raise NotFound("flow {0} is not a flow of device {1}: list_flows with device={1} shows its "
+                           "flows".format(value, device))
         if summary.get("kind", "http") == "http":
             raise ToolError("flow {0} is a plain request, it has no events: only sse and websocket flows do; list_flows with "
                             "kind sse or websocket finds them".format(value))
@@ -453,7 +476,7 @@ class ProxyService:
         return view
 
     def list_events(self, arguments):
-        summary = self._flow_ref(arguments.get("flow"))
+        summary = self._flow_ref(arguments.get("flow"), _device(arguments))
         limit = _int(arguments, "limit", DEFAULT_EVENT_LIMIT, 1, MAX_LIST_LIMIT)
         max_chars = _int(arguments, "max_data_chars", DEFAULT_EVENT_CHARS, 0, 10 * 1024 * 1024)
         flow = self._stream(summary["seq"])
@@ -463,15 +486,17 @@ class ProxyService:
                 "events": [self._event_view(event, flow["started"], max_chars) for event in events]}
 
     def clear_flows(self, arguments):
-        return {"removed": self.store.clear()}
+        return {"removed": self.store.clear(_device(arguments))}
 
     def history_matches(self, rule, editable_only=True):
-        flow_filter = FlowFilter(host=rule.get("host"), path=rule.get("path"), method=rule.get("method"))
+        flow_filter = FlowFilter(host=rule.get("host"), path=rule.get("path"), method=rule.get("method"),
+                                 device=rule.get("device"))
         summaries = self.store.query(flow_filter, min(self.settings.max_flows, HISTORY_SCAN_LIMIT))
         kinds = _stream_kinds(rule)
         return sum(1 for summary in summaries if summary["method"] != "CONNECT"
                    and (kinds is None or summary.get("kind", "http") in kinds)
-                   and matches(rule, summary["host"], summary["path"], summary["method"], summary["url"])
+                   and matches(rule, summary["host"], summary["path"], summary["method"], summary["url"],
+                               summary.get("device"))
                    and (kinds is None or not editable_only or summary["kind"] != "sse" or self._editable_sse(summary)))
 
     def _editable_sse(self, summary):
@@ -549,6 +574,13 @@ class ProxyService:
             else:
                 hints.append("without a host condition HTTP/2 connections stay HTTP/2 and are slowed as a whole, "
                              "all their requests: add host to slow only the matching requests")
+        device_ports = self.ports.mapping() if self.ports is not None else {}
+        if "device" in rule and rule["device"] not in device_ports:
+            hints.append("device {0} has no port of its own yet, so the rule does not apply until device_proxy enable "
+                         "with serial {0}".format(rule["device"]))
+        elif "device" not in rule and len(device_ports) > 1:
+            hints.append("the rule applies to every device and this PC; with several devices set device so the others "
+                         "are not affected")
         if rule.get("remaining") == 0 and rule["enabled"]:
             hints.append("the rule has used all its times; pass reset_hits=true to start it again")
         if hints:
@@ -586,28 +618,33 @@ class ProxyService:
         if not changes and not reset_hits:
             raise ToolError("nothing to change: pass the fields to set, null to remove one, or reset_hits")
         try:
+            before = self.rules.get(rule_id).get("device")
             rule = self.rules.update(rule_id, changes, reset_hits)
         except RuleNotFound as error:
             raise NotFound(str(error))
         except RuleError as error:
             raise ToolError(str(error))
+        moved = before != rule.get("device")
         log.info("rule %s updated (%s): %s", rule_id, ", ".join(sorted(changes) + (["reset_hits"] if reset_hits else [])),
                  describe_rule(rule))
-        if self.streams is not None and (not rule["enabled"] or rule["action"] != "sse"):
+        if self.streams is not None and (not rule["enabled"] or rule["action"] != "sse" or moved):
             self.streams.close_rules([rule_id])
         if self.speeds is not None:
-            self.speeds.change_rule(rule_id, rule_limits(rule))
+            self.speeds.change_rule(rule_id, None if moved else rule_limits(rule))
         if self.events is not None:
-            self.events.change_rule(rule_id, rule)
+            self.events.change_rule(rule_id, None if moved else rule)
         return self._rule_answer(rule, updated=True)
 
     def delete_rule(self, arguments):
         rule_id = _str(arguments, "id")
         delete_all = _bool(arguments, "all")
+        device = _device(arguments)
         if (rule_id is None) == (not delete_all):
             raise ToolError("pass either id or all=true")
+        if device is not None and not delete_all:
+            raise ToolError("device goes with all=true: it deletes the rules of that device")
         try:
-            removed = self.rules.clear() if delete_all else self.rules.delete(rule_id)
+            removed = self.rules.clear(device) if delete_all else self.rules.delete(rule_id)
         except RuleNotFound as error:
             raise NotFound(str(error))
         except RuleError as error:
@@ -655,7 +692,7 @@ class ProxyService:
 
     async def check_connection(self, arguments):
         minutes = _int(arguments, "since_minutes", connection.DEFAULT_MINUTES, 1, connection.MAX_MINUTES)
-        serial = _str(arguments, "serial")
+        serial = _device(arguments, "serial")
         device = {"checked": False}
         if _bool(arguments, "device", True):
             try:
@@ -666,7 +703,7 @@ class ProxyService:
             except DeviceError as error:
                 device = {"checked": False, "problem": str(error), "problem_kind": error.kind}
         now = time.time()
-        rows = await asyncio.to_thread(self.store.activity, connection.SCAN_LIMIT)
+        rows = await asyncio.to_thread(self.store.activity, connection.SCAN_LIMIT, serial)
         traffic, failures = connection.summarize(rows, now, minutes)
         listening = self.proxy_running
         result = {"verdict": connection.verdict(listening, traffic, failures, device, self.paused_for),
@@ -773,7 +810,7 @@ class ProxyService:
         event_filter = build_event_filter(arguments)
         target = None
         if arguments.get("flow") not in (None, ""):
-            target = self._flow_ref(arguments.get("flow"))["seq"]
+            target = self._flow_ref(arguments.get("flow"), flow_filter.device)["seq"]
         elif event_filter.since_n is not None:
             raise ToolError("since_n needs flow: event numbers count inside one stream")
         if target is not None:
@@ -864,7 +901,8 @@ TOOLS = [
     {
         "name": "list_flows",
         "description": "Recorded HTTP(S) flows, newest first, as summaries without bodies. "
-                       "Use filters to narrow down; use get_flow for headers and bodies. " + UNTRUSTED_NOTE,
+                       "Use filters to narrow down; use get_flow for headers and bodies. With several devices "
+                       "connected pass device to see only yours. " + UNTRUSTED_NOTE,
         "inputSchema": {"type": "object", "properties": dict(FILTER_PROPERTIES, limit={
             "type": "integer", "description": "Maximum flows to return, 1..500, default 50"})},
         "handler": "list_flows",
@@ -906,7 +944,8 @@ TOOLS = [
             "flow": {"type": "string", "description": "Flow id or seq number of the stream"},
             "since_n": {"type": "integer", "description": "Only events with n greater than this value"},
             "limit": {"type": "integer", "description": "Maximum events to return, 1..500, default 100"},
-            "tail": {"type": "boolean", "description": "Return the last matching events instead of the first"}})},
+            "tail": {"type": "boolean", "description": "Return the last matching events instead of the first"},
+            "device": {"type": "string", "description": "adb serial: refuse a flow of another device"}})},
         "handler": "list_events",
     },
     {
@@ -951,15 +990,15 @@ TOOLS = [
                                                           "value; by default the events already stored are skipped"},
             "host": FILTER_PROPERTIES["host"], "path": FILTER_PROPERTIES["path"],
             "url_contains": FILTER_PROPERTIES["url_contains"], "kind": FILTER_PROPERTIES["kind"],
-            "open": FILTER_PROPERTIES["open"],
+            "open": FILTER_PROPERTIES["open"], "device": FILTER_PROPERTIES["device"],
             "timeout_seconds": {"type": "integer", "description": "1..300, default 60"}})},
         "handler": "wait_for_event",
     },
     {
         "name": "clear_flows",
         "description": "Delete all recorded flows except SSE and WebSocket streams that are still open: they keep "
-                       "being recorded with their events.",
-        "inputSchema": {"type": "object", "properties": {}},
+                       "being recorded with their events. With device only the flows of that device.",
+        "inputSchema": {"type": "object", "properties": {"device": DEVICE_SCOPE}},
         "handler": "clear_flows",
     },
     {
@@ -997,17 +1036,22 @@ TOOLS = [
     },
     {
         "name": "delete_rule",
-        "description": "Delete a rule by id, or all rules with all=true.",
+        "description": "Delete a rule by id, or all rules with all=true; all=true with device deletes only the rules "
+                       "scoped to that device.",
         "inputSchema": {"type": "object", "properties": {
             "id": {"type": "string", "description": "Rule id, e.g. r1"},
-            "all": {"type": "boolean", "description": "Delete every rule"}}},
+            "all": {"type": "boolean", "description": "Delete every rule"},
+            "device": {"type": "string", "description": "With all=true: adb serial; only rules with this device go, "
+                                                        "rules for every device stay"}}},
         "handler": "delete_rule",
     },
     {
         "name": "device_proxy",
         "description": "Route an Android device (USB, Wi-Fi debugging or emulator, through adb) via AgentProxy or "
-                       "take it off: enable sets adb reverse and the device's global proxy to the AgentProxy port, "
-                       "disable clears the proxy and removes the reverse, status only reads. The answer holds the "
+                       "take it off: enable sets the device's global proxy to 127.0.0.1 and the AgentProxy port, and "
+                       "adb reverse from that port to the device's own port on this PC (pc_port, kept per serial), "
+                       "so its flows carry device; disable clears the proxy and removes the reverse, status only "
+                       "reads. The answer holds the "
                        "proxy the device had before (previous_proxy), the state after the call and a hint. One "
                        "connected device is picked by itself, with several pass serial. A device left with the "
                        "proxy set has no internet once AgentProxy stops: disable it when the task is done. If previous_proxy was "
@@ -1037,7 +1081,8 @@ TOOLS = [
             "since_minutes": {"type": "integer", "description": "Window for traffic and failures, 1..1440, default 5"},
             "device": {"type": "boolean", "description": "Default true: read the device state over adb; false for a "
                                                          "browser or program on this PC"},
-            "serial": {"type": "string", "description": "adb serial when several devices are connected"}}},
+            "serial": {"type": "string", "description": "adb serial when several devices are connected; traffic and "
+                                                        "failures then count only this device's flows"}}},
         "handler": "check_connection",
     },
     {

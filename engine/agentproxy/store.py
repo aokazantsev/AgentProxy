@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS flows (
     kind TEXT NOT NULL DEFAULT 'http',
     open INTEGER NOT NULL DEFAULT 0,
     event_count INTEGER NOT NULL DEFAULT 0,
-    events_bytes INTEGER NOT NULL DEFAULT 0
+    events_bytes INTEGER NOT NULL DEFAULT 0,
+    device TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,11 +81,12 @@ ADDED_COLUMNS = (
     ("open", "INTEGER NOT NULL DEFAULT 0"),
     ("event_count", "INTEGER NOT NULL DEFAULT 0"),
     ("events_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("device", "TEXT"),
 )
 
 SUMMARY_COLUMNS = ("seq", "id", "started", "duration_ms", "method", "scheme", "host", "port", "path", "url",
                    "status", "error", "request_body_size", "response_body_size", "response_content_type", "rules",
-                   "kind", "open", "event_count")
+                   "kind", "open", "event_count", "device")
 
 
 @dataclass
@@ -114,6 +116,7 @@ class FlowRecord:
     rules: list = field(default_factory=list)
     kind: str = "http"
     open: bool = False
+    device: str = None
 
 
 @dataclass(frozen=True)
@@ -128,8 +131,11 @@ class FlowFilter:
     rule: str = None
     kind: str = None
     open_only: bool = False
+    device: str = None
 
     def matches(self, record):
+        if self.device and self.device != record.get("device"):
+            return False
         if self.host and self.host.lower() not in record["host"].lower():
             return False
         if self.path and self.path not in record["path"]:
@@ -288,7 +294,7 @@ class FlowStore:
             "response_body_size": record.response_body_size,
             "response_content_type": record.response_content_type, "client": record.client,
             "rules": json.dumps(record.rules) if record.rules else None,
-            "kind": record.kind, "open": 1 if record.open else 0,
+            "kind": record.kind, "open": 1 if record.open else 0, "device": record.device,
         }
         for name, value in row.items():
             if isinstance(value, str):
@@ -499,6 +505,9 @@ class FlowStore:
             params.append(flow_filter.kind)
         if flow_filter.open_only:
             clauses.append("open = 1")
+        if flow_filter.device:
+            clauses.append("device = ?")
+            params.append(flow_filter.device)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = "SELECT {0} FROM flows{1} ORDER BY seq {2} LIMIT ?".format(", ".join(SUMMARY_COLUMNS), where,
                                                                       "ASC" if oldest_first else "DESC")
@@ -506,10 +515,12 @@ class FlowStore:
             rows = self._db.execute(sql, params + [limit]).fetchall()
         return [_row(row) for row in rows]
 
-    def activity(self, limit):
+    def activity(self, limit, device=None):
+        where = " WHERE device = ?" if device else ""
+        params = ([device] if device else []) + [limit]
         with self._lock:
-            rows = self._db.execute("SELECT started, duration_ms, method, scheme, host, error, open FROM flows "
-                                    "ORDER BY seq DESC LIMIT ?", (limit,)).fetchall()
+            rows = self._db.execute("SELECT started, duration_ms, method, scheme, host, error, open FROM flows{0} "
+                                    "ORDER BY seq DESC LIMIT ?".format(where), params).fetchall()
         return [dict(row) for row in rows]
 
     def get(self, flow_id):
@@ -533,9 +544,12 @@ class FlowStore:
             value = self._db.execute("SELECT MAX(seq) FROM flows").fetchone()[0]
         return value or 0
 
-    def clear(self):
+    def clear(self, device=None):
         with self._lock:
-            removed = self._delete_flows("open = 0", ())
+            if device:
+                removed = self._delete_flows("open = 0 AND device = ?", (device,))
+            else:
+                removed = self._delete_flows("open = 0", ())
             self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
         return removed
 
