@@ -4,7 +4,7 @@ import pytest
 
 from agentproxy import store as store_module
 from agentproxy.rules import RuleSet
-from agentproxy.service import ProxyService, ToolError, call_tool, public_tools
+from agentproxy.service import EVENT_TIMEOUT_HINT, ProxyService, ToolError, WAIT_TIMEOUT_HINT, call_tool, public_tools
 from agentproxy.store import ENGINE_STOPPED, EventFilter, FlowFilter, FlowStore
 
 from conftest import make_record
@@ -430,7 +430,26 @@ def test_wait_for_event_on_a_stream_that_is_already_over_answers_at_once(service
 
 def test_wait_for_event_times_out_without_a_stream(service):
     answer = run(service.wait_for_event({"kind": "sse", "timeout_seconds": 1}))
-    assert answer == {"flow": None, "event": None, "timed_out": True}
+    assert answer["flow"] is None and answer["event"] is None and answer["timed_out"] is True
+    assert "since_n" not in answer and "list_events" in answer["hint"]
+
+
+def test_flow_that_ends_between_two_waits_is_found_by_the_repeat_with_last_seq(service, store):
+    store.insert(make_record(1))
+    first = run(service.wait_for_flow({"timeout_seconds": 1}))
+    assert first["timed_out"] is True and first["last_seq"] == store.last_seq() and "since_seq" in first["hint"]
+    gap = store.insert(make_record(2))
+    assert run(service.wait_for_flow({"since_seq": first["last_seq"], "timeout_seconds": 1}))["flow"]["seq"] == gap
+
+
+def test_event_that_comes_between_two_waits_is_found_by_the_repeat_with_since_n(service, store):
+    seq = stream(store)
+    store.add_event(seq, "incoming", "event", b"old")
+    first = run(service.wait_for_event({"flow": seq, "timeout_seconds": 1}))
+    assert first["timed_out"] is True and first["since_n"] == 1 and "since_n" in first["hint"]
+    store.add_event(seq, "incoming", "event", b"gap")
+    again = run(service.wait_for_event({"flow": seq, "since_n": first["since_n"], "timeout_seconds": 1}))
+    assert again["event"]["data"] == "gap"
 
 
 def test_wait_for_event_does_not_leak_listeners(service, store):
@@ -650,3 +669,12 @@ def test_note_of_a_close_on_an_outgoing_message_is_outgoing(store):
     note = store.events(seq, EventFilter(), 10)[-1]
     assert note["type"] == "note" and note["direction"] == "outgoing"
     assert "closed the stream before outgoing event 1" in note["note"]
+
+
+def test_timed_out_hints_and_schemas_name_the_cursor_to_repeat_with():
+    assert "since_seq = last_seq" in WAIT_TIMEOUT_HINT
+    assert "same flow" in EVENT_TIMEOUT_HINT and "since_n" in EVENT_TIMEOUT_HINT
+    schemas = {tool["name"]: tool["inputSchema"]["properties"]["timeout_seconds"]["description"]
+               for tool in public_tools() if tool["name"] in ("wait_for_flow", "wait_for_event")}
+    assert "since_seq = last_seq" in schemas["wait_for_flow"]
+    assert "same flow" in schemas["wait_for_event"] and "since_n" in schemas["wait_for_event"]
