@@ -365,6 +365,28 @@ def test_wait_for_event_skips_stored_events_unless_since_n_is_given(service, sto
     assert answer["timed_out"] is True and answer["event"] is None and answer["flow"]["seq"] == seq
 
 
+def test_waits_stay_under_the_mcp_client_cut(service, store, monkeypatch):
+    asked = []
+
+    async def fake_wait_for(future, timeout):
+        asked.append(timeout)
+        future.cancel()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("agentproxy.service.asyncio.wait_for", fake_wait_for)
+    seq = stream(store)
+    for arguments in ({}, {"timeout_seconds": 55}):
+        assert run(service.wait_for_flow(dict(arguments)))["timed_out"] is True
+        assert run(service.wait_for_event(dict(arguments, flow=seq)))["timed_out"] is True
+    assert asked == [50, 50, 55, 55]
+    for name in ("wait_for_flow", "wait_for_event"):
+        with pytest.raises(ToolError, match="<= 55"):
+            run(getattr(service, name)({"flow": seq, "timeout_seconds": 60}))
+    schemas = [tool["inputSchema"]["properties"]["timeout_seconds"]["description"]
+               for tool in public_tools() if tool["name"] in ("wait_for_flow", "wait_for_event")]
+    assert len(schemas) == 2 and all(text.startswith("1..55, default 50") for text in schemas)
+
+
 def test_wait_for_event_without_flow_follows_streams_by_filter(service, store):
     async def scenario():
         waiter = asyncio.ensure_future(service.wait_for_event({"kind": "websocket", "direction": "incoming",

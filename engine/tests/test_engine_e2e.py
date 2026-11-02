@@ -287,9 +287,9 @@ def test_waiting_clients_get_error_when_engine_stops(engine):
     port = engine["api_port"]
     answers = {}
     mcp_call = {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
-        "name": "wait_for_flow", "arguments": {"path": "/never", "timeout_seconds": 60}}}
+        "name": "wait_for_flow", "arguments": {"path": "/never", "timeout_seconds": 55}}}
     waiters = [
-        threading.Thread(target=lambda: answers.update(api=api_get(port, "/api/flows/wait?path=/never&timeout_seconds=60", timeout=30))),
+        threading.Thread(target=lambda: answers.update(api=api_get(port, "/api/flows/wait?path=/never&timeout_seconds=55", timeout=30))),
         threading.Thread(target=lambda: answers.update(mcp=api_post(port, "/mcp", mcp_call))),
     ]
     for waiter in waiters:
