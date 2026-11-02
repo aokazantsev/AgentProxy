@@ -116,7 +116,12 @@ class FlowsHandler(BaseHandler):
         await self.run_tool("list_flows", self.query_arguments())
 
     async def delete(self):
-        await self.run_tool("clear_flows", self.query_arguments())
+        arguments = self.query_arguments()
+        if set(arguments) - {"device"} or self.request.body:
+            self.write_json({"error": "DELETE /api/flows clears the history, with ?device=<serial> the history of that "
+                                      "device, and takes no other parameters"}, 400)
+            return
+        await self.run_tool("clear_flows", arguments)
 
 
 class WaitHandler(BaseHandler):

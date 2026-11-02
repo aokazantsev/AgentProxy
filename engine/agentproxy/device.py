@@ -6,7 +6,7 @@ import subprocess
 import sys
 import threading
 
-from .deviceports import SERIAL_PATTERN, DevicePortError
+from .deviceports import SERIAL_PATTERN, DevicePortError, valid_serial
 from .flowlog import clean
 
 log = logging.getLogger("agentproxy.device")
@@ -61,8 +61,8 @@ def find_adb(configured="", environ=None):
 
 def reconnect_advice(command):
     serial = command[command.index("-s") + 1] if "-s" in command[:-1] else "<serial>"
-    return ("replug it or run adb -s {0} reconnect (adb kill-server and a bare adb reconnect drop every connected "
-            "device), then repeat".format(serial))
+    return ("replug it or run adb -s {0} reconnect (adb kill-server drops every connected device), then "
+            "repeat".format(serial))
 
 
 def run_command(command, timeout=ADB_TIMEOUT_SECONDS):
@@ -103,7 +103,7 @@ class DeviceControl:
     def apply(self, action, serial):
         if action not in ACTIONS:
             raise DeviceError("action must be one of {0}".format(", ".join(ACTIONS)), "unknown action")
-        if serial is not None and not SERIAL_PATTERN.fullmatch(serial):
+        if serial is not None and not valid_serial(serial):
             raise DeviceError("serial has an unexpected form; take it from device_proxy status or adb devices",
                               "bad serial")
         with self.lock:
@@ -122,18 +122,17 @@ class DeviceControl:
             else:
                 target = self._known_port(serial, port)
             previous_target = self._reverse_target(serial, port)
-            had_reverse = previous_target is not None and previous_target == (
-                port if target is None and action == "disable" else target)
+            had_reverse = previous_target is not None and (action == "disable" or previous_target == target)
             if action == "enable":
                 self._enable(serial, port, target, address, previous_target)
             elif action == "disable":
                 self._disable(serial, port)
-            answer = self._state(serial, port, target, address)
+            answer, port_idle = self._state(serial, port, target, address)
             answer["action"] = action
             answer["previous_proxy"] = None if device_is_proxy_off(previous) else previous.strip()
             answer["changed"] = action != "status" and (answer["previous_proxy"] != answer["device_proxy"]
                                                         or had_reverse != answer["reverse_active"])
-            answer["hint"] = self._hint(action, answer)
+            answer["hint"] = self._hint(action, answer, port_idle)
             if action != "status":
                 log.info("device proxy %s: proxy %s, reverse %s, pc port %s", action, self._proxy_kind(answer),
                          "on" if answer["reverse_active"] else "off", target or port)
@@ -280,6 +279,9 @@ class DeviceControl:
         proxy = None if device_is_proxy_off(value) else value.strip()
         reverse = self._reverse_active(serial, port, target)
         listening = self.is_listening()
+        port_idle = (listening and self.ports is not None and target is not None
+                     and not self.ports.is_listening(target))
+        listening = listening and not port_idle
         return {
             "serial": serial,
             "device_proxy": proxy,
@@ -288,10 +290,10 @@ class DeviceControl:
             "reverse_active": reverse,
             "proxy_listening": listening,
             "ready": proxy == address and reverse and listening,
-        }
+        }, port_idle
 
     @staticmethod
-    def _hint(action, state):
+    def _hint(action, state, port_idle):
         if action == "disable":
             if state["device_proxy"]:
                 return "the device proxy is still set: check the device and repeat"
@@ -300,6 +302,9 @@ class DeviceControl:
             return ("the device proxy and adb reverse point to AgentProxy; apps that read the proxy only at start need "
                     "a restart; HTTPS needs the AgentProxy certificate on the device (agentproxy skill, connecting a "
                     "device)")
+        if state["device_proxy"] == state["expected_proxy"] and port_idle:
+            return ("the proxy does not listen on this device's port {0}: read_log shows why; restarting the engine "
+                    "opens it again".format(state["pc_port"]))
         if state["device_proxy"] == state["expected_proxy"] and not state["proxy_listening"]:
             return ("the device points to AgentProxy but the proxy is not listening, so the device has no "
                     "connection: check proxy_status and read_log, or run device_proxy disable")
@@ -307,10 +312,12 @@ class DeviceControl:
             return "the device uses another proxy ({0}): run device_proxy enable to switch it to AgentProxy".format(
                 state["device_proxy"])
         if state["device_proxy"] and state["pc_port"] is None:
-            return ("the device has no port of its own on the PC yet (it was routed by an older AgentProxy or by "
-                    "hand): its traffic is not marked with the device; run device_proxy enable")
+            return ("the device has no port of its own on the PC (it was routed by an older AgentProxy or by hand, "
+                    "or forgotten after 32 newer devices): its traffic does not arrive or is not marked with the "
+                    "device; run device_proxy enable")
         if state["device_proxy"] and not state["reverse_active"]:
-            return ("adb reverse does not lead to this device's port {0} on the PC (missing, or left by an older "
-                    "AgentProxy on the shared port): its traffic is not marked with the device or does not arrive; "
-                    "run device_proxy enable".format(state["pc_port"]))
+            return ("adb reverse does not lead to this device's port {0} on the PC (missing, left by an older "
+                    "AgentProxy on the shared port, or the port moved because it was busy at engine start): its "
+                    "traffic is not marked with the device or does not arrive; run device_proxy enable".format(
+                        state["pc_port"]))
         return "the device proxy is off: run device_proxy enable to route its traffic through AgentProxy"

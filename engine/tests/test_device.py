@@ -8,9 +8,12 @@ import pytest
 
 from agentproxy import device, settings as settings_module
 from agentproxy.device import DeviceControl, DeviceError, find_adb, parse_devices
+from agentproxy.deviceports import MAX_SERIAL_LENGTH, valid_serial
 from agentproxy.rules import RuleSet
 from agentproxy.service import ProxyService, ToolError, call_tool, public_tools
 from agentproxy.settings import Settings
+
+from conftest import make_record
 
 
 class FakeAdb:
@@ -54,6 +57,7 @@ class FakeAdb:
             if port not in self.reverse.get(serial, []):
                 return 1, "adb: error: listener 'tcp:{0}' not found".format(port)
             self.reverse[serial].remove(port)
+            self.targets.pop((serial, port), None)
             return 0, ""
         if args[0] == "reverse":
             local = int(args[1].split(":")[1])
@@ -212,6 +216,14 @@ def test_bad_serial_and_action_are_refused_before_adb():
     with pytest.raises(DeviceError):
         control(adb).apply("reboot", None)
     assert adb.calls == []
+
+
+def test_too_long_serial_is_refused_before_adb():
+    adb = FakeAdb({"a" * (MAX_SERIAL_LENGTH + 1): "device"})
+    with pytest.raises(DeviceError, match="serial has an unexpected form"):
+        control(adb).apply("status", "a" * (MAX_SERIAL_LENGTH + 1))
+    assert adb.calls == []
+    assert valid_serial("a" * MAX_SERIAL_LENGTH)
 
 
 def test_parse_devices_skips_daemon_noise():
@@ -444,7 +456,7 @@ def api_calls(service, adb, requests):
         try:
             for method, path, body in requests:
                 response = await client.fetch("http://127.0.0.1:{0}{1}".format(port, path), method=method,
-                                              body=body, raise_error=False)
+                                              body=body, raise_error=False, allow_nonstandard_methods=True)
                 answers.append((response.code, json.loads(response.body)))
             return answers
         finally:
@@ -475,3 +487,17 @@ def test_device_api_post_enables_with_serial_and_refuses_bad_bodies(service):
     assert answers[2][0] == 400 and "not valid JSON" in answers[2][1]["error"]
     assert answers[3][0] == 400 and "action must be one of" in answers[3][1]["error"]
     assert answers[4][0] == 400 and "action is required" in answers[4][1]["error"]
+
+
+def test_flows_api_delete_takes_only_the_device(service, store):
+    store.insert(make_record(1, device="a1"))
+    store.insert(make_record(2))
+    answers = api_calls(service, FakeAdb(), [
+        ("DELETE", "/api/flows?host=other.example", None),
+        ("DELETE", "/api/flows?device=a1", '{"device": "a1"}'),
+        ("DELETE", "/api/flows?device=a1", None),
+    ])
+    assert answers[0][0] == 400 and "?device=<serial>" in answers[0][1]["error"]
+    assert answers[1][0] == 400
+    assert answers[2] == (200, {"removed": 1})
+    assert store.count() == 1

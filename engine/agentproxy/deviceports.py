@@ -155,13 +155,13 @@ class DeviceListeners:
         if self._listen(port):
             return port
         if self.ports.is_free(port):
-            raise DevicePortError("the proxy did not start listening on port {0} for the device: read_log shows why"
-                                  .format(port))
+            raise DevicePortError("the proxy did not start listening on port {0} for the device: read_log shows why; "
+                                  "restarting the engine opens it again".format(port))
         port = self.ports.assign(serial, avoid_current=True)
         if self._listen(port):
             return port
-        raise DevicePortError("the proxy did not start listening on port {0} for the device: read_log shows why"
-                              .format(port))
+        raise DevicePortError("the proxy did not start listening on port {0} for the device: read_log shows why; "
+                              "restarting the engine opens it again".format(port))
 
     def _listen(self, port):
         assigned = set(self.ports.ports())

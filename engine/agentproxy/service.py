@@ -582,8 +582,8 @@ class ProxyService:
             hints.append("device {0} has no port of its own yet, so the rule does not apply until device_proxy enable "
                          "with serial {0}".format(rule["device"]))
         elif "device" not in rule and len(device_ports) > 1:
-            hints.append("the rule applies to every device and this PC; with several devices set device so the others "
-                         "are not affected")
+            hints.append("the rule applies to every device and this PC; several devices have their own ports "
+                         "(proxy_status device_ports): set device so the others are not affected")
         if rule.get("remaining") == 0 and rule["enabled"]:
             hints.append("the rule has used all its times; pass reset_hits=true to start it again")
         if hints:
@@ -897,7 +897,8 @@ TOOLS = [
         "name": "proxy_status",
         "description": "AgentProxy state: version, proxy address and port, running, paused (charles: the proxy is off "
                        "while Charles runs and turns back on by itself), yield_to_charles (the tray setting is on), number of recorded flows, "
-                       "proxy rule counts (total, enabled, active, problem), CA certificate download URLs, monitor page URL.",
+                       "proxy rule counts (total, enabled, active, problem), CA certificate download URLs, monitor page URL, "
+                       "device_ports (serial → port on this PC for each device enabled so far).",
         "inputSchema": {"type": "object", "properties": {}},
         "handler": "status",
     },

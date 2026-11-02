@@ -21,8 +21,8 @@ from agentproxy.store import FlowFilter, FlowStore
 from conftest import make_record
 from test_device import FakeAdb
 
-XIAOMI = "iz6pfqea6xjbhahi"
-SAMSUNG = "R58X707W8GR"
+XIAOMI = "SERIALA0001"
+SAMSUNG = "emulator-5554"
 
 
 def ports_in(directory, busy=(), proxy_port=8890, api_port=8891):
@@ -42,7 +42,7 @@ class Listeners(DeviceListeners):
                                  wait=0.2)
 
     def _listening(self, port):
-        return self.listening is None or port in self.listening
+        return port is not None and (self.listening is None or port in self.listening)
 
 
 def test_ports_are_assigned_once_per_serial_and_kept_in_the_data_folder(tmp_path):
@@ -207,6 +207,28 @@ def test_reverse_left_on_the_shared_port_is_not_ready(tmp_path):
     assert control.apply("enable", XIAOMI)["ready"] is True
 
 
+def test_device_port_that_stopped_listening_is_not_ready(tmp_path):
+    adb = two_devices()
+    listeners = Listeners(ports_in(tmp_path))
+    main = {"listening": True}
+    control = DeviceControl(lambda: Settings(), lambda: main["listening"], runner=adb, finder=lambda path: "adb",
+                            ports=listeners)
+    control.apply("enable", XIAOMI)
+    listeners.listening = set()
+    state = control.apply("status", XIAOMI)
+    assert state["proxy_listening"] is False and state["ready"] is False
+    assert "does not listen on this device's port 8892" in state["hint"] and "read_log" in state["hint"]
+    adb.proxy[XIAOMI] = "10.0.0.5:8888"
+    assert "uses another proxy" in control.apply("status", XIAOMI)["hint"]
+    adb.proxy[XIAOMI] = "127.0.0.1:8890"
+    main["listening"] = False
+    paused = control.apply("status", XIAOMI)
+    assert paused["proxy_listening"] is False and "the device points to AgentProxy" in paused["hint"]
+    main["listening"] = True
+    listeners.listening = None
+    assert control.apply("status", XIAOMI)["ready"] is True
+
+
 def test_device_routed_by_an_older_version_is_not_ready_until_enable(tmp_path):
     adb = two_devices()
     adb.proxy[XIAOMI] = "127.0.0.1:8890"
@@ -214,6 +236,7 @@ def test_device_routed_by_an_older_version_is_not_ready_until_enable(tmp_path):
     control = control_with_ports(adb, tmp_path)
     state = control.apply("status", XIAOMI)
     assert state["pc_port"] is None and state["ready"] is False and not state["reverse_active"]
+    assert state["proxy_listening"] is True
     assert "no port of its own" in state["hint"] and "device_proxy enable" in state["hint"]
     enabled = control.apply("enable", XIAOMI)
     assert enabled["ready"] is True and adb.targets[(XIAOMI, 8890)] == enabled["pc_port"] == 8892
@@ -245,6 +268,16 @@ def test_disable_takes_off_a_device_routed_by_an_older_version(tmp_path):
     off = control_with_ports(adb, tmp_path).apply("disable", XIAOMI)
     assert off["changed"] is True and off["reverse_active"] is False and off["pc_port"] is None
     assert adb.reverse[XIAOMI] == [] and adb.proxy[XIAOMI] == ":0"
+
+
+def test_disable_reports_a_leftover_reverse_on_the_shared_port_as_a_change(tmp_path):
+    adb = two_devices()
+    control = control_with_ports(adb, tmp_path)
+    control.apply("enable", XIAOMI)
+    adb.proxy[XIAOMI] = ":0"
+    adb.targets[(XIAOMI, 8890)] = 8890
+    off = control.apply("disable", XIAOMI)
+    assert off["changed"] is True and off["pc_port"] == 8892 and adb.reverse[XIAOMI] == []
 
 
 def test_restore_after_charles_uses_the_device_port(tmp_path, caplog):

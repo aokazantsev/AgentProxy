@@ -207,14 +207,17 @@
   JSON), движок читает настройки при запуске. `disable` всегда пишет `:0` (прежнее значение — в `previous_proxy`, чужой прокси тоже снимается) и убирает
   reverse; «listener not found» — не ошибка. После любой операции состояние читается заново. Вызовы adb — по одному
   (блокировка), по 15 с, без окна, в `asyncio.to_thread`; `serial` — только `[A-Za-z0-9._:-]`, без ведущего дефиса.
-  Журнал: `device proxy <действие>: proxy agentproxy|other|off, reverse on|off`; отказ — `device_proxy refused: <вид>` (`DeviceError.kind`, `ToolError.log_text`): серийных номеров, вывода adb и пути `adb_path` в журнале нет — он уходит в отчёт о сбое, а «Что уходит в отчёте» их не называет. В ответе инструмента вывод adb — до 300 символов (`ERROR_CHARS`). В тестах `DeviceControl.runner` подменяется
+  Журнал: `device proxy <действие>: proxy agentproxy|other|off, reverse on|off, pc port N`; отказ — `device_proxy refused: <вид>` (`DeviceError.kind`, `ToolError.log_text`): серийных номеров, вывода adb и пути `adb_path` в журнале нет — он уходит в отчёт о сбое, а «Что уходит в отчёте» их не называет. В ответе инструмента вывод adb — до 300 символов (`ERROR_CHARS`). В тестах `DeviceControl.runner` подменяется
   фейком.
 - Устройства (1.7): у каждого устройства свой порт ПК. `deviceports.py`: `DevicePorts` хранит соответствие
-  `serial` → порт в `device-ports.json` (порты с 8892, занятый другой программой порт при старте заменяется новым),
+  `serial` → порт в `device-ports.json` (порты с порта прокси + 1, пропуская порт API, —
+  по умолчанию с 8892; новый — после наибольшего выданного; 32 устройства с вытеснением давнего; занятый другой
+  программой порт при старте заменяется новым),
   `DeviceListeners` открывает порт в mitmproxy на лету, без перезапуска движка. Телефон всегда смотрит на
   `127.0.0.1:<proxy_port>`, `enable` ведёт `adb reverse tcp:<proxy_port>` на порт устройства. Запрос получает поле
   `device` по локальному порту соединения; трафик ПК и общий порт — `device: null`. Фильтр `device` — в `list_flows`,
-  `wait_for_flow`, `wait_for_event`, `list_events`, мониторе; `check_connection` фильтрует по `serial` (параметр
+  `wait_for_flow`, `wait_for_event` без `flow`, мониторе; `list_events` и `wait_for_event` с `flow` и `device`
+  отказывают по потоку другого устройства; `check_connection` фильтрует по `serial` (параметр
   `device` там занят). У правила — область `device`, без неё правило действует на все устройства и ПК; `clear_flows`
   и `delete_rule all=true` принимают `device`. Пауза под Charles снимает и возвращает прокси каждому устройству на его
   порт; журнал пишет порт ПК, не серийник.

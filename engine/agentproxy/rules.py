@@ -638,8 +638,6 @@ class RuleSet:
 
     def clear(self, device=None):
         with self._lock:
-            if device is not None:
-                self._check_readable()
             removed = [rule["id"] for rule in self._rules if device is None or rule.get("device") == device]
             kept = [rule for rule in self._rules if rule["id"] not in removed]
             self._save(kept, self._next_id)
