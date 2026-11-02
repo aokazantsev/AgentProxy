@@ -57,7 +57,8 @@ class FakeAdb:
             return 0, ""
         if args[0] == "reverse":
             local = int(args[1].split(":")[1])
-            self.reverse.setdefault(serial, []).append(local)
+            if local not in self.reverse.setdefault(serial, []):
+                self.reverse[serial].append(local)
             self.targets[(serial, local)] = int(args[2].split(":")[1])
             return 0, "8890\n"
         return 1, "unknown"
@@ -148,7 +149,7 @@ def test_failed_proxy_write_keeps_reverse_that_was_there_before():
     adb.fail["shell settings put"] = "Permission denied"
     with pytest.raises(DeviceError):
         control(adb).apply("enable", None)
-    assert adb.reverse["emu-1"] == [8890, 8890]
+    assert adb.reverse["emu-1"] == [8890] and adb.targets[("emu-1", 8890)] == 8890
 
 
 def test_enable_is_refused_while_the_proxy_does_not_listen():

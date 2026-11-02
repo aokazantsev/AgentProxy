@@ -217,6 +217,25 @@ def test_device_routed_by_an_older_version_is_not_ready_until_enable(tmp_path):
     assert "no port of its own" in state["hint"] and "device_proxy enable" in state["hint"]
     enabled = control.apply("enable", XIAOMI)
     assert enabled["ready"] is True and adb.targets[(XIAOMI, 8890)] == enabled["pc_port"] == 8892
+    assert enabled["changed"] is True
+
+
+def test_failed_proxy_write_brings_back_the_reverse_of_an_older_version(tmp_path):
+    adb = two_devices()
+    adb.reverse[XIAOMI] = [8890]
+    adb.fail["shell settings put"] = "Permission denied"
+    with pytest.raises(DeviceError):
+        control_with_ports(adb, tmp_path).apply("enable", XIAOMI)
+    assert adb.reverse[XIAOMI] == [8890] and adb.targets[(XIAOMI, 8890)] == 8890
+
+
+def test_failed_restore_brings_back_the_reverse_it_found(tmp_path):
+    adb = two_devices()
+    adb.proxy[XIAOMI] = ":0"
+    adb.reverse[XIAOMI] = [8890]
+    adb.fail["shell settings put"] = "Permission denied"
+    assert control_with_ports(adb, tmp_path).restore([XIAOMI]) == []
+    assert adb.reverse[XIAOMI] == [8890] and adb.targets[(XIAOMI, 8890)] == 8890
 
 
 def test_disable_takes_off_a_device_routed_by_an_older_version(tmp_path):
