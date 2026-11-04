@@ -298,11 +298,12 @@
   `InstallTarget.IsUpdate` — запись и exe в папке (у соседей — `InstallFolder.IsOurs`: метка или exe), `AutostartByDefault`
   и строка автозапуска в `SetupForm`, `OnFormClosing` (установку не прерывает выключение Windows), `RunningApp.Stop`/`Kill`,
   `UpdateChecker.DescribeForLog`; `FolderRemoval` снимает «только чтение», как `UninstallProgram.ClearReadOnly` у соседей.
-  `AppLog`, `UserDataPaths`, `Autostart` — свои. Своё в обновлении — `AppIdentity.UpdateSetupArguments` (`/silent /notify`)
+  `UserDataPaths` и `Autostart` совпадают с AgentGlow (оба без прав, ключ Run), `AppLog` — свой. Своё в обновлении — `AppIdentity.UpdateSetupArguments` (`/silent /notify`)
   и `UpdateKeeps`.
 - Папку установки установщик и деинсталлятор считают своей только по маркеру `AgentProxy.install`, который пишет
   установщик, или по совпадению с записью в «Приложениях» — голого `AgentProxy.exe` мало: в репозитории он есть после
-  `build.cmd`. Системные программы (`cmd`, `ping`, `taskkill`, `explorer`) запускаются по полному пути (`SystemTools`):
+  `build.cmd`. Деинсталлятор стирает всё содержимое своей папки, кроме `Uninstall.exe` и маркера (`FolderRemoval`), —
+  у соседей только файлы программы по `payload.txt`; окно установщика об этом предупреждает. Системные программы (`cmd`, `ping`, `taskkill`, `explorer`) запускаются по полному пути (`SystemTools`):
   установщик запускается из «Загрузок», и одноимённый exe рядом с ним выполнился бы вместо системного. По той же
   причине установщик и деинсталлятор первой строкой ограничивают поиск DLL папкой System32 (для библиотек, которые грузятся после старта `Main`; тест проверяет, что вызов первый).
 - **Своё у проекта:** `src\AppIdentity.cs`, `installer\setup\SetupProfile.cs`, `installer\uninstall\UninstallProfile.cs`,
