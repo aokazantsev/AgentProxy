@@ -271,14 +271,14 @@
 
 ## Общее с другими pet-проектами
 
-Проект — один из четырёх pet-проектов (AgentVpnGuard, DevMonitor, AgentGlow, AgentProxy), они устроены одинаково.
+Проект — одна из четырёх утилит Windows (AgentVpnGuard, DevMonitor, AgentGlow, AgentProxy), устроенных одинаково. Общие
+правила и порядок публикации — `pets/dev-tools/pet-projects.md` личной базы знаний разработчика
+(`C:\Users\aokaz\ai-memory`). Здесь — чем AgentProxy отличается.
 
-- **Общие файлы** взяты у AgentGlow 2.x с заменой `namespace` (с AgentGlow 3.0 у него и AgentVpnGuard часть из них ушла
-  вперёд — `Installation`, `IsUninstalling` в `RunningApp`, `AboutForm`, `AppLog`, `UserDataPaths`; переносить по решению треда AgentProxy): `installer\setup\{SetupForm, Installation, InstallTarget,
-  Payload, SetupOption, SetupField, InstallRequest, SetupLog}.cs`, `installer\common\RunningApp.cs`,
-  `src\{AboutForm, CrashReportConsent, CrashUploader, CrashReport, AppLog, UserDataPaths, Autostart}.cs`,
-  `installer\make-payload.ps1`. Статистика использования и автопроверка обновлений — `src\{Usage, UsageDay,
-  UsageConsent, AutoUpdateCheck, UpdateWatcher}.cs`, одинаковые с AgentVpnGuard.
+- **Общие файлы, одинаковые с соседями** (кроме `namespace`): `installer\setup\{Payload, SetupOption, SetupField,
+  InstallRequest, SetupLog}.cs`, `src\{CrashReportConsent, CrashUploader, CrashReport, UpdateChecker, UpdateForm,
+  UpdateRelease, Usage, UsageDay, UsageConsent, AutoUpdateCheck, UpdateWatcher}.cs`, `installer\make-payload.ps1`
+  (`CrashReport` у AgentVpnGuard свой). Поменял — та же правка у соседей; тесты общего кода — здесь, `tests\csharp`.
 - **Статистика использования:** события — `Usage.Hit`/`Usage.Add` (общие имена `app.start`, `menu.*`, `settings.save`,
   `update.*`; свои — `menu.monitor`, `menu.claude_connect`, `menu.claude_disconnect`, `menu.engine_restart`,
   `tray.double_click`, `mcp.<инструмент>`), состояние — `Usage.SetState` (`TrayApplication.UpdateUsageState`).
@@ -291,13 +291,15 @@
   Статистика включена, а метки `usage-notice.txt` (папка данных) нет — трей один раз показывает уведомление о ней, когда
   движок вышел из `Starting` (не при `Stopped`), последним из уведомлений запуска, и пишет метку (клик — «Настройки…»): тихая установка и «Установить сейчас» окна с галкой не показывают. Клик по уведомлению делает то, что задало последнее
   показанное (`TrayApplication.ShowBalloon`), по `BalloonTipClosed` не сбрасывается.
-- **Осознанные отличия:** установка без прав (папка пользователя, `UninstallRegistration` пишет в HKCU, манифесты
-  `asInvoker`); тихий режим установщика и деинсталлятора (`SilentSetup`, `CommandLine`); `Update{Checker,Form,Release}.cs` —
-  общие с AgentVpnGuard, AgentGlow и DevMonitor (сверка sha256 по `digest` релиза, установщик в
-  `Загрузки\AgentProxy-<версия>\`, «Установить сейчас» через ShellExecute), `InstallTarget.IsUpdate` — запись и exe в папке (у соседей — `InstallFolder.IsOurs`: метка или exe), `AutostartByDefault` и строка автозапуска в `SetupForm`, `OnFormClosing` (установку не прерывает выключение Windows),
-  `RunningApp.Stop`/`Kill` и `UpdateChecker.DescribeForLog` — одинаковые у всех четырёх (тесты — здесь); `FolderRemoval`
-  снимает «только чтение», как `UninstallProgram.ClearReadOnly` у соседей; своё — `AppIdentity.UpdateSetupArguments`
-  (`/silent /notify`) и `UpdateKeeps`.
+- **Осознанные отличия:** `Installation`, `InstallTarget`, `InstallFolder`, `UninstallProgram`, `UninstallRegistration`,
+  `SystemTools`, `SetupProgram`, немного `SetupForm`, `RunningApp`, `AboutForm` расходятся с соседями: установка без прав
+  (папка пользователя, `UninstallRegistration` пишет в HKCU, манифесты `asInvoker`), тихий режим установщика и
+  деинсталлятора (`SilentSetup`, `CommandLine`). Поведение, общее у всех четырёх, переносится в своём виде:
+  `InstallTarget.IsUpdate` — запись и exe в папке (у соседей — `InstallFolder.IsOurs`: метка или exe), `AutostartByDefault`
+  и строка автозапуска в `SetupForm`, `OnFormClosing` (установку не прерывает выключение Windows), `RunningApp.Stop`/`Kill`,
+  `UpdateChecker.DescribeForLog`; `FolderRemoval` снимает «только чтение», как `UninstallProgram.ClearReadOnly` у соседей.
+  `AppLog`, `UserDataPaths`, `Autostart` — свои. Своё в обновлении — `AppIdentity.UpdateSetupArguments` (`/silent /notify`)
+  и `UpdateKeeps`.
 - Папку установки установщик и деинсталлятор считают своей только по маркеру `AgentProxy.install`, который пишет
   установщик, или по совпадению с записью в «Приложениях» — голого `AgentProxy.exe` мало: в репозитории он есть после
   `build.cmd`. Системные программы (`cmd`, `ping`, `taskkill`, `explorer`) запускаются по полному пути (`SystemTools`):
@@ -307,5 +309,5 @@
   `installer\payload.txt`, всё про движок.
 - Меню трея: состояние; Claude Code; «Открыть монитор», «Подключить/Отключить Claude Code», «Перезапустить движок»;
   «Настройки…», «Журнал», «Проверить обновление…», «Запускать при входе в Windows», «О приложении…»; «Выход».
-- Любая правка доводится до публикации: версия, `CHANGELOG.md`, тесты, установщик, проверка Защитником, коммит и push,
-  Release с `AgentProxySetup.exe`, при необходимости README, скриншоты и страница на aokazantsev.ru/pets.
+- Публикация — по `pet-projects.md`; установщик в Release — `AgentProxySetup.exe`. Ставить, удалять и переустанавливать
+  AgentProxy — только с согласия пользователя (раздел «Версии» выше).
