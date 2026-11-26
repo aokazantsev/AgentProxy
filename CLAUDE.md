@@ -271,7 +271,7 @@
 
 ## Общее с другими pet-проектами
 
-Проект — одна из четырёх утилит Windows (AgentVpnGuard, DevMonitor, AgentGlow, AgentProxy), устроенных одинаково. Общие
+Проект — одна из утилит Windows (AgentVpnGuard, DevMonitor, AgentGlow, AgentProxy, MeetingBell), устроенных одинаково. Общие
 правила и порядок публикации — `C:\Users\aokaz\dev-config\rules\pets.md` (правила окружения разработчика). Здесь — чем AgentProxy отличается.
 
 - **Общие файлы, одинаковые с соседями** (кроме `namespace`): `installer\setup\{Payload, SetupOption, SetupField,
@@ -293,7 +293,7 @@
 - **Осознанные отличия:** `Installation`, `InstallTarget`, `InstallFolder`, `UninstallProgram`, `UninstallRegistration`,
   `SystemTools`, `SetupProgram`, немного `SetupForm`, `RunningApp`, `AboutForm` расходятся с соседями: установка без прав
   (папка пользователя, `UninstallRegistration` пишет в HKCU, манифесты `asInvoker`), тихий режим установщика и
-  деинсталлятора (`SilentSetup`, `CommandLine`). Поведение, общее у всех четырёх, переносится в своём виде:
+  деинсталлятора (`SilentSetup`, `CommandLine`). Поведение, общее у всех утилит, переносится в своём виде:
   `InstallTarget.IsUpdate` — запись и exe в папке (у соседей — `InstallFolder.IsOurs`: метка или exe), `AutostartByDefault`
   и строка автозапуска в `SetupForm`, `OnFormClosing` (установку не прерывает выключение Windows), `RunningApp.Stop`/`Kill`,
   `UpdateChecker.DescribeForLog`; `FolderRemoval` снимает «только чтение», как `UninstallProgram.ClearReadOnly` у соседей.
