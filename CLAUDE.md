@@ -272,8 +272,7 @@
 ## Общее с другими pet-проектами
 
 Проект — одна из четырёх утилит Windows (AgentVpnGuard, DevMonitor, AgentGlow, AgentProxy), устроенных одинаково. Общие
-правила и порядок публикации — `pets/dev-tools/pet-projects.md` личной базы знаний разработчика
-(`C:\Users\aokaz\ai-memory`). Здесь — чем AgentProxy отличается.
+правила и порядок публикации — `C:\Users\aokaz\dev-config\rules\pets.md` (правила окружения разработчика). Здесь — чем AgentProxy отличается.
 
 - **Общие файлы, одинаковые с соседями** (кроме `namespace`): `installer\setup\{Payload, SetupOption, SetupField,
   InstallRequest, SetupLog}.cs`, `src\{CrashReportConsent, CrashUploader, CrashReport, UpdateChecker, UpdateForm,
@@ -310,5 +309,5 @@
   `installer\payload.txt`, всё про движок.
 - Меню трея: состояние; Claude Code; «Открыть монитор», «Подключить/Отключить Claude Code», «Перезапустить движок»;
   «Настройки…», «Журнал», «Проверить обновление…», «Запускать при входе в Windows», «О приложении…»; «Выход».
-- Публикация — по `pet-projects.md`; установщик в Release — `AgentProxySetup.exe`. Ставить, удалять и переустанавливать
+- Публикация — по `rules\pets.md`; установщик в Release — `AgentProxySetup.exe`. Ставить, удалять и переустанавливать
   AgentProxy — только с согласия пользователя (раздел «Версии» выше).
